@@ -199,7 +199,7 @@ class BatchESDAnalyzer:
             try:
                 # Load existing results
                 df = pd.read_csv(csv_path)
-                result.metrics = df.to_dict('list')
+                result.metrics = df.to_dict('list') # type: ignore
                 result.success = True
                 result.processing_time = 0
                 return result
@@ -211,7 +211,7 @@ class BatchESDAnalyzer:
         try:
             # Allocate GPUs if scheduling is enabled
             if self.use_gpu_scheduling:
-                allocated_gpus = self.gpu_scheduler.allocate_gpus()
+                allocated_gpus = self.gpu_scheduler.allocate_gpus() # type: ignore
                 # Use allocated GPUs for this model
                 device_ids_to_use = allocated_gpus
                 logger.info(f"Allocated GPUs {allocated_gpus} for {model_info.full_name}")
@@ -267,7 +267,7 @@ class BatchESDAnalyzer:
             
             # Release allocated GPUs if scheduling is enabled
             if self.use_gpu_scheduling and allocated_gpus:
-                self.gpu_scheduler.release_gpus(allocated_gpus)
+                self.gpu_scheduler.release_gpus(allocated_gpus) # type: ignore
                 logger.info(f"Released GPUs {allocated_gpus} for {model_info.full_name}")
             
             result.processing_time = time.time() - start_time
@@ -433,7 +433,7 @@ def load_models_from_csv(csv_path: str) -> List[ModelInfo]:
             full_name=row['full_name'],
             source_model=row.get('source_model'),
             base_model_relation=row.get('base_model_relation'),
-            index=idx
+            index=idx # type: ignore
         )
         models.append(model_info)
 
