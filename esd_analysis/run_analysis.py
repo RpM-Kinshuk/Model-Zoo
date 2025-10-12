@@ -45,6 +45,16 @@ Examples:
   # Process adapter model with base model specified
   python run_analysis.py --single-model peft-internal-testing/gpt2-lora-random \\
                         --base-model openai-community/gpt2 --output-dir ./results
+  
+  # GPU scheduling: Use max 4 GPUs from pool of 8, with 1 GPU per model
+  python run_analysis.py --model-list models.csv --output-dir ./results \\
+                        --use-gpu-scheduling --gpu-pool 0 1 2 3 4 5 6 7 \\
+                        --max-total-gpus 4 --gpus-per-model 1
+  
+  # GPU scheduling: Use max 4 GPUs, with 2 GPUs per model (2 models in parallel)
+  python run_analysis.py --model-list models.csv --output-dir ./results \\
+                        --use-gpu-scheduling --gpu-pool 0 1 2 3 4 5 6 7 \\
+                        --max-total-gpus 4 --gpus-per-model 2 --num-workers 2
         """
     )
 
@@ -134,6 +144,30 @@ Examples:
         "--max-gpu-workers",
         type=int,
         help="Maximum workers for parallel GPU computation"
+    )
+    
+    # GPU scheduling options
+    parser.add_argument(
+        "--use-gpu-scheduling",
+        action="store_true",
+        help="Enable dynamic GPU scheduling for batch processing"
+    )
+    parser.add_argument(
+        "--gpu-pool",
+        type=int,
+        nargs="+",
+        help="GPU pool to use for scheduling (e.g., --gpu-pool 0 1 2 3 4 5 6 7)"
+    )
+    parser.add_argument(
+        "--max-total-gpus",
+        type=int,
+        help="Maximum total GPUs to use from the pool (e.g., --max-total-gpus 4)"
+    )
+    parser.add_argument(
+        "--gpus-per-model",
+        type=int,
+        default=1,
+        help="Number of GPUs to allocate per model (default: 1)"
     )
 
     # Processing options
@@ -232,6 +266,11 @@ def main():
         device_ids=args.device_ids,
         max_workers=args.max_gpu_workers,
         checkpoint_frequency=args.checkpoint_freq,
+        # GPU scheduling parameters
+        use_gpu_scheduling=args.use_gpu_scheduling,
+        gpu_pool=args.gpu_pool,
+        max_total_gpus=args.max_total_gpus,
+        gpus_per_model=args.gpus_per_model,
     )
 
     # Process models
