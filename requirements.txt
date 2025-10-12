@@ -1,0 +1,26 @@
+# Core dependencies
+torch>=2.0.0
+numpy>=1.21.0
+pandas>=1.3.0
+tqdm>=4.62.0
+psutil>=5.9.0
+
+# HuggingFace ecosystem
+transformers>=4.30.0
+huggingface-hub>=0.16.0
+peft>=0.5.0
+accelerate>=0.20.0
+safetensors>=0.3.0
+
+# Logging and utilities
+logging
+dataclasses
+pathlib
+
+# Optional for visualization
+matplotlib>=3.5.0
+seaborn>=0.12.0
+
+# Optional for advanced features
+h5py>=3.7.0  # For HDF5 storage
+scikit-learn>=1.0.0  # For additional analysis
