@@ -28,7 +28,6 @@ from model_utils import (
     get_model_size_gb,
     detect_model_type
 )
-from gputracker.gpu_scheduler import GPUScheduledProcessor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,11 +108,6 @@ class BatchESDAnalyzer:
         device_ids: Optional[List[int]] = config.DEFAULT_GPU_IDS,
         max_workers: Optional[int] = config.MAX_WORKERS,
         checkpoint_frequency: int = config.CHECKPOINT_FREQUENCY,
-        # GPU scheduling parameters
-        gpu_pool: Optional[List[int]] = None,
-        max_total_gpus: Optional[int] = None,
-        gpus_per_model: int = 1,
-        use_gpu_scheduling: bool = False,
     ):
         """
         Initialize the batch analyzer.
@@ -128,10 +122,6 @@ class BatchESDAnalyzer:
             device_ids: GPU IDs to use for computation
             max_workers: Maximum parallel workers
             checkpoint_frequency: Save checkpoint every N models
-            gpu_pool: List of GPU IDs we're allowed to use (e.g., [0,1,2,3,4,5,6,7])
-            max_total_gpus: Maximum number of GPUs we can use at once from the pool
-            gpus_per_model: Number of GPUs to allocate per model
-            use_gpu_scheduling: Enable dynamic GPU scheduling
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -144,19 +134,6 @@ class BatchESDAnalyzer:
         self.parallel = parallel
         self.device_ids = device_ids
         self.max_workers = max_workers
-
-        # GPU scheduling
-        self.use_gpu_scheduling = use_gpu_scheduling
-        self.gpu_scheduler = None
-        if use_gpu_scheduling:
-            self.gpu_scheduler = GPUScheduledProcessor(
-                gpu_pool=gpu_pool,
-                max_total_gpus=max_total_gpus,
-                gpus_per_model=gpus_per_model,
-                memory_threshold=500,
-                max_checks=10,
-            )
-            logger.info(f"GPU scheduling enabled: pool={gpu_pool}, max_gpus={max_total_gpus}, per_model={gpus_per_model}")
 
         # Checkpoint settings
         self.checkpoint_frequency = checkpoint_frequency
@@ -199,7 +176,7 @@ class BatchESDAnalyzer:
             try:
                 # Load existing results
                 df = pd.read_csv(csv_path)
-                result.metrics = df.to_dict('list') # type: ignore
+                result.metrics = df.to_dict('list')
                 result.success = True
                 result.processing_time = 0
                 return result
@@ -207,17 +184,7 @@ class BatchESDAnalyzer:
                 logger.warning(f"Could not load existing results: {e}")
 
         model = None
-        allocated_gpus = None
         try:
-            # Allocate GPUs if scheduling is enabled
-            if self.use_gpu_scheduling:
-                allocated_gpus = self.gpu_scheduler.allocate_gpus() # type: ignore
-                # Use allocated GPUs for this model
-                device_ids_to_use = allocated_gpus
-                logger.info(f"Allocated GPUs {allocated_gpus} for {model_info.full_name}")
-            else:
-                device_ids_to_use = self.device_ids
-            
             # Check RAM availability
             if psutil.virtual_memory().available / 1e9 < config.RAM_THRESHOLD_GB:
                 logger.warning(f"Low RAM, waiting before processing {model_info.full_name}")
@@ -244,7 +211,7 @@ class BatchESDAnalyzer:
                 fix_fingers=None if self.fix_fingers == "DKS" else self.fix_fingers,
                 filter_zeros=self.filter_zeros,
                 parallel=self.parallel,
-                device_ids=device_ids_to_use,  # Use allocated or default GPUs
+                device_ids=self.device_ids,
                 max_workers=self.max_workers,
             )
 
@@ -264,12 +231,6 @@ class BatchESDAnalyzer:
         finally:
             # Clean up model
             safe_model_cleanup(model)
-            
-            # Release allocated GPUs if scheduling is enabled
-            if self.use_gpu_scheduling and allocated_gpus:
-                self.gpu_scheduler.release_gpus(allocated_gpus) # type: ignore
-                logger.info(f"Released GPUs {allocated_gpus} for {model_info.full_name}")
-            
             result.processing_time = time.time() - start_time
 
         return result
@@ -433,7 +394,7 @@ def load_models_from_csv(csv_path: str) -> List[ModelInfo]:
             full_name=row['full_name'],
             source_model=row.get('source_model'),
             base_model_relation=row.get('base_model_relation'),
-            index=idx # type: ignore
+            index=idx
         )
         models.append(model_info)
 
