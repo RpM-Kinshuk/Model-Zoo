@@ -12,10 +12,10 @@ RAM_THRESHOLD_GB = 80  # Wait if RAM below this
 
 # Model Loading Configuration
 DEFAULT_DTYPE = "float16"
-DEFAULT_DEVICE_MAP = "cpu"  # Load models on CPU first
-LOW_CPU_MEM_USAGE = True
+DEFAULT_DEVICE_MAP = "balanced"  # Load models on CPU first
+LOW_CPU_MEM_USAGE = False
 TRUST_REMOTE_CODE = True
-MAX_MEMORY = {"cpu": "64GiB", "cuda:0": "40GiB"}
+MAX_MEMORY = {"cpu": "64GiB", "cuda:0": "40GiB", "cuda:1": "40GiB", "cuda:2": "40GiB", "cuda:3": "40GiB"}
 OFFLOAD_FOLDER = "./.offload"
 
 # ESD Analysis Configuration

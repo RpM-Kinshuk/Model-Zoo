@@ -1,0 +1,24 @@
+# Core dependencies for ESD experiment framework
+torch>=2.0.0
+transformers>=4.30.0
+peft>=0.5.0
+accelerate>=0.20.0
+
+# HuggingFace ecosystem
+huggingface_hub>=0.16.0
+safetensors>=0.3.0
+
+# Data processing
+pandas>=1.5.0
+numpy>=1.23.0
+
+# GPU monitoring
+gpustat>=1.0.0
+
+# Utilities
+tqdm>=4.65.0
+requests>=2.28.0
+
+# Optional: For visualization
+# matplotlib>=3.5.0
+# seaborn>=0.12.0

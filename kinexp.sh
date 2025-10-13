@@ -4,7 +4,6 @@ set -e
 trap 'echo "Caught signal, exiting..."; exit 130' INT TERM
 
 echo "Running with max 4 GPUs total, 2 GPUs per model"
-
 python esd_analysis/run_analysis.py \
     --model-list atlas_metadata.csv \
     --output-dir ./results \
