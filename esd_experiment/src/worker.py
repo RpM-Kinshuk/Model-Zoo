@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from esd_experiment.src.model_loader import load_model, parse_model_string, safe_filename
-from esd_experiment.src.net_esd import net_esd_estimator
+from esd_estimator.net_esd_estimator import net_esd_estimator
 
 
 def parse_args():

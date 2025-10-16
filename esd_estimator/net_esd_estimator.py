@@ -5,7 +5,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from itertools import cycle
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterator, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,9 +27,10 @@ def net_esd_estimator(
         xmin_pos: int = 2,
         conv_norm: float = 0.5,
         filter_zeros: bool = False,
-        parallel: bool = False,
+        parallel: bool = True,
         device_ids: Optional[List[int]] = None,
         max_workers: Optional[int] = None,
+        filter_type: Optional[bool] = True,
 ) -> Dict[str, List[Any]]:
     """
     Highly optimized estimator for Empirical Spectral Density (ESD) and Alpha parameter,
@@ -46,6 +47,7 @@ def net_esd_estimator(
         parallel (bool, optional): If True, dispatch layer computations across multiple GPUs.
         device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
         max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
+        filter_type (bool, optional): If True, only process Conv1d, Conv2d, and Linear layers with aspect ratio filtering.
 
     Returns:
         dict: A dictionary containing the computed metrics for each layer.
@@ -59,15 +61,11 @@ def net_esd_estimator(
     print("=================================")
 
     with torch.no_grad():
-        eligible = [
-            (name, m, sum(p.numel() for p in m.parameters() if p.requires_grad))
-            for name, m in net.named_modules()
-            if hasattr(m, 'weight') and isinstance(m, (nn.Conv2d, nn.Linear, nn.Embedding))
-        ]
+        eligible = list(_iter_eligible_layers(net, filter_type))
         if not parallel or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
             layer_results = [
-                res for (name, m, params) in eligible
-                if (res := _compute_esd_for_weight(name, m.weight.data, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, None)) is not None
+                res for (name, w, params) in eligible
+                if (res := _compute_esd_for_weight(name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, None)) is not None
             ]
         else:
             used_cuda_ids = sorted(p.device.index for p in net.parameters() if getattr(p, 'is_cuda', False))
@@ -82,8 +80,8 @@ def net_esd_estimator(
 
             futures = []
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                for idx, (name, m, params) in enumerate(eligible):
-                    futures.append((idx, ex.submit(_compute_esd_for_weight, name, m.weight.data, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, next(dev_cycle))))
+                for idx, (name, w, params) in enumerate(eligible):
+                    futures.append((idx, ex.submit(_compute_esd_for_weight, name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, next(dev_cycle))))
                 ordered = [None] * len(futures)
                 for idx, fut in futures:
                     ordered[idx] = fut.result()
@@ -242,7 +240,63 @@ def _matrix_entropy_torch(evals: torch.Tensor, rank: torch.Tensor) -> torch.Tens
     return -torch.sum(p * torch.log(p)) / log_rank
 
 
-EPSILON = 1e-8
+def _iter_eligible_layers(net: nn.Module, filter_type: Optional[bool] = True) -> Iterator[Tuple[str, torch.Tensor, int]]:
+    """Yield (name, weight_tensor_or_slice, params_count) for eligible layers.
+
+    Mirrors the behavior of get_module_names_shapes() and attn_split_qkv() from
+    ESD-Independence/WW_LLMs-main/WW_LLMs-main/utils.py but implemented efficiently
+    without deepcopy. Also applies the Linear high-aspect-ratio classifier skip
+    used in their estimator (max/min >= 8).
+    """
+    for name, module in net.named_modules():
+        if filter_type:
+            if type(module).__name__.lower() not in ["conv2d", "conv1d", "linear"]:
+                continue
+        if not hasattr(module, "weight"):
+            continue
+        # weight = module.weight.data
+        weight_param = getattr(module, "weight", None)
+        if not isinstance(weight_param, torch.nn.Parameter):
+            continue
+        weight: torch.Tensor = weight_param.detach()
+        if weight.ndim <= 1:
+            continue
+
+        if filter_type:
+            if type(module).__name__.lower() == "linear":
+                mx, mn = max(weight.shape), min(weight.shape)
+                if mn > 0 and (mx / mn) >= 8:
+                    continue
+
+        name_l = name.lower()
+        bias = getattr(module, "bias", None)
+        bias_params = bias.numel() if (bias is not None and getattr(bias, "requires_grad", False)) else 0
+
+        if ("attn" in name_l or "attention" in name_l) and weight.ndim == 2:
+            m, n = weight.shape
+            emitted = False
+            if m == n // 3:
+                dim = m
+                slices = [
+                    (f"{name}_q", weight[:, :dim]),
+                    (f"{name}_k", weight[:, dim:2*dim]),
+                    (f"{name}_v", weight[:, 2*dim:]),
+                ]
+                emitted = True
+            elif n == m // 3:
+                dim = n
+                slices = [
+                    (f"{name}_q", weight[:dim, :]),
+                    (f"{name}_k", weight[dim:2*dim, :]),
+                    (f"{name}_v", weight[2*dim:, :]),
+                ]
+                emitted = True
+            if emitted:
+                for sname, sw in slices:
+                    yield sname, sw, sw.numel()
+                continue
+
+        yield name, weight, (weight.numel() + bias_params)
 
 
 def merge_lora_weights(model):
