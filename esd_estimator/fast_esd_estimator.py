@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import logging
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from itertools import cycle
 from typing import List, Optional, Dict, Any, Iterator, Tuple
@@ -18,6 +19,9 @@ RESULT_KEYS = [
     'num_evals', 'spectral_norm', 'stable_rank', 'xmax', 'xmin', 'params', 'eigs'
 ]
 
+# Per-device locks to serialize eigendecomposition on each CUDA device.
+_DEVICE_LOCKS: Dict[int, threading.Lock] = {}
+
 ### -- Main NetESD Estimator Function -- ###
 def net_esd_estimator(
         net: nn.Module,
@@ -27,7 +31,7 @@ def net_esd_estimator(
         xmin_pos: int = 2,
         conv_norm: float = 0.5,
         filter_zeros: bool = False,
-        parallel: bool = True,
+        parallel: bool = False,
         device_ids: Optional[List[int]] = None,
         max_workers: Optional[int] = None,
         filter_type: Optional[bool] = True,
@@ -47,7 +51,6 @@ def net_esd_estimator(
         parallel (bool, optional): If True, dispatch layer computations across multiple GPUs.
         device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
         max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
-        filter_type (bool, optional): If True, only process Conv1d, Conv2d, and Linear layers with aspect ratio filtering.
 
     Returns:
         dict: A dictionary containing the computed metrics for each layer.
@@ -115,8 +118,21 @@ def _squared_singular_values(matrix: torch.Tensor) -> torch.Tensor:
             G = matrix @ matrix.transpose(-1, -2)
         else:
             G = matrix.transpose(-1, -2) @ matrix
+        # Symmetrize and enforce contiguity
         G = 0.5 * (G + G.transpose(-1, -2))
-        evals = torch.linalg.eigvalsh(G)
+        G = G.contiguous()
+        try:
+            evals = torch.linalg.eigvalsh(G)
+        except RuntimeError:
+            # Retry with a tiny diagonal jitter to fix potential numerical pathologies
+            try:
+                eps = torch.finfo(G.dtype).eps
+                I = torch.eye(G.shape[-1], device=G.device, dtype=G.dtype)
+                evals = torch.linalg.eigvalsh(G + eps * I)
+            except Exception:
+                # Fallback: exact SVD path
+                svals = torch.linalg.svdvals(matrix)
+                return torch.square(svals)
         return torch.clamp(evals, min=0)
     elif matrix.ndim == 3:
         B, M, N = matrix.shape
@@ -124,9 +140,24 @@ def _squared_singular_values(matrix: torch.Tensor) -> torch.Tensor:
             G = torch.matmul(matrix, matrix.transpose(-1, -2))  # [B, M, M]
         else:
             G = torch.matmul(matrix.transpose(-1, -2), matrix)  # [B, N, N]
+        # Symmetrize and enforce contiguity
         G = 0.5 * (G + G.transpose(-1, -2))
-        evals = torch.linalg.eigvalsh(G)
-        return torch.clamp(evals, min=0).reshape(-1)
+        G = G.contiguous()
+        try:
+            evals = torch.linalg.eigvalsh(G)
+            return torch.clamp(evals, min=0).reshape(-1)
+        except RuntimeError:
+            # Retry with jitter
+            try:
+                eps = torch.finfo(G.dtype).eps
+                eye_n = G.shape[-1]
+                I = torch.eye(eye_n, device=G.device, dtype=G.dtype).expand(B, eye_n, eye_n)
+                evals = torch.linalg.eigvalsh(G + eps * I)
+                return torch.clamp(evals, min=0).reshape(-1)
+            except Exception:
+                # Fallback: exact batched SVD path
+                svals = torch.linalg.svdvals(matrix)
+                return torch.square(svals).reshape(-1)
     else:
         logger.warning(f"_squared_singular_values: unsupported shape {matrix.shape}")
         return torch.empty(0, device=matrix.device, dtype=matrix.dtype)
@@ -169,7 +200,13 @@ def _compute_esd_for_weight(
         #     # Apply normalization in-place
         #     matrix.mul_(math.sqrt(conv_norm))
 
-        eigs = _squared_singular_values(matrix)
+        # Serialize eigendecomposition per CUDA device to avoid rare concurrency issues
+        if use_cuda:
+            lock = _DEVICE_LOCKS.setdefault(device.index, threading.Lock())  # type: ignore[arg-type]
+            with lock:
+                eigs = _squared_singular_values(matrix)
+        else:
+            eigs = _squared_singular_values(matrix)
 
         nz_eigs = eigs[eigs > EVALS_THRESH] if filter_zeros else eigs
         if nz_eigs.numel() == 0: nz_eigs = eigs
