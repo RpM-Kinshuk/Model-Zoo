@@ -14,6 +14,9 @@ from typing import Optional
 import torch
 import pandas as pd
 import numpy as np
+import h5py
+import json
+import re
 
 # Add project root to path
 SCRIPT_DIR = Path(__file__).parent
@@ -22,8 +25,8 @@ EXPERIMENT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from esd_experiment.src.model_loader import load_model, parse_model_string, safe_filename
-from esd_estimator.net_esd_estimator import net_esd_estimator
+from model_loader import load_model, parse_model_string, safe_filename
+from esd_estimator.fast_esd_estimator import net_esd_estimator
 
 
 def parse_args():
@@ -44,7 +47,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Eigenvalue threshold")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins")
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter zeros")
-    parser.add_argument("--parallel_esd", action="store_true", default=True,help="Use parallel ESD")
+    parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD")
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
@@ -53,15 +56,107 @@ def parse_args():
     return parser.parse_args()
 
 
+# ------------------------------------------------------------
+# Minimal helpers to build and save alpha matrices as .h5 files
+# (mirrors ESD-Independence/Classification/run_metric.py format)
+# ------------------------------------------------------------
+
+PREFIX_CANDIDATES = {"layers", "layer", "h", "block", "blocks"}
+
+def parse_longname(longname: str):
+    """
+    Parse a module longname into (layer:int, module:str).
+    Examples it can handle (tokens before the layer index include one of PREFIX_CANDIDATES):
+        model.layers.5.mlp.up_proj
+        transformer.h.10.attn.q_proj
+        model.decoder.layers.3.self_attn.q_proj
+        blocks.7.mlp.fc_in
+    Returns (None, None) if it cannot parse.
+    """
+    if not isinstance(longname, str):
+        return (None, None)
+    tokens = longname.strip().split(".")
+    for i in range(len(tokens) - 2):
+        prefix, maybe_idx = tokens[i], tokens[i + 1]
+        if prefix in PREFIX_CANDIDATES and re.fullmatch(r"\d+", maybe_idx):
+            layer = int(maybe_idx)
+            module = ".".join(tokens[i + 2:])
+            return (layer, module) if module else (None, None)
+    # fallback
+    for i, tk in enumerate(tokens):
+        if re.fullmatch(r"\d+", tk) and i > 0 and tokens[i - 1] in PREFIX_CANDIDATES:
+            layer = int(tk)
+            module = ".".join(tokens[i + 1:])
+            return (layer, module) if module else (None, None)
+    return (None, None)
+
+def build_tensor_from_pairs(longnames, alphas):
+    """
+    Convert (longname, alpha) lists into a dense matrix:
+      - Deduplicate (layer, module) by averaging alpha.
+      - Rows: 0..max_layer; Columns: sorted unique module names.
+    Returns (mat [L,M], module_names [list[str]], num_layers [int]).
+    """
+    if (not longnames) or (not alphas) or (len(longnames) != len(alphas)):
+        raise RuntimeError("after deduplication and averaging")
+
+    df = pd.DataFrame({"longname": longnames, "alpha": alphas})
+    df = df.dropna(subset=["longname", "alpha"])  # type: ignore[arg-type]
+
+    parsed = df["longname"].apply(parse_longname)
+    df["layer"] = [p[0] for p in parsed]
+    df["module"] = [p[1] for p in parsed]
+    df = df.dropna(subset=["layer", "module"])  # type: ignore[arg-type]
+    df["layer"] = df["layer"].astype(int)
+
+    if df.empty:
+        raise RuntimeError("No valid (layer, module) rows after parsing longname")
+
+    df_pairs = (
+        df.groupby(["layer", "module"], as_index=False)
+          .agg(alpha=("alpha", "mean"))
+          .sort_values(by=["layer", "module"]).reset_index(drop=True)
+    )
+
+    module_names = sorted(df_pairs["module"].unique().tolist())
+    num_modules = len(module_names)
+    num_layers = int(df_pairs["layer"].max()) + 1
+
+    mat = np.full((num_layers, num_modules), np.nan, dtype=float)
+    module_index = {m: j for j, m in enumerate(module_names)}
+    for _, row in df_pairs.iterrows():
+        i = int(row["layer"]); j = module_index[row["module"]]
+        mat[i, j] = float(row["alpha"])
+
+    return mat, module_names, num_layers
+
+def save_h5(h5_path: Path, mat: np.ndarray, module_names, num_layers: int, file_attrs: dict):
+    h5_path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(h5_path, "w") as h5:
+        dset = h5.create_dataset("alpha", data=mat)
+        dset.attrs["num_layers"] = int(num_layers)
+        dset.attrs["num_modules"] = int(len(module_names))
+        dset.attrs["missing_value"] = "NaN"
+        dset.attrs["module_names_json"] = json.dumps(module_names, ensure_ascii=False)
+        h5.attrs["format_version"] = "1.0"
+        for k, v in (file_attrs or {}).items():
+            try:
+                h5.attrs[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v)
+            except Exception:
+                pass
+
+
 def save_results(
     metrics: dict,
     output_path: Path,
     model_id: str,
     is_adapter: bool,
-    source_model: Optional[str] = None
+    source_model: Optional[str] = None,
+    base_model_relation: str = "",
+    fix_fingers: str = "",
 ):
     """
-    Save ESD metrics to CSV file.
+    Save ESD metrics to CSV file and write alpha matrix to HDF5.
     
     Args:
         metrics: Dictionary of metrics from net_esd_estimator
@@ -69,6 +164,8 @@ def save_results(
         model_id: Model identifier
         is_adapter: Whether this is an adapter model
         source_model: Base model for adapters
+        base_model_relation: Relation tag (e.g., adapter/base/finetune)
+        fix_fingers: xmin strategy used (DKS/xmin_mid/xmin_peak)
     """
     # Prepare data for DataFrame
     data = {}
@@ -115,6 +212,38 @@ def save_results(
             print(f"  Std: {alpha_values.std():.4f}")
             print(f"  Range: [{alpha_values.min():.4f}, {alpha_values.max():.4f}]")
             print(f"  Layers: {len(alpha_values)}")
+
+    # ---- Also write per-model H5 (alpha matrix) in output_dir/metrics ----
+    try:
+        longnames = metrics.get("longname", [])
+        alphas = metrics.get("alpha", [])
+        # strip trailing None if present
+        if longnames and longnames[-1] is None:
+            longnames = longnames[:-1]
+        if alphas and alphas[-1] is None:
+            alphas = alphas[:-1]
+        if len(longnames) != len(alphas):
+            n = min(len(longnames), len(alphas))
+            longnames, alphas = longnames[:n], alphas[:n]
+
+        if longnames and alphas:
+            mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+            h5_dir = output_path.parent / "metrics"
+            h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
+            relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
+            file_attrs = {
+                "full_name": model_id,
+                "source_model": source_model or "",
+                "base_model_relation": relation_attr,
+                "fix_fingers": fix_fingers,
+                "alpha_only": "true",
+            }
+            save_h5(h5_path, mat, module_names, num_layers, file_attrs)
+            print(f"Saved H5 alpha matrix to: {h5_path}")
+        else:
+            print("Skipping H5 save (no longname/alpha)")
+    except Exception as e:
+        print(f"Failed to write H5 for {model_id}: {e}")
 
 
 def record_failure(output_dir: Path, model_id: str, error: str):
@@ -229,7 +358,9 @@ def main():
                 output_file,
                 display_name,
                 is_adapter,
-                source_model if is_adapter else None
+                source_model if is_adapter else None,
+                base_model_relation=args.base_model_relation or "",
+                fix_fingers=args.fix_fingers or "",
             )
             
             success = True
