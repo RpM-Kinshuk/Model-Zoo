@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import logging
 import math
-import threading
+import queue
+import logging
+import multiprocessing as mp
+from multiprocessing import get_context
+from multiprocessing.process import BaseProcess
 from concurrent.futures import ThreadPoolExecutor
-from itertools import cycle
 from typing import List, Optional, Dict, Any, Iterator, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -19,8 +21,9 @@ RESULT_KEYS = [
     'num_evals', 'spectral_norm', 'stable_rank', 'xmax', 'xmin', 'params', 'eigs'
 ]
 
-# Per-device locks to serialize eigendecomposition on each CUDA device.
-_DEVICE_LOCKS: Dict[int, threading.Lock] = {}
+# Concurrency model:
+# - Thread backend: one worker thread per GPU (no per-device locks needed).
+# - Process backend: one subprocess per GPU (isolated CUDA contexts).
 
 ### -- Main NetESD Estimator Function -- ###
 def net_esd_estimator(
@@ -35,6 +38,8 @@ def net_esd_estimator(
         device_ids: Optional[List[int]] = None,
         max_workers: Optional[int] = None,
         filter_type: Optional[bool] = True,
+        save_eigs: Optional[bool] = True,
+        backend: Optional[str] = "thread",
 ) -> Dict[str, List[Any]]:
     """
     Highly optimized estimator for Empirical Spectral Density (ESD) and Alpha parameter,
@@ -51,6 +56,7 @@ def net_esd_estimator(
         parallel (bool, optional): If True, dispatch layer computations across multiple GPUs.
         device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
         max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
+        backend (str, optional): 'thread' for one thread per GPU; 'process' for one subprocess per GPU.
 
     Returns:
         dict: A dictionary containing the computed metrics for each layer.
@@ -60,7 +66,7 @@ def net_esd_estimator(
     print(f"Running optimized multi-GPU ESD estimator with:")
     print(f"  fix_fingers: {fix_fingers}, xmin_pos: {xmin_pos}, filter_zeros: {filter_zeros}")
     print(
-        f"  parallel: {parallel}, device_ids: {device_ids if device_ids else 'auto'}, max_workers: {max_workers if max_workers else 'auto'}")
+        f"  parallel: {parallel}, device_ids: {device_ids if device_ids else 'auto'}, max_workers: {max_workers if max_workers else 'auto'}, backend: {backend}")
     print("=================================")
 
     with torch.no_grad():
@@ -68,7 +74,7 @@ def net_esd_estimator(
         if not parallel or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
             layer_results = [
                 res for (name, w, params) in eligible
-                if (res := _compute_esd_for_weight(name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, None)) is not None
+                if (res := _compute_esd_for_weight(name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, None, save_eigs)) is not None
             ]
         else:
             used_cuda_ids = sorted(p.device.index for p in net.parameters() if getattr(p, 'is_cuda', False))
@@ -78,23 +84,75 @@ def net_esd_estimator(
             else:
                 # Prefer GPUs not hosting the model; if none, fall back to all GPUs
                 pool = [i for i in all_ids if i not in used_cuda_ids] or all_ids
-            workers = max_workers or len(pool) or 1
-            dev_cycle = cycle(pool)
+            workers = min((max_workers or len(pool) or 1), len(pool))
 
-            futures = []
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                # Size-aware scheduling: dispatch larger layers first for better load balance
-                tasks = [(idx, name, w, params) for idx, (name, w, params) in enumerate(eligible)]
-                for orig_idx, name, w, params in sorted(tasks, key=lambda t: t[3], reverse=True):
-                    futures.append((orig_idx, ex.submit(
-                        _compute_esd_for_weight,
-                        name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos,
-                        conv_norm, filter_zeros, params, next(dev_cycle)
-                    )))
-                ordered = [None] * len(tasks)
-                for orig_idx, fut in futures:
-                    ordered[orig_idx] = fut.result()
-            layer_results = [r for r in ordered if r is not None]
+            # Size- and cost-aware task ordering (largest compute first)
+            tasks = []
+            for idx, (name, w, params) in enumerate(eligible):
+                cost = _estimate_compute_cost(w)
+                tasks.append((idx, name, w, params, cost))
+            tasks_sorted = sorted(tasks, key=lambda t: t[4], reverse=True)
+
+            if backend == "thread":
+                # One worker thread per GPU; each bound to a fixed device id; shared task queue.
+                tasks_q: "queue.Queue[tuple]" = queue.Queue()
+                for t in tasks_sorted:
+                    tasks_q.put(t)
+                ordered: List[Optional[Dict[str, Any]]] = [None] * len(tasks)
+
+                def _thread_worker_loop(dev_id: int) -> None:
+                    while True:
+                        try:
+                            orig_idx, name, w, params, _ = tasks_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        res = _compute_esd_for_weight(
+                            name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos,
+                            conv_norm, filter_zeros, params, dev_id, save_eigs
+                        )
+                        ordered[orig_idx] = res
+
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = [ex.submit(_thread_worker_loop, dev_id) for dev_id in pool[:workers]]
+                    for f in futs:
+                        f.result()
+                layer_results = [r for r in ordered if r is not None]
+
+            elif backend == "process":
+                # One subprocess per GPU; shared task/result queues; spawn context for CUDA safety.
+                ctx = get_context('spawn')
+                task_q: mp.Queue = ctx.Queue(maxsize=max(16, 2 * workers))
+                result_q: mp.Queue = ctx.Queue()
+                procs: List[BaseProcess] = []
+
+                for dev_id in pool[:workers]:
+                    p = ctx.Process(target=_mp_worker, args=(
+                        task_q, result_q, dev_id,
+                        EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros
+                    ))
+                    p.daemon = False
+                    p.start()
+                    procs.append(p)
+
+                for orig_idx, name, w, params, _ in tasks_sorted:
+                    # Send CPU numpy arrays to subprocesses (copy). For very large layers, consider shared memory.
+                    task_q.put((orig_idx, name, w.detach().cpu().numpy(), params))
+
+                # Send termination sentinels
+                for _ in procs:
+                    task_q.put(None)
+
+                ordered: List[Optional[Dict[str, Any]]] = [None] * len(tasks)
+                for _ in range(len(tasks)):
+                    idx, res = result_q.get()
+                    ordered[idx] = res
+
+                for p in procs:
+                    p.join()
+
+                layer_results = [r for r in ordered if r is not None]
+            else:
+                raise ValueError(f"Unknown backend: {backend}. Expected 'thread' or 'process'.")
 
         for r in layer_results:
             for key, value in r.items():
@@ -166,7 +224,7 @@ def _squared_singular_values(matrix: torch.Tensor) -> torch.Tensor:
 def _compute_esd_for_weight(
         name: str, weight_t: torch.Tensor, EVALS_THRESH: float, bins: int,
         fix_fingers: Optional[str], xmin_pos: int, conv_norm: float,
-        filter_zeros: bool, params: int, device_id: Optional[int]
+        filter_zeros: bool, params: int, device_id: Optional[int], save_eigs: Optional[bool] = True
 ) -> Optional[Dict[str, Any]]:
     """Compute ESD-related metrics for a single layer's weight on the specified device.
     Returns a dict with metrics for that layer, or None if not enough eigenvalues.
@@ -200,13 +258,8 @@ def _compute_esd_for_weight(
         #     # Apply normalization in-place
         #     matrix.mul_(math.sqrt(conv_norm))
 
-        # Serialize eigendecomposition per CUDA device to avoid rare concurrency issues
-        if use_cuda:
-            lock = _DEVICE_LOCKS.setdefault(device.index, threading.Lock())  # type: ignore[arg-type]
-            with lock:
-                eigs = _squared_singular_values(matrix)
-        else:
-            eigs = _squared_singular_values(matrix)
+        # Single in-flight op per GPU is enforced by per-GPU workers; no locks required.
+        eigs = _squared_singular_values(matrix)
 
         nz_eigs = eigs[eigs > EVALS_THRESH] if filter_zeros else eigs
         if nz_eigs.numel() == 0: nz_eigs = eigs
@@ -298,8 +351,40 @@ def _compute_esd_for_weight(
             'norm': fnorm, 'num_evals': N, 'spectral_norm': spectral_norm,
             'stable_rank': fnorm / spectral_norm if spectral_norm > 0 else 0.0,
             'xmax': nz_eigs[-1].item(), 'xmin': nz_eigs[0].item(),
-            'params': params, 'eigs': nz_eigs.detach().cpu().numpy(),
+            'params': params, 'eigs': nz_eigs.detach().cpu().numpy() if save_eigs else None,
         }
+
+
+def _mp_worker(task_q: "mp.Queue", result_q: "mp.Queue", dev_id: int,
+               EVALS_THRESH: float, bins: int, fix_fingers: Optional[str], xmin_pos: int,
+               conv_norm: float, filter_zeros: bool) -> None:
+    """Multiprocessing worker: binds to a GPU device and processes tasks from a queue.
+
+    Each task is (orig_idx, name, weight_numpy, params). Results are (orig_idx, result_dict_or_None).
+    """
+    # Bind CUDA device in subprocess (no-op if CUDA not available)
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.set_device(dev_id)
+        except Exception as e:
+            logger.warning(f"_mp_worker: failed to set CUDA device {dev_id}: {e}")
+
+    while True:
+        item = task_q.get()
+        if item is None:
+            break
+        orig_idx, name, w_np, params = item
+        try:
+            # Reconstruct tensor on CPU and let _compute_esd_for_weight handle H2D with pinning
+            weight_t = torch.from_numpy(w_np)
+            res = _compute_esd_for_weight(
+                name, weight_t, EVALS_THRESH, bins, fix_fingers, xmin_pos,
+                conv_norm, filter_zeros, params, dev_id
+            )
+        except Exception as e:
+            logger.exception(f"_mp_worker: error processing {name} on cuda:{dev_id}")
+            res = None
+        result_q.put((orig_idx, res))
 
 
 def _matrix_rank_torch(svals: torch.Tensor, N: int, tol: Optional[float] = None) -> torch.Tensor:
@@ -377,3 +462,25 @@ def _iter_eligible_layers(net: nn.Module, filter_type: Optional[bool] = True) ->
                 continue
 
         yield name, weight, (weight.numel() + bias_params)
+
+
+def _estimate_compute_cost(weight: torch.Tensor) -> int:
+    """Estimate dense eigenspectrum compute cost for scheduling.
+
+    Using Gram-based path in `_squared_singular_values`:
+      - For a 2D matrix A in R^{M x N}, we form G of size min(M,N) and run eigvalsh.
+        Cost ~ O(min(M,N)^2 * max(M,N)) to build G + O(min(M,N)^3) for eigvalsh.
+      - For Conv weights (O, I, kH, kW) we create B = kH*kW slices of (O x I) matrices.
+        Total cost ~ B * [min(O,I)^2 * max(O,I) + min(O,I)^3].
+    We return an integer proxy of the above expression.
+    """
+    if weight.ndim == 2:
+        M, N = int(weight.shape[0]), int(weight.shape[1])
+        m, n = (M, N) if M <= N else (N, M)
+        return m*m*n + m*m*m
+    elif weight.ndim > 2:
+        O, I = int(weight.shape[0]), int(weight.shape[1])
+        B = int(np.prod(weight.shape[2:]))
+        m, n = (O, I) if O <= I else (I, O)
+        return B * (m*m*n + m*m*m)
+    return int(weight.numel())
