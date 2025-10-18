@@ -1,4 +1,18 @@
+import os, psutil
+
+# NUM_WORKERS = 1  # Adjust this based on the workload and system capabilities
+# physical_cores = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 1
+# per_worker = max(1, physical_cores // max(1, NUM_WORKERS))  # NUM_WORKERS = threads or processes to use
+
+# os.environ["OMP_NUM_THREADS"] = str(per_worker)
+# os.environ["MKL_NUM_THREADS"] = str(per_worker)
+# os.environ["OPENBLAS_NUM_THREADS"] = str(per_worker)
+# os.environ["NUMEXPR_NUM_THREADS"] = str(per_worker)
+# os.environ["VECLIB_MAXIMUM_THREADS"] = str(per_worker)  # macOS
+
 import torch
+# torch.set_num_threads(per_worker)
+# torch.set_num_interop_threads(1)
 import torch.nn as nn
 import numpy as np
 import math
