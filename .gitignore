@@ -155,7 +155,7 @@ venv.bak/
 results/
 example_results/
 test_results/
-*.csv
+# *.csv
 !examples/*.csv
 
 # Logs
