@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--bins", type=int, default=100, help="Number of bins")
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter zeros")
     parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD")
+    parser.add_argument("--use_svd", action="store_true", default=True, help="Use SVD for ESD")
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
@@ -346,6 +347,7 @@ def main():
                 bins=args.bins,
                 fix_fingers=fix_fingers_value,
                 filter_zeros=args.filter_zeros,
+                use_svd=args.use_svd,
                 parallel=args.parallel_esd,
             )
             

@@ -297,39 +297,3 @@ def _iter_eligible_layers(net: nn.Module, filter_type: Optional[bool] = True) ->
                 continue
 
         yield name, weight, (weight.numel() + bias_params)
-
-
-def merge_lora_weights(model):
-    """Merge LoRA weights into the base model layers in-place."""
-    lora_layers = {name: module for name, module in model.named_modules() if 'lora_' in name}
-    if not lora_layers:
-        return
-
-    logger.info("Merging LoRA weights...")
-    merged_layers = set()
-
-    for name, module in model.named_modules():
-        if "lora_A" in name and name not in merged_layers:
-            base_name = name.rsplit('.lora_A', 1)[0]
-            lora_b_name = name.replace("lora_A", "lora_B")
-
-            base_module = dict(model.named_modules()).get(base_name)
-            lora_a_module = module
-            lora_b_module = lora_layers.get(lora_b_name)
-
-            if base_module and lora_a_module and lora_b_module:
-                logger.info(f"Merging LoRA for {base_name}")
-                if hasattr(base_module, 'weight'):
-                    base_weights = base_module.weight.data
-                    lora_a_weights = lora_a_module.weight.data
-                    lora_b_weights = lora_b_module.weight.data
-                    
-                    # scaling is often stored in the peft config, but not directly in the layer.
-                    # Common default is 1.0. Some models might have a scaling factor.
-                    # Here we assume scaling is implicitly handled or is 1.
-                    lora_update = lora_b_weights @ lora_a_weights
-                    base_module.weight.data += lora_update
-
-                    # Mark as merged to avoid double merging
-                    merged_layers.add(name)
-                    merged_layers.add(lora_b_name)

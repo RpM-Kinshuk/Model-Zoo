@@ -85,8 +85,8 @@ Columns:
     parser.add_argument(
         "--max_check",
         type=int,
-        default=10,
-        help="Number of checks to confirm GPU is free (default: 10)"
+        default=5,
+        help="Number of checks to confirm GPU is free (default: 5)"
     )
     
     # ESD configuration
@@ -116,8 +116,15 @@ Columns:
         help="Filter near-zero eigenvalues (default: True)"
     )
     parser.add_argument(
+        "--use_svd",
+        action="store_true",
+        default=True,
+        help="Use SVD for ESD (default: True)"
+    )
+    parser.add_argument(
         "--parallel_esd",
         action="store_true",
+        default=True,
         help="Use parallel ESD computation across multiple GPUs (experimental)"
     )
     
@@ -228,7 +235,10 @@ def generate_commands(
         
         if args.filter_zeros:
             cmd_parts.append("--filter_zeros")
-        
+
+        if args.use_svd:
+            cmd_parts.append("--use_svd")
+
         if args.parallel_esd:
             cmd_parts.append("--parallel_esd")
         

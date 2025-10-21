@@ -1,5 +1,4 @@
-import os, psutil
-
+# import os, psutil
 # NUM_WORKERS = 1  # Adjust this based on the workload and system capabilities
 # physical_cores = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 1
 # per_worker = max(1, physical_cores // max(1, NUM_WORKERS))  # NUM_WORKERS = threads or processes to use
@@ -48,12 +47,13 @@ def net_esd_estimator(
         xmin_pos: int = 2,
         conv_norm: float = 0.5,
         filter_zeros: bool = False,
-        parallel: bool = False,
-        device_ids: Optional[List[int]] = None,
-        max_workers: Optional[int] = None,
+        use_svd: bool = True,
         filter_type: Optional[bool] = True,
         save_eigs: Optional[bool] = True,
+        parallel: Optional[bool] = True,
         backend: Optional[str] = "thread",
+        max_workers: Optional[int] = None,
+        device_ids: Optional[List[int]] = None,
 ) -> Dict[str, List[Any]]:
     """
     Highly optimized estimator for Empirical Spectral Density (ESD) and Alpha parameter,
@@ -67,10 +67,13 @@ def net_esd_estimator(
         xmin_pos (int, optional): Position in eigenvalue spectrum to choose xmin for 'xmin_mid'. Defaults to 2.
         conv_norm (float, optional): Normalization for convolutional layers (currently unused). Defaults to 0.5.
         filter_zeros (bool, optional): Whether to filter eigenvalues below EVALS_THRESH. Defaults to False.
+        use_svd (bool, optional): If True, use SVD for eigenvalue computation instead of Gram matrix method.
+        filter_type (bool, optional): If True, only process Conv1d, Conv2d, and Linear layers.
+        save_eigs (bool, optional): If True, save computed eigenvalues in results.
         parallel (bool, optional): If True, dispatch layer computations across multiple GPUs.
-        device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
-        max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
         backend (str, optional): 'thread' for one thread per GPU; 'process' for one subprocess per GPU.
+        max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
+        device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
 
     Returns:
         dict: A dictionary containing the computed metrics for each layer.
@@ -80,6 +83,8 @@ def net_esd_estimator(
     print(f"Running optimized multi-GPU ESD estimator with:")
     print(f"  fix_fingers: {fix_fingers}, xmin_pos: {xmin_pos}, filter_zeros: {filter_zeros}")
     print(
+        f"  use_svd: {use_svd}, filter_type: {filter_type}, save_eigs: {save_eigs}")
+    print(
         f"  parallel: {parallel}, device_ids: {device_ids if device_ids else 'auto'}, max_workers: {max_workers if max_workers else 'auto'}, backend: {backend}")
     print("=================================")
 
@@ -88,7 +93,7 @@ def net_esd_estimator(
         if not parallel or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
             layer_results = [
                 res for (name, w, params) in eligible
-                if (res := _compute_esd_for_weight(name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, params, None, save_eigs)) is not None
+                if (res := _compute_esd_for_weight(name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros, use_svd, save_eigs, None, params)) is not None
             ]
         else:
             used_cuda_ids = sorted(p.device.index for p in net.parameters() if getattr(p, 'is_cuda', False))
@@ -103,7 +108,7 @@ def net_esd_estimator(
             # Size- and cost-aware task ordering (largest compute first)
             tasks = []
             for idx, (name, w, params) in enumerate(eligible):
-                cost = _estimate_compute_cost(w)
+                cost = _estimate_compute_cost(w, use_svd)
                 tasks.append((idx, name, w, params, cost))
             tasks_sorted = sorted(tasks, key=lambda t: t[4], reverse=True)
 
@@ -122,7 +127,7 @@ def net_esd_estimator(
                             break
                         res = _compute_esd_for_weight(
                             name, w, EVALS_THRESH, bins, fix_fingers, xmin_pos,
-                            conv_norm, filter_zeros, params, dev_id, save_eigs
+                            conv_norm, filter_zeros, use_svd, save_eigs, dev_id, params
                         )
                         ordered[orig_idx] = res
 
@@ -142,7 +147,8 @@ def net_esd_estimator(
                 for dev_id in pool[:workers]:
                     p = ctx.Process(target=_mp_worker, args=(
                         task_q, result_q, dev_id,
-                        EVALS_THRESH, bins, fix_fingers, xmin_pos, conv_norm, filter_zeros
+                        EVALS_THRESH, bins, fix_fingers, xmin_pos,
+                        conv_norm, filter_zeros, use_svd, save_eigs, params
                     ))
                     p.daemon = False
                     p.start()
@@ -175,70 +181,11 @@ def net_esd_estimator(
     return results
 
 
-def _squared_singular_values(matrix: torch.Tensor) -> torch.Tensor:
-    """Compute squared singular values efficiently via Gram matrices.
-
-    Accepts 2D (M,N) or batched 3D (B,M,N) tensors and returns a 1D tensor of
-    squared singular values (flattened for batched input). Uses eigvalsh on the
-    smaller Gram matrix (A A^T if M<=N else A^T A) for speed and numerical
-    stability, clamping tiny negative values to zero.
-    """
-    # Ensure numeric symmetry before eigvalsh to avoid off-diagonal noise
-    if matrix.ndim == 2:
-        M, N = matrix.shape
-        if M <= N:
-            G = matrix @ matrix.transpose(-1, -2)
-        else:
-            G = matrix.transpose(-1, -2) @ matrix
-        # Symmetrize and enforce contiguity
-        G = 0.5 * (G + G.transpose(-1, -2))
-        G = G.contiguous()
-        try:
-            evals = torch.linalg.eigvalsh(G)
-        except RuntimeError:
-            # Retry with a tiny diagonal jitter to fix potential numerical pathologies
-            try:
-                eps = torch.finfo(G.dtype).eps
-                I = torch.eye(G.shape[-1], device=G.device, dtype=G.dtype)
-                evals = torch.linalg.eigvalsh(G + eps * I)
-            except Exception:
-                # Fallback: exact SVD path
-                svals = torch.linalg.svdvals(matrix)
-                return torch.square(svals)
-        return torch.clamp(evals, min=0)
-    elif matrix.ndim == 3:
-        B, M, N = matrix.shape
-        if M <= N:
-            G = torch.matmul(matrix, matrix.transpose(-1, -2))  # [B, M, M]
-        else:
-            G = torch.matmul(matrix.transpose(-1, -2), matrix)  # [B, N, N]
-        # Symmetrize and enforce contiguity
-        G = 0.5 * (G + G.transpose(-1, -2))
-        G = G.contiguous()
-        try:
-            evals = torch.linalg.eigvalsh(G)
-            return torch.clamp(evals, min=0).reshape(-1)
-        except RuntimeError:
-            # Retry with jitter
-            try:
-                eps = torch.finfo(G.dtype).eps
-                eye_n = G.shape[-1]
-                I = torch.eye(eye_n, device=G.device, dtype=G.dtype).expand(B, eye_n, eye_n)
-                evals = torch.linalg.eigvalsh(G + eps * I)
-                return torch.clamp(evals, min=0).reshape(-1)
-            except Exception:
-                # Fallback: exact batched SVD path
-                svals = torch.linalg.svdvals(matrix)
-                return torch.square(svals).reshape(-1)
-    else:
-        logger.warning(f"_squared_singular_values: unsupported shape {matrix.shape}")
-        return torch.empty(0, device=matrix.device, dtype=matrix.dtype)
-
-
 def _compute_esd_for_weight(
         name: str, weight_t: torch.Tensor, EVALS_THRESH: float, bins: int,
         fix_fingers: Optional[str], xmin_pos: int, conv_norm: float,
-        filter_zeros: bool, params: int, device_id: Optional[int], save_eigs: Optional[bool] = True
+        filter_zeros: bool, use_svd: bool, save_eigs: Optional[bool],
+        device_id: Optional[int], params: int
 ) -> Optional[Dict[str, Any]]:
     """Compute ESD-related metrics for a single layer's weight on the specified device.
     Returns a dict with metrics for that layer, or None if not enough eigenvalues.
@@ -272,8 +219,8 @@ def _compute_esd_for_weight(
         #     # Apply normalization in-place
         #     matrix.mul_(math.sqrt(conv_norm))
 
-        # Single in-flight op per GPU is enforced by per-GPU workers; no locks required.
-        eigs = _squared_singular_values(matrix)
+        # Single in-flight op per GPU is enforced by per-GPU workers.
+        eigs = _squared_singular_values(matrix, use_svd)
 
         nz_eigs = eigs[eigs > EVALS_THRESH] if filter_zeros else eigs
         if nz_eigs.numel() == 0: nz_eigs = eigs
@@ -369,9 +316,75 @@ def _compute_esd_for_weight(
         }
 
 
+def _squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch.Tensor:
+    """Compute squared singular values efficiently via Gram matrices or SVD.
+
+    Accepts 2D (M,N) or batched 3D (B,M,N) tensors and returns a 1D tensor of
+    squared singular values (flattened for batched input). 
+    If use_svd is True, uses torch.linalg.svdvals directly.
+    Otherwise,
+    Uses eigvalsh on the smaller Gram matrix (A A^T if M<=N else A^T A) for
+    speed and numerical stability, clamping tiny negative values to zero.
+    """
+    if use_svd:
+        svals = torch.linalg.svdvals(matrix)
+        return torch.square(svals) if matrix.ndim == 2 else torch.square(svals).reshape(-1)
+    
+    # Ensure numeric symmetry before eigvalsh to avoid off-diagonal noise
+    if matrix.ndim == 2:
+        M, N = matrix.shape
+        if M <= N:
+            G = matrix @ matrix.transpose(-1, -2)
+        else:
+            G = matrix.transpose(-1, -2) @ matrix
+        # Symmetrize and enforce contiguity
+        G = 0.5 * (G + G.transpose(-1, -2))
+        G = G.contiguous()
+        try:
+            evals = torch.linalg.eigvalsh(G)
+        except RuntimeError:
+            # Retry with a tiny diagonal jitter to fix potential numerical pathologies
+            try:
+                eps = torch.finfo(G.dtype).eps
+                I = torch.eye(G.shape[-1], device=G.device, dtype=G.dtype)
+                evals = torch.linalg.eigvalsh(G + eps * I)
+            except Exception:
+                # Fallback: exact SVD path
+                svals = torch.linalg.svdvals(matrix)
+                return torch.square(svals)
+        return torch.clamp(evals, min=0)
+    elif matrix.ndim == 3:
+        B, M, N = matrix.shape
+        if M <= N:
+            G = torch.matmul(matrix, matrix.transpose(-1, -2))  # [B, M, M]
+        else:
+            G = torch.matmul(matrix.transpose(-1, -2), matrix)  # [B, N, N]
+        # Symmetrize and enforce contiguity
+        G = 0.5 * (G + G.transpose(-1, -2))
+        G = G.contiguous()
+        try:
+            evals = torch.linalg.eigvalsh(G)
+            return torch.clamp(evals, min=0).reshape(-1)
+        except RuntimeError:
+            # Retry with jitter
+            try:
+                eps = torch.finfo(G.dtype).eps
+                eye_n = G.shape[-1]
+                I = torch.eye(eye_n, device=G.device, dtype=G.dtype).expand(B, eye_n, eye_n)
+                evals = torch.linalg.eigvalsh(G + eps * I)
+                return torch.clamp(evals, min=0).reshape(-1)
+            except Exception:
+                # Fallback: exact batched SVD path
+                svals = torch.linalg.svdvals(matrix)
+                return torch.square(svals).reshape(-1)
+    else:
+        logger.warning(f"_squared_singular_values: unsupported shape {matrix.shape}")
+        return torch.empty(0, device=matrix.device, dtype=matrix.dtype)
+
+
 def _mp_worker(task_q: "mp.Queue", result_q: "mp.Queue", dev_id: int,
                EVALS_THRESH: float, bins: int, fix_fingers: Optional[str], xmin_pos: int,
-               conv_norm: float, filter_zeros: bool) -> None:
+               conv_norm: float, filter_zeros: bool, use_svd: bool, save_eigs: bool, params: int) -> None:
     """Multiprocessing worker: binds to a GPU device and processes tasks from a queue.
 
     Each task is (orig_idx, name, weight_numpy, params). Results are (orig_idx, result_dict_or_None).
@@ -393,7 +406,7 @@ def _mp_worker(task_q: "mp.Queue", result_q: "mp.Queue", dev_id: int,
             weight_t = torch.from_numpy(w_np)
             res = _compute_esd_for_weight(
                 name, weight_t, EVALS_THRESH, bins, fix_fingers, xmin_pos,
-                conv_norm, filter_zeros, params, dev_id
+                conv_norm, filter_zeros, use_svd, save_eigs, dev_id, params
             )
         except Exception as e:
             logger.exception(f"_mp_worker: error processing {name} on cuda:{dev_id}")
@@ -478,7 +491,7 @@ def _iter_eligible_layers(net: nn.Module, filter_type: Optional[bool] = True) ->
         yield name, weight, (weight.numel() + bias_params)
 
 
-def _estimate_compute_cost(weight: torch.Tensor) -> int:
+def _estimate_compute_cost(weight: torch.Tensor, use_svd: bool) -> int:
     """Estimate dense eigenspectrum compute cost for scheduling.
 
     Using Gram-based path in `_squared_singular_values`:
@@ -486,15 +499,22 @@ def _estimate_compute_cost(weight: torch.Tensor) -> int:
         Cost ~ O(min(M,N)^2 * max(M,N)) to build G + O(min(M,N)^3) for eigvalsh.
       - For Conv weights (O, I, kH, kW) we create B = kH*kW slices of (O x I) matrices.
         Total cost ~ B * [min(O,I)^2 * max(O,I) + min(O,I)^3].
+    Using SVD path:
+        - For a 2D matrix A in R^{M x N}, cost ~ O(M*N^2) if M <= N else O(N*M^2).
+        - For Conv weights, total cost ~ B * [M*N^2 if M <= N else N*M^2].
     We return an integer proxy of the above expression.
     """
     if weight.ndim == 2:
         M, N = int(weight.shape[0]), int(weight.shape[1])
         m, n = (M, N) if M <= N else (N, M)
+        if use_svd:
+            return m*n*n
         return m*m*n + m*m*m
     elif weight.ndim > 2:
         O, I = int(weight.shape[0]), int(weight.shape[1])
         B = int(np.prod(weight.shape[2:]))
         m, n = (O, I) if O <= I else (I, O)
+        if use_svd:
+            return B * (m*n*n)
         return B * (m*m*n + m*m*m)
     return int(weight.numel())
