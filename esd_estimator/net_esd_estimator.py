@@ -325,6 +325,11 @@ def _squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torc
     Otherwise,
     Uses eigvalsh on the smaller Gram matrix (A A^T if M<=N else A^T A) for
     speed and numerical stability, clamping tiny negative values to zero.
+    
+    Note: The Gram method may lose precision on eigenvalues smaller than ~1e-14
+    for severely ill-conditioned matrices (condition number > 1e+7) due to 
+    condition number squaring. For ESD analysis with EVALS_THRESH >= 1e-5, 
+    this has negligible impact on all computed metrics.
     """
     if use_svd:
         svals = torch.linalg.svdvals(matrix)
