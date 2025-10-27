@@ -1,7 +1,6 @@
 """Core computation functions for ESD analysis."""
 
 import torch
-import numpy as np
 import math
 import multiprocessing as mp
 from typing import Optional, Dict, Any
@@ -34,19 +33,19 @@ def compute_esd_for_weight(
             logger.warning(f"Skipping layer {name} due to invalid dimensions: {matrix.shape}")
             return None
 
-        if len(matrix.shape) > 2:
-            matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
-            matrix = matrix.transpose(1, 2).transpose(0, 1)
+        # if len(matrix.shape) > 2:
+        #     matrix = torch.flatten(matrix, start_dim=2) * math.sqrt(conv_norm)
+        #     matrix = matrix.transpose(1, 2).transpose(0, 1)
 
         # Reshaping for Conv layers. This creates a stack of (kernel_H * kernel_W) matrices,
         # each of size (out_channels, in_channels).
-        # if len(matrix.shape) > 2:
-        #     # The permute+reshape is a more direct and typically faster way to achieve
-        #     # the same tensor shape as the original flatten and two transposes.
-        #     out_channels, in_channels = matrix.shape[0], matrix.shape[1]
-        #     matrix = matrix.permute(2, 3, 0, 1).reshape(-1, out_channels, in_channels)
-        #     # Apply normalization in-place
-        #     matrix.mul_(math.sqrt(conv_norm))
+        if len(matrix.shape) > 2:
+            # The permute+reshape is a more direct and typically faster way to achieve
+            # the same tensor shape as the original flatten and two transposes.
+            out_channels, in_channels = matrix.shape[0], matrix.shape[1]
+            matrix = matrix.permute(2, 3, 0, 1).contiguous().view(-1, out_channels, in_channels)
+            # Apply normalization in-place
+            matrix.mul_(math.sqrt(conv_norm))
 
         # Single in-flight op per GPU is enforced by per-GPU workers.
         eigs = squared_singular_values(matrix, use_svd)
@@ -135,8 +134,8 @@ def compute_esd_for_weight(
             'alpha_weighted': final_alpha * math.log10(spectral_norm) if spectral_norm > 0 else 0.0,
             'entropy': entropy_tensor.item(),
             'log_alpha_norm': log_alpha_norm.item(),
-            'log_norm': np.log10(fnorm) if fnorm > 0 else 0.0,
-            'log_spectral_norm': np.log10(spectral_norm) if spectral_norm > 0 else 0.0,
+            'log_norm': math.log10(fnorm) if fnorm > 0 else 0.0,
+            'log_spectral_norm': math.log10(spectral_norm) if spectral_norm > 0 else 0.0,
             'matrix_rank': hard_rank_tensor.item(),
             'norm': fnorm, 'num_evals': N, 'spectral_norm': spectral_norm,
             'stable_rank': fnorm / spectral_norm if spectral_norm > 0 else 0.0,
@@ -155,10 +154,8 @@ def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch
     Uses eigvalsh on the smaller Gram matrix (A A^T if M<=N else A^T A) for
     speed and numerical stability, clamping tiny negative values to zero.
     
-    Note: The Gram method may lose precision on eigenvalues smaller than ~1e-14
-    for severely ill-conditioned matrices (condition number > 1e+7) due to 
-    condition number squaring. For ESD analysis with EVALS_THRESH >= 1e-5, 
-    this has negligible impact on all computed metrics.
+    Note: The Gram method may lose precision on eigenvalues for severely 
+    ill-conditioned matrices due to condition number squaring.
     """
     if use_svd:
         svals = torch.linalg.svdvals(matrix)
