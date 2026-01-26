@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoConfig
 from peft import PeftModel, PeftConfig
-from huggingface_hub import HfApi, HfFolder
+from huggingface_hub import HfApi, get_token
 
 
 def get_hf_token() -> Optional[str]:
@@ -19,7 +19,7 @@ def get_hf_token() -> Optional[str]:
         os.environ.get("HF_TOKEN") or 
         os.environ.get("HUGGINGFACE_HUB_TOKEN") or 
         os.environ.get("HUGGINGFACE_TOKEN") or
-        HfFolder.get_token()
+        get_token()
     )
 
 
@@ -167,7 +167,7 @@ def load_and_merge_adapter(
     )
     
     print("Merging adapter weights into base model...")
-    merged = peft_model.merge_and_unload()
+    merged = peft_model.merge_and_unload() # type: ignore
     merged.eval()
     
     return merged

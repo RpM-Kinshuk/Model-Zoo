@@ -12,11 +12,12 @@ This script:
 Usage:
     python run_esd_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
-import sys
-import os
 import argparse
-import pandas as pd
 import itertools
+import os
+import pandas as pd
+import signal
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +27,7 @@ EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
-from gputracker.gputracker import get_logger, DispatchThread
+from gputracker.gputracker import get_logger, DispatchThread, cleanup_workers
 
 
 def parse_args():
@@ -35,16 +36,16 @@ def parse_args():
         description="Run large-scale ESD analysis with GPU resource management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Example model list CSV format:
-    model_id,base_model_relation,source_model
-    meta-llama/Llama-2-7b-hf,,
-    some/adapter-model,adapter,meta-llama/Llama-2-7b-hf
-    org/model@revision,,
+        Example model list CSV format:
+            model_id,base_model_relation,source_model
+            meta-llama/Llama-2-7b-hf,,
+            some/adapter-model,adapter,meta-llama/Llama-2-7b-hf
+            org/model@revision,,
 
-Columns:
-    - model_id: HuggingFace repo ID (required)
-    - base_model_relation: "adapter", "lora", "peft" for adapters (optional)
-    - source_model: Base model for adapters (optional, will be inferred if missing)
+        Columns:
+            - model_id: HuggingFace repo ID (required)
+            - base_model_relation: "adapter", "lora", "peft" for adapters (optional)
+            - source_model: Base model for adapters (optional, will be inferred if missing)
         """
     )
     
@@ -118,7 +119,7 @@ Columns:
     parser.add_argument(
         "--use_svd",
         action="store_true",
-        default=True,
+        default=False,
         help="Use SVD for ESD (default: True)"
     )
     parser.add_argument(
@@ -329,8 +330,23 @@ def filter_models_to_run(
     return filtered_df
 
 
+def signal_handler(signum, frame):
+    """Handle signals (SIGINT, SIGTERM) to ensure clean exit."""
+    sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    print(f"\nReceived {sig_name}. Shutting down gracefully...")
+    
+    # Trigger the cleanup in gputracker
+    cleanup_workers()
+    sys.exit(1)
+
+
 def main():
     """Main experiment runner."""
+    
+    # REGISTER SIGNALS
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler) # Slurm kill
+    
     args = parse_args()
     
     # Setup directories
@@ -390,7 +406,8 @@ def main():
     
     # Start and wait for completion
     dispatch_thread.start()
-    dispatch_thread.join()
+    while dispatch_thread.is_alive():
+        dispatch_thread.join(timeout=1.0)
     
     logger.info("=" * 80)
     logger.info("Experiment completed!")

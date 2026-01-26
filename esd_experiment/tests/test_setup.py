@@ -30,6 +30,8 @@ def test_imports():
         ("pandas", "Pandas"),
         ("numpy", "NumPy"),
         ("gpustat", "GPUstat"),
+        ("bitsandbytes", "BitsAndBytes"),
+        ("huggingface_hub", "HuggingFace Hub"),
     ]
     
     all_ok = True
@@ -64,7 +66,7 @@ def test_model_loader():
     
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
-        from model_loader import (
+        from src.model_loader import (
             get_hf_token,
             parse_model_string,
             safe_filename,
@@ -125,7 +127,7 @@ def test_hf_token():
     
     try:
         sys.path.insert(0, str(PROJECT_ROOT / "src"))
-        from model_loader import get_hf_token
+        from src.model_loader import get_hf_token
         
         token = get_hf_token()
         if token:

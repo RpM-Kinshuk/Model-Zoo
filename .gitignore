@@ -152,7 +152,7 @@ venv.bak/
 .DS_Store
 
 # Results and outputs
-results/
+*results/
 example_results/
 test_results/
 # *.csv
