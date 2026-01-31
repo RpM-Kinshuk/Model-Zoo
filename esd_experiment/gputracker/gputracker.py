@@ -105,10 +105,7 @@ def get_free_gpu_indices(logger, num_gpus_needed):
             memory_used = stat['memory.used']
             
             if memory_used < GPU_MEMORY_THRESHOLD and i in AVAILABLE_GPUS and i not in current_occupied:
-                if i not in counter:
-                    counter.update({i: 0})
-                else:
-                    counter[i] = counter[i] + 1
+                counter[i] = counter.get(i, 0) + 1
                 
                 if counter[i] >= MAX_NCHECK:
                     available_gpus.append(i)
@@ -128,7 +125,8 @@ def get_free_gpu_indices(logger, num_gpus_needed):
         for _ in range(10):
             if exitFlag: return []
             time.sleep(1)
-        return []
+    
+    return []
 
 
 class DispatchThread(threading.Thread):
@@ -187,7 +185,6 @@ class ChildThread(threading.Thread):
         # torch_cuda_init()
         env = os.environ.copy()
         env['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, self.cuda_devices))
-        bash_command = self.bash_command
 
         self.logger.info(f'Executing on GPUs {self.cuda_devices}: {self.bash_command}')
         # start_memory = 0
