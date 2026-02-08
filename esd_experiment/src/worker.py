@@ -279,7 +279,7 @@ def main():
     
     # Setup output path
     output_dir = Path(args.output_dir)
-    output_file = output_dir / f"{safe_filename(args.model_id)}.csv"
+    output_file = output_dir / "stats" / f"{safe_filename(args.model_id)}.csv"
     
     # Check if already done
     if output_file.exists() and not args.overwrite:
