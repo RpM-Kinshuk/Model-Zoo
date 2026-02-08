@@ -4,7 +4,6 @@
 # This script assume exclusive usage of the GPUs. 
 # If you have limited usage of GPUs, you can limit the range of gpu indices you are using.
 
-
 import threading
 import time
 import os
@@ -13,140 +12,175 @@ import gpustat
 import logging
 import subprocess
 import signal
+import json
 # from torch.cuda import max_memory_allocated, reset_peak_memory_stats, reset_max_memory_allocated, memory_allocated
 # from torch.cuda import init as torch_cuda_init
 
-# Global registry to track active subprocesses for cleanup
-active_workers = []
-active_workers_lock = threading.Lock()
-exitFlag = False  # Global flag for graceful shutdown
-
-GPU_MEMORY_THRESHOLD = 500 # MB?
 AVAILABLE_GPUS = [0, 1, 2, 3, 4, 5, 6, 7]
 MAX_NCHECK=10              # number of checks to know if gpu free
-occupied_gpus = []
-occupied_lock = threading.Lock() # Thread safety for gpu list
+GPU_MEMORY_THRESHOLD = 500 # MB?
 
-## If we need to wait for the entire clean cluster to start, select False here
+class GPUDispatcher:
+    _instance = None
 
-all_empty = {"ind": True}
-#all_empty = {"ind": False}
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(GPUDispatcher, cls).__new__(cls)
+        return cls._instance
 
+    def __init__(self, config_path="gpu_config.json"):
+        if hasattr(self, 'initialized') and self.initialized: return
+        self.initialized = True
 
-# NEW
-def mark_occupied(gpu_ids):
-    global occupied_gpus
-    with occupied_lock:
-        occupied_gpus.extend(gpu_ids)
+        self.config_path = config_path
+        self.lock = threading.Lock()
 
+        # State Flags
+        self.shutdown_event = threading.Event() # Hard stop
+        self.drain_event = threading.Event()   # Graceful stop
+        self.active_workers = [] # Track PIDs
+        self.occupied_gpus = set()  # Track GPU usage
 
-def remove_occupied(gpu_ids):
-    global occupied_gpus
-    with occupied_lock:
-        for gpu in gpu_ids:
-            if gpu in occupied_gpus:
-                occupied_gpus.remove(gpu)
-
-
-def cleanup_workers():
-    """Kill all active subprocesses."""
-    global exitFlag
-    exitFlag = True
-    print("\n[GPU_TRACKER] Cleaning up active workers...")
-    with active_workers_lock:
-        for p in active_workers:
-            if p.poll() is None:  # If process is still running
-                try:
-                    # Send SIGTERM to the process group to ensure shell + python child die
-                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                except Exception as e:
-                    print(f"Error killing process {p.pid}: {e}")
-    print("[GPU_TRACKER] Cleanup complete.")
-
-
-def num_available_GPUs(gpus):
-    sum_i = 0
-    for i, stat in enumerate(gpus):
-        if stat['memory.used'] < 100:
-            sum_i += 1
-    return sum_i
-
-
-def get_free_gpu_indices(logger, num_gpus_needed):
-    '''
-        Return a list of available GPU indices.
-    '''
-    counter = {}
-    while not exitFlag:
-        try:
-            stats = gpustat.GPUStatCollection.new_query()
-            # print('stats length: ', len(stats))
-        except Exception as e:
-            logger.warning(f"Could not query GPU stats: {e}")
-            time.sleep(5)
-            continue
-        
-        if num_available_GPUs(stats.gpus) >= num_gpus_needed:
-            all_empty["ind"] = True
-            
-        if not all_empty["ind"]:
-            logger.info("Other experiments not finished...")
-            time.sleep(10)
-            continue
-        
-        max_checks = 0
-        max_gpu_id = -1
-        available_gpus = []
-
-        with occupied_lock:
-            current_occupied = set(occupied_gpus)
-        
-        for i, stat in enumerate(stats.gpus):
-            memory_used = stat['memory.used']
-            
-            if memory_used < GPU_MEMORY_THRESHOLD and i in AVAILABLE_GPUS and i not in current_occupied:
-                counter[i] = counter.get(i, 0) + 1
-                
-                if counter[i] >= MAX_NCHECK:
-                    available_gpus.append(i)
-                    if len(available_gpus) == num_gpus_needed:
-                        mark_occupied(available_gpus)
-                        return available_gpus
-            else:
-                counter.update({i: 0})
-
-            if counter[i] > max_checks:
-                max_checks = counter[i]
-                max_gpu_id = i
-        
-        if max_gpu_id != -1:
-            logger.info(f"Waiting on GPUs, Checking {max_checks}/{MAX_NCHECK} at gpu {max_gpu_id}")
-        
-        for _ in range(10):
-            if exitFlag: return []
-            time.sleep(1)
+        # Default Config
+        self.config = {
+            "available_gpus": AVAILABLE_GPUS,
+            "max_checks": MAX_NCHECK,
+            "memory_threshold_mb": GPU_MEMORY_THRESHOLD
+        }
+        self.load_config()
     
-    return []
+    def load_config(self):
+        """Reloads configuration from JSON file"""
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, 'r') as f:
+                    new_config = json.load(f)
+                
+                with self.lock:
+                    self.config.update(new_config)
+                    self.config["available_gpus"] = [int(x) for x in self.config["available_gpus"]]
+                
+                logging.info(f"✅ Configuration Reloaded: GPUs {self.config['available_gpus']}")
+            else:
+                logging.warning(f"⚠️ Config file {self.config_path} not found. Using defaults.")
+        except Exception as e:
+            logging.error(f"❌ Failed to load config: {e}")
+    
+    # --- Signal Handlers ---
+    def handle_hard_stop(self, signum, frame):
+        """SIGINT/SIGTERM: Immediate shutdown"""
+        logging.critical(f"\n🛑 Received Signal {signum}. Hard stopping...")
+        self.shutdown_event.set()
+        self.kill_all_workers()
+        sys.exit(1)
 
+    def handle_drain(self, signum, frame):
+        """SIGUSR1: Stop new jobs, wait for current ones"""
+        logging.warning(f"\n⚠️ Received Signal {signum}. Entering DRAIN MODE.")
+        logging.warning("No new jobs will start. Waiting for active jobs to finish...")
+        self.drain_event.set()
+
+    def handle_reload(self, signum, frame):
+        """SIGHUP: Reload Configuration"""
+        logging.info(f"\n🔄 Received Signal {signum}. Reloading configuration...")
+        self.load_config()
+
+    def setup_signals(self):
+        signal.signal(signal.SIGINT, self.handle_hard_stop)
+        signal.signal(signal.SIGTERM, self.handle_hard_stop)
+        signal.signal(signal.SIGUSR1, self.handle_drain)
+        if hasattr(signal, 'SIGHUP'):
+            signal.signal(signal.SIGHUP, self.handle_reload)
+
+    # --- Worker Management ---
+    def kill_all_workers(self):
+        with self.lock:
+            for p in self.active_workers:
+                if p.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                    except Exception as e:
+                        logging.error(f"Error killing process {p.pid}: {e}")
+                        pass
+
+    def register_worker(self, proc):
+        with self.lock:
+            self.active_workers.append(proc)
+    
+    def unregister_worker(self, proc):
+        with self.lock:
+            if proc in self.active_workers:
+                self.active_workers.remove(proc)
+    
+    def get_free_gpus(self, num_needed):
+        """Blocking call to get free GPUs"""
+        counter = {}
+
+        while not self.shutdown_event.is_set():
+            if self.drain_event.is_set(): return None # Signal to stop dispatching new jobs
+        
+            try:
+                #Always read latest config
+                with self.lock:
+                    allowed_gpus = self.config['available_gpus']
+                    threshold = self.config['memory_threshold_mb']
+                    max_checks = self.config['max_checks']
+                    current_occupied = list(self.occupied_gpus)
+                
+                stats = gpustat.GPUStatCollection.new_query()
+
+                # Logic to find free GPUs
+                candidates = []
+                for i in allowed_gpus:
+                    if i >= len(stats.gpus): continue
+                    
+                    if stats.gpus[i]['memory.used'] < threshold and i not in current_occupied:
+                        counter[i] = counter.get(i, 0) + 1
+                        
+                        if counter[i] >= max_checks:
+                            candidates.append(i)
+                    else:
+                        counter.update({i: 0})
+                
+                if len(candidates) >= num_needed:
+                    selected = candidates[:num_needed]
+                    with self.lock:
+                        self.occupied_gpus.update(selected)
+                    return selected
+
+                time.sleep(5)
+            
+            except Exception as e:
+                logging.error(f"Could not query GPU stats: {e}")
+                time.sleep(5)
+
+        return None
+
+# --- Thread Classes ---
 
 class DispatchThread(threading.Thread):
-    def __init__(self, name, bash_command_list, logger, gpu_m_th, gpu_list, maxcheck, num_gpus_needed=1):
+    def __init__(self, name, bash_command_list, logger, dispatcher, num_gpus_needed=1, config_path="gpu_config.json"):
         threading.Thread.__init__(self)
         self.name = name
         self.bash_command_list = bash_command_list
         self.logger = logger
+        self.dispatcher = dispatcher
         self.num_gpus_needed = num_gpus_needed
-        
-        global GPU_MEMORY_THRESHOLD, AVAILABLE_GPUS, MAX_NCHECK
-        GPU_MEMORY_THRESHOLD = gpu_m_th
-        AVAILABLE_GPUS = gpu_list
-        MAX_NCHECK = maxcheck
 
     def run(self):
-        self.logger.info("Starting " + self.name)
+        self.logger.info(f"Starting PID: {os.getpid()}: {self.name}")
+        self.logger.info("Controls: SIGHUP=Reload Config, SIGUSR1=Drain/Graceful Exit, SIGINT=Kill")
+        
         threads = []
         for i, bash_command in enumerate(self.bash_command_list):
-            if exitFlag: break
+            # Check for Hard Stop
+            if self.dispatcher.shutdown_event.is_set(): break
+
+            # Check for Drain Mode
+            if self.dispatcher.drain_event.is_set():
+                self.logger.warning("Drain mode active. Skipping remaining jobs.")
+                break
+
             time.sleep(0.3)
 
             #if os.path.isfile(result_name):
@@ -156,29 +190,32 @@ class DispatchThread(threading.Thread):
             #else:
             #    print("Result not ready yet. Running it for a second time: {0}".format(result_name))
             
-            cuda_devices = get_free_gpu_indices(self.logger, self.num_gpus_needed)
-            if not cuda_devices and exitFlag: break
+            # Get Resources (blocking call)
+            cuda_devices = self.dispatcher.get_free_gpus(self.num_gpus_needed)
+            if cuda_devices is None: break
             
-            thread1 = ChildThread(f"{i}th + {bash_command}", 1, cuda_devices, bash_command, self.logger)
+            thread1 = ChildThread(f"{i}th + {bash_command}", 1, cuda_devices, bash_command, self.logger, self.dispatcher)
             thread1.start()
             threads.append(thread1)
 
-            time.sleep(5)  # Slight delay to avoid race conditions
+            time.sleep(2)  # Slight delay to avoid race conditions
 
         # join all.
         for t in threads:
             t.join()
+        
         self.logger.info("Exiting " + self.name)
 
 
 class ChildThread(threading.Thread):
-    def __init__(self, name, counter, cuda_devices, bash_command, logger):
+    def __init__(self, name, counter, cuda_devices, bash_command, logger, dispatcher):
         threading.Thread.__init__(self)
         self.name = name
         self.counter = counter
         self.cuda_devices = cuda_devices
         self.bash_command = bash_command
         self.logger = logger
+        self.dispatcher = dispatcher
         self.daemon = True # Ensure thread exits if main program exits
 
     def run(self):
@@ -198,21 +235,26 @@ class ChildThread(threading.Thread):
                 env=env,
                 preexec_fn=os.setsid
             )
-
-            with active_workers_lock:
-                active_workers.append(proc)
-
+            self.dispatcher.register_worker(proc)
             proc.wait() # Wait for process to complete
-
-            with active_workers_lock:
-                if proc in active_workers:
-                    active_workers.remove(proc)
+            self.dispatcher.unregister_worker(proc)
         
         except Exception as e:
             self.logger.error(f"Error in {self.name}: {e}")
         finally:
-            remove_occupied(self.cuda_devices)
+            # Always free the GPUs
+            with self.dispatcher.lock:
+                for gpu in self.cuda_devices:
+                    if gpu in self.dispatcher.occupied_gpus:
+                        self.dispatcher.occupied_gpus.remove(gpu)
+
             self.logger.info(f"Finished {self.name} \n\n")
+
+
+def cleanup_workers():
+    # Only useful if instance exists
+    if GPUDispatcher._instance:
+        GPUDispatcher._instance.handle_hard_stop(signal.SIGTERM, None)
 
 
 def get_logger(path, fname):
