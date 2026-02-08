@@ -229,7 +229,7 @@ def save_results(
 
         if longnames and alphas:
             mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
-            h5_dir = output_path.parent / "metrics"
+            h5_dir = output_path.parent.parent / "metrics"
             h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
             relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
             file_attrs = {
@@ -249,7 +249,7 @@ def save_results(
 
 def record_failure(output_dir: Path, model_id: str, error: str):
     """Record failed model in failed_models.txt."""
-    failed_file = output_dir / "failed_models.txt"
+    failed_file = output_dir / "logs" / "failed_models.txt"
     failed_file.parent.mkdir(parents=True, exist_ok=True)
     
     with open(failed_file, "a") as f:
