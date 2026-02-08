@@ -14,9 +14,9 @@ Usage:
 """
 import argparse
 import itertools
+import json
 import os
 import pandas as pd
-import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -27,7 +27,7 @@ EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
-from gputracker.gputracker import get_logger, DispatchThread, cleanup_workers
+from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
 
 
 def parse_args():
@@ -50,109 +50,28 @@ def parse_args():
     )
     
     # Required arguments
-    parser.add_argument(
-        "--model_list",
-        type=str,
-        required=True,
-        help="Path to CSV file with model list (must have 'model_id' column)"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Directory to save results"
-    )
+    parser.add_argument("--model_list", type=str, required=True, help="Path to CSV file with model list (must have 'model_id' column)")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save results")
     
     # GPU configuration
-    parser.add_argument(
-        "--gpus",
-        nargs="+",
-        type=int,
-        default=[0],
-        help="List of GPU indices to use (default: [0])"
-    )
-    parser.add_argument(
-        "--num_gpus_per_job",
-        type=int,
-        default=1,
-        help="Number of GPUs needed per model analysis job (default: 1)"
-    )
-    parser.add_argument(
-        "--gpu_memory_threshold",
-        type=int,
-        default=500,
-        help="GPU memory threshold in MB for considering GPU as free (default: 500)"
-    )
-    parser.add_argument(
-        "--max_check",
-        type=int,
-        default=5,
-        help="Number of checks to confirm GPU is free (default: 5)"
-    )
+    parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
+    parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
+    parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
+    parser.add_argument("--max_check", type=int, default=5, help="Number of checks to confirm GPU is free (default: 5)")
     
     # ESD configuration
-    parser.add_argument(
-        "--fix_fingers",
-        type=str,
-        default="xmin_mid",
-        choices=["xmin_mid", "xmin_peak", "DKS"],
-        help="Method to select xmin for power law fitting (default: xmin_mid)"
-    )
-    parser.add_argument(
-        "--evals_thresh",
-        type=float,
-        default=1e-5,
-        help="Threshold for filtering eigenvalues (default: 1e-5)"
-    )
-    parser.add_argument(
-        "--bins",
-        type=int,
-        default=100,
-        help="Number of bins for histogram (default: 100)"
-    )
-    parser.add_argument(
-        "--filter_zeros",
-        action="store_true",
-        default=True,
-        help="Filter near-zero eigenvalues (default: True)"
-    )
-    parser.add_argument(
-        "--use_svd",
-        action="store_true",
-        default=False,
-        help="Use SVD for ESD (default: True)"
-    )
-    parser.add_argument(
-        "--parallel_esd",
-        action="store_true",
-        default=True,
-        help="Use parallel ESD computation across multiple GPUs (experimental)"
-    )
+    parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
+    parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
+    parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
+    parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter near-zero eigenvalues (default: True)")
+    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: True)")
+    parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD computation across multiple GPUs (experimental)")
     
     # Experiment control
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing results"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limit to first N models (for testing)"
-    )
-    parser.add_argument(
-        "--skip_failed",
-        action="store_true",
-        default=True,
-        help="Skip models that previously failed (default: True)"
-    )
-    parser.add_argument(
-        "--log_dir",
-        type=str,
-        default=None,
-        help="Directory for logs (default: output_dir/logs)"
-    )
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
+    parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
+    parser.add_argument("--skip_failed", action="store_true", default=True, help="Skip models that previously failed (default: True)")
+    parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
     
     return parser.parse_args()
 
@@ -199,11 +118,7 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
     return df
 
 
-def generate_commands(
-    model_df: pd.DataFrame,
-    output_dir: Path,
-    args
-) -> list:
+def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     """
     Generate bash commands for each model analysis.
     
@@ -233,24 +148,13 @@ def generate_commands(
             f"--evals_thresh {args.evals_thresh}",
             f"--bins {args.bins}",
         ]
-        
-        if args.filter_zeros:
-            cmd_parts.append("--filter_zeros")
 
-        if args.use_svd:
-            cmd_parts.append("--use_svd")
-
-        if args.parallel_esd:
-            cmd_parts.append("--parallel_esd")
-        
-        if args.overwrite:
-            cmd_parts.append("--overwrite")
-        
-        if base_relation:
-            cmd_parts.append(f"--base_model_relation '{base_relation}'")
-        
-        if source_model:
-            cmd_parts.append(f"--source_model '{source_model}'")
+        if args.filter_zeros: cmd_parts.append("--filter_zeros")
+        if args.use_svd: cmd_parts.append("--use_svd")
+        if args.parallel_esd: cmd_parts.append("--parallel_esd")
+        if args.overwrite: cmd_parts.append("--overwrite")
+        if base_relation: cmd_parts.append(f"--base_model_relation '{base_relation}'")
+        if source_model: cmd_parts.append(f"--source_model '{source_model}'")
         
         # Join command parts
         cmd = " ".join(cmd_parts)
@@ -284,7 +188,7 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     
     # Remove failed models if requested
     if skip_failed:
-        failed_file = output_dir / "failed_models.txt"
+        failed_file = output_dir / "logs" / "failed_models.txt"
         if failed_file.exists():
             with open(failed_file, "r") as f:
                 failed = {line.strip() for line in f if line.strip()}
@@ -293,12 +197,7 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     return completed
 
 
-def filter_models_to_run(
-    model_df: pd.DataFrame,
-    output_dir: Path,
-    overwrite: bool = False,
-    skip_failed: bool = True
-) -> pd.DataFrame:
+def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bool = False, skip_failed: bool = True) -> pd.DataFrame:
     """
     Filter model list to only include models that need to be run.
     
@@ -311,13 +210,10 @@ def filter_models_to_run(
     Returns:
         Filtered DataFrame
     """
-    if overwrite:
-        return model_df
+    if overwrite: return model_df
     
     completed = get_completed_models(output_dir, skip_failed)
-    
-    if not completed:
-        return model_df
+    if not completed: return model_df
     
     # Filter out completed models
     mask = ~model_df["model_id"].isin(completed)
@@ -330,36 +226,48 @@ def filter_models_to_run(
     return filtered_df
 
 
-def signal_handler(signum, frame):
-    """Handle signals (SIGINT, SIGTERM) to ensure clean exit."""
-    sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-    print(f"\nReceived {sig_name}. Shutting down gracefully...")
-    
-    # Trigger the cleanup in gputracker
-    cleanup_workers()
-    sys.exit(1)
+# NEW: Helper to bootstrap the JSON config
+def create_runtime_config(args, config_path):
+    """
+    Creates the dynamic config file based on CLI arguments.
+    This allows the script to start with CLI args, but allows the user 
+    to modify this file during runtime to change behavior.
+    """
+    config = {
+        "available_gpus": args.gpus,
+        "max_checks": args.max_check,
+        "memory_threshold_mb": args.gpu_memory_threshold
+    }
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        print(f"Initialized runtime config at: {config_path}")
+    except Exception as e:
+        print(f"Warning: Could not create config file: {e}")
 
 
 def main():
     """Main experiment runner."""
-    
-    # REGISTER SIGNALS
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler) # Slurm kill
-    
     args = parse_args()
     
     # Setup directories
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    
     log_dir = Path(args.log_dir) if args.log_dir else output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = str(output_dir / "gpu_config.json")
+    create_runtime_config(args, config_path)
     
     # Setup logger
     logger = get_logger(str(log_dir), "esd_experiment.log")
+
+    dispatcher = GPUDispatcher(config_path=config_path)
+    dispatcher.setup_signals()
+
     logger.info("=" * 80)
     logger.info("Starting ESD Experiment")
+    logger.info(f"Controls: Edit {config_path} and send SIGHUP to reload GPUs")
     logger.info("=" * 80)
     logger.info(f"Model list: {args.model_list}")
     logger.info(f"Output directory: {output_dir}")
@@ -398,16 +306,15 @@ def main():
         name="ESD Analysis",
         bash_command_list=commands,
         logger=logger,
-        gpu_m_th=args.gpu_memory_threshold,
-        gpu_list=args.gpus,
-        maxcheck=args.max_check,
+        dispatcher=dispatcher,
+        config_path=config_path,
         num_gpus_needed=args.num_gpus_per_job,
     )
     
     # Start and wait for completion
     dispatch_thread.start()
     while dispatch_thread.is_alive():
-        dispatch_thread.join(timeout=1.0)
+        dispatch_thread.join(timeout=0.5)
     
     logger.info("=" * 80)
     logger.info("Experiment completed!")
