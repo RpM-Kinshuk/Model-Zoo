@@ -1,5 +1,6 @@
 """Experiments module for hyperparameter search."""
 
+from gpudispatch.experiments.decorator import experiment
 from gpudispatch.experiments.experiment import Experiment
 from gpudispatch.experiments.results import Results
 from gpudispatch.experiments.search_space import (
@@ -29,4 +30,5 @@ __all__ = [
     "Trial",
     "TrialStatus",
     "Uniform",
+    "experiment",
 ]
