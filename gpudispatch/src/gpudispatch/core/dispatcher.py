@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 from gpudispatch.core.job import Job, JobStatus
 from gpudispatch.core.queue import JobQueue, PriorityQueue
@@ -52,7 +52,7 @@ class Dispatcher:
     def __init__(
         self,
         gpus: Optional[list[int]] = None,
-        memory_threshold: str | int = "500MB",
+        memory_threshold: Union[str, int] = "500MB",
         queue: Optional[JobQueue] = None,
         polling_interval: float = 5.0,
     ):

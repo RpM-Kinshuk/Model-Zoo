@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, Union
 
 from gpudispatch.core.resources import Memory, ResourceRequirements
 
@@ -66,7 +66,7 @@ class Job:
         args: tuple[Any, ...] = (),
         kwargs: Optional[dict[str, Any]] = None,
         gpu: int = 1,
-        memory: Optional[str | Memory] = None,
+        memory: Optional[Union[str, Memory]] = None,
         priority: int = 0,
         name: Optional[str] = None,
         after: Optional[Sequence[Job]] = None,
