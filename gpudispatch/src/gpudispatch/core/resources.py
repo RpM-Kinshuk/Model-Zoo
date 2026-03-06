@@ -6,6 +6,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Union
 
+# Type aliases for clarity
+MemoryMB = int  # Memory in megabytes
+
+# Compiled regex pattern for memory parsing
+_MEMORY_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*(GB|MB|gb|mb)$")
+
 
 @dataclass(frozen=True)
 class Memory:
@@ -16,7 +22,7 @@ class Memory:
     @classmethod
     def from_string(cls, value: str) -> Memory:
         """Parse memory string like '16GB' or '4096MB'."""
-        match = re.match(r"^(\d+(?:\.\d+)?)\s*(GB|MB|gb|mb)$", value.strip())
+        match = _MEMORY_PATTERN.match(value.strip())
         if not match:
             raise ValueError(f"Invalid memory format: {value}. Use '16GB' or '4096MB'.")
 
@@ -50,23 +56,23 @@ class Resource:
     pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class GPU(Resource):
     """GPU resource specification."""
 
     index: int
-    memory: Optional[int] = None  # Memory in MB
+    memory: Optional[MemoryMB] = None  # Memory in MB
 
     def __init__(self, index: int, memory: Optional[Union[str, int]] = None):
-        object.__setattr__(self, 'index', index)
+        self.index = index
 
         if memory is None:
-            object.__setattr__(self, 'memory', None)
+            self.memory = None
         elif isinstance(memory, str):
             parsed = Memory.from_string(memory)
-            object.__setattr__(self, 'memory', parsed.mb)
+            self.memory = parsed.mb
         else:
-            object.__setattr__(self, 'memory', memory)
+            self.memory = memory
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GPU):
@@ -84,7 +90,13 @@ class GPU(Resource):
 
 @dataclass
 class ResourceRequirements:
-    """Resource requirements for a job."""
+    """Resource requirements for a job.
+
+    Example:
+        >>> req = ResourceRequirements(gpu=2, memory="16GB")
+        >>> req.satisfies([GPU(0, "24GB"), GPU(1, "24GB")])
+        True
+    """
 
     gpu_count: int = 0
     memory: Optional[Memory] = None
