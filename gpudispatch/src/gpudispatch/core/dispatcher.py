@@ -8,14 +8,20 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, TYPE_CHECKING, Union
 
 from gpudispatch.core.job import Job, JobStatus
 from gpudispatch.core.queue import JobQueue, PriorityQueue
 from gpudispatch.core.resources import GPU, Memory
 from gpudispatch.utils.gpu import detect_gpus, is_gpu_available
 
+if TYPE_CHECKING:
+    from gpudispatch.core.signals import SignalHandler
+
 logger = logging.getLogger(__name__)
+
+# Type alias for config dict
+ConfigDict = Dict[str, Any]
 
 
 @dataclass
@@ -89,6 +95,9 @@ class Dispatcher:
         # Control events
         self._shutdown_event = threading.Event()
         self._drain_event = threading.Event()
+
+        # Signal handler (set by setup_signals())
+        self._signal_handler: Optional[SignalHandler] = None
 
     @property
     def is_running(self) -> bool:
@@ -236,6 +245,88 @@ class Dispatcher:
         """Enter drain mode - stop accepting new jobs but finish running ones."""
         self._drain_event.set()
         logger.info("Dispatcher entering drain mode")
+
+    def reload_config(self, config: Optional[ConfigDict]) -> None:
+        """Reload configuration from a config dictionary.
+
+        This method updates the dispatcher's configuration based on the
+        provided config dictionary. It's typically called by the SignalHandler
+        on SIGHUP.
+
+        Args:
+            config: Configuration dictionary with optional keys:
+                - available_gpus: List of GPU indices to use
+                - memory_threshold_mb: Memory threshold in MB
+                - max_checks: (reserved for future use)
+
+        Example config:
+            {
+                "available_gpus": [0, 1, 2, 3],
+                "max_checks": 5,
+                "memory_threshold_mb": 500
+            }
+        """
+        if config is None:
+            logger.warning("reload_config called with None config, ignoring")
+            return
+
+        with self._lock:
+            # Update GPU pool if specified
+            if "available_gpus" in config:
+                new_gpus = [int(g) for g in config["available_gpus"]]
+                self._gpu_indices = new_gpus
+                self.available_gpus = [GPU(i) for i in new_gpus]
+                logger.info(f"GPU pool updated to: {new_gpus}")
+
+            # Update memory threshold if specified
+            if "memory_threshold_mb" in config:
+                self.memory_threshold_mb = int(config["memory_threshold_mb"])
+                logger.info(f"Memory threshold updated to: {self.memory_threshold_mb}MB")
+
+        logger.info("Configuration reloaded successfully")
+
+    def setup_signals(self, config_path: Optional[str] = None) -> "SignalHandler":
+        """Set up Unix signal handling for runtime control.
+
+        This method creates and installs a SignalHandler that connects
+        signals to dispatcher methods:
+        - SIGHUP: Calls reload_config() with config from config_path
+        - SIGUSR1: Calls drain()
+        - SIGTERM/SIGINT: Calls shutdown()
+
+        Args:
+            config_path: Optional path to JSON config file for SIGHUP reloads.
+
+        Returns:
+            The installed SignalHandler instance.
+
+        Note:
+            Signal handling only works on Unix systems. On Windows, this
+            returns a handler that does nothing.
+
+        Example:
+            >>> dispatcher = Dispatcher(gpus=[0, 1])
+            >>> handler = dispatcher.setup_signals("gpu_config.json")
+            >>> dispatcher.start()
+            >>> # Now you can send signals:
+            >>> # kill -HUP <pid>   # Reload config
+            >>> # kill -USR1 <pid>  # Enter drain mode
+            >>> # kill -TERM <pid>  # Shutdown
+        """
+        # Import here to avoid circular imports
+        from gpudispatch.core.signals import SignalHandler
+
+        handler = SignalHandler(
+            dispatcher=self,
+            config_path=config_path,
+            on_reload=self.reload_config,
+        )
+        handler.install()
+
+        # Store reference so it doesn't get garbage collected
+        self._signal_handler = handler
+
+        return handler
 
     def _dispatch_loop(self) -> None:
         """Main dispatch loop - runs in background thread."""
