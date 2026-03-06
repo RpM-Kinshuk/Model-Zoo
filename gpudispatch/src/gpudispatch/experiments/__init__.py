@@ -1,5 +1,6 @@
 """Experiments module for hyperparameter search."""
 
+from gpudispatch.experiments.results import Results
 from gpudispatch.experiments.search_space import (
     Choice,
     Distribution,
@@ -11,6 +12,7 @@ from gpudispatch.experiments.search_space import (
     Sweep,
     Uniform,
 )
+from gpudispatch.experiments.trial import Trial, TrialStatus
 
 __all__ = [
     "Choice",
@@ -19,7 +21,10 @@ __all__ = [
     "Int",
     "Log",
     "Range",
+    "Results",
     "SearchSpace",
     "Sweep",
+    "Trial",
+    "TrialStatus",
     "Uniform",
 ]
