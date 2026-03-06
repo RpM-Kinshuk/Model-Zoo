@@ -10,6 +10,8 @@ pip install gpudispatch
 
 ## Quick Start
 
+> **Note**: This example demonstrates the intended API. The framework is currently in scaffolding phase; these APIs will be available after full implementation.
+
 ```python
 from gpudispatch import gpu, Dispatcher
 
