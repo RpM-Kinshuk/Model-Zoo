@@ -48,8 +48,8 @@ dev = [
     "hypothesis>=6.0.0",
 ]
 
-# [project.scripts]
-# gpudispatch = "gpudispatch.cli.main:main"  # TODO: Uncomment after CLI implementation
+[project.scripts]
+gpudispatch = "gpudispatch.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/model-zoo/gpudispatch"
