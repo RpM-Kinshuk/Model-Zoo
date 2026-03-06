@@ -3,6 +3,7 @@
 from gpudispatch.core.resources import GPU, Memory, Resource, ResourceRequirements
 from gpudispatch.core.job import Job, JobStatus, JobResult
 from gpudispatch.core.queue import FIFOQueue, PriorityQueue, JobQueue
+from gpudispatch.core.dispatcher import Dispatcher, DispatcherStats
 
 __all__ = [
     "GPU",
@@ -15,4 +16,6 @@ __all__ = [
     "FIFOQueue",
     "PriorityQueue",
     "JobQueue",
+    "Dispatcher",
+    "DispatcherStats",
 ]
