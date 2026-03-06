@@ -1,20 +1,59 @@
-# Large-Scale ESD Analysis Framework
+# Model-Zoo: Large-Scale Neural Network Spectral Analysis
 
-A clean, organized framework for analyzing Empirical Spectral Density (ESD) metrics across hundreds of neural network models from HuggingFace.
+A high-performance framework for analyzing Empirical Spectral Density (ESD) metrics across hundreds of neural network models from HuggingFace. Compute power-law exponents (α), spectral norms, stable ranks, and other spectral properties to understand model behavior and training dynamics.
 
-> **📌 GPU Usage**: The framework uses `device_map="auto"` to automatically utilize GPUs when available. See [docs/GPU_FIX.md](docs/GPU_FIX.md) for details.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.10+-red.svg)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Quick Start
+## 🎯 What This Does
+
+This framework analyzes the weight matrices of neural networks using spectral methods (eigenvalue/singular value analysis) to compute:
+
+- **Power-law exponent (α)**: Measures heavy-tailed behavior in weight spectra
+- **Spectral norm**: Largest singular value (affects model stability)
+- **Stable rank**: Effective dimensionality of weight matrices
+- **Matrix entropy**: Diversity of singular values
+- **Alpha-weighted metrics**: Combined spectral properties
+
+These metrics provide insights into:
+- Model capacity and expressiveness
+- Training stability and convergence
+- Fine-tuning vs. base model differences
+- Adapter (LoRA/PEFT) impact on model structure
+
+## ⚡ Quick Start
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/Model-Zoo.git
+cd Model-Zoo
+
+# Create conda environment (recommended)
+conda env create -f environment.yml
+conda activate esd_ind
+
+# Or install with pip
+pip install -r requirements.txt
+```
+
+### Basic Usage
 
 ```bash
 # 1. Test your setup
-python tests/test_setup.py
+python esd_experiment/tests/test_setup.py
 
 # 2. Create a model list
-python create_model_list.py create --output my_models.csv \
-    --models "meta-llama/Llama-2-7b-hf" "microsoft/phi-2"
+cd esd_experiment
+cat > my_models.csv << EOF
+model_id,base_model_relation,source_model
+meta-llama/Llama-2-7b-hf,,
+microsoft/phi-2,,
+EOF
 
-# 3. Run the experiment
+# 3. Run analysis with GPU scheduling
 python run_experiment.py \
     --model_list my_models.csv \
     --output_dir results/ \
@@ -24,137 +63,323 @@ python run_experiment.py \
 python analyze_results.py --results_dir results/ --verbose
 ```
 
-## Documentation
-
-- **[Quick Start Guide](docs/QUICKSTART.md)** - Get started in 5 minutes
-- **[Full Documentation](docs/README.md)** - Comprehensive user guide
-- **[Architecture Overview](docs/OVERVIEW.md)** - Technical architecture details
-- **[GPU Setup Guide](docs/GPU_FIX.md)** - GPU configuration and troubleshooting
-
-## Repository Structure
+## 📁 Repository Structure
 
 ```
-esd_experiment/
+Model-Zoo/
+├── net_esd/                      # Core ESD computation library
+│   ├── core.py                   # Main ESD algorithms (vectorized, multi-GPU)
+│   ├── utils.py                  # Helper functions (rank, entropy, layer filtering)
+│   ├── constants.py              # Configuration and result keys
+│   └── archive/                  # Legacy implementations
 │
-├── src/                      # Core framework code
-│   ├── run_experiment.py     # Main experiment orchestrator
-│   ├── worker.py             # Per-model analysis worker
-│   └── model_loader.py       # Robust model loading with adapter support
+├── esd_experiment/               # Large-scale experiment framework
+│   ├── src/
+│   │   ├── run_experiment.py    # Main orchestrator (GPU dispatch, job queuing)
+│   │   ├── worker.py             # Per-model analysis worker
+│   │   └── model_loader.py       # Robust HF model loading (handles adapters)
+│   │
+│   ├── gputracker/              # GPU resource management
+│   │   └── gputracker.py        # Dynamic GPU allocation with signal handling
+│   │
+│   ├── utils/
+│   │   └── analyze_results.py   # Results aggregation and statistics
+│   │
+│   ├── tests/
+│   │   ├── test_setup.py        # Framework verification
+│   │   └── test_gpu.py          # GPU setup testing
+│   │
+│   ├── examples/
+│   │   ├── workflow.sh          # Complete workflow example
+│   │   ├── sample.sh            # GPU scheduling examples
+│   │   └── atlas_models.csv     # Sample model list
+│   │
+│   └── docs/                    # Detailed documentation
+│       ├── README.md            # Full user guide
+│       ├── QUICKSTART.md        # 5-minute tutorial
+│       ├── OVERVIEW.md          # Architecture details
+│       └── GPU_FIX.md           # GPU troubleshooting
 │
-├── utils/                    # Utility scripts
-│   ├── analyze_results.py    # Results aggregation and analysis
-│   └── create_model_list.py  # Model list management
-│
-├── docs/                     # Documentation
-│   ├── README.md             # Full user guide
-│   ├── QUICKSTART.md         # Quick start guide
-│   ├── OVERVIEW.md           # Architecture overview
-│   └── GPU_FIX.md            # GPU troubleshooting
-│
-├── examples/                 # Example files
-│   ├── workflow.sh           # Complete workflow example
-│   ├── config.py             # Configuration patterns
-│   └── example_models.csv    # Sample model list
-│
-├── tests/                    # Testing scripts
-│   ├── test_setup.py         # Framework setup verification
-│   └── test_gpu.py           # GPU setup testing
-│
-├── run_experiment.py         # Main entry point (wrapper)
-├── analyze_results.py        # Analysis entry point (wrapper)
-├── create_model_list.py      # Model list entry point (wrapper)
-├── requirements.txt          # Python dependencies
-└── CHANGELOG.md              # Version history
+├── scatter.py                   # Interactive metric comparison tool
+├── atlas_metadata.csv           # Large-scale model metadata
+├── environment.yml              # Conda environment specification
+└── requirements.txt             # Python dependencies
 ```
 
-## Features
+## 🚀 Key Features
 
-✅ **GPU Resource Management** - Automatic scheduling using gputracker  
-✅ **PEFT Adapter Support** - Robust loading and merging of LoRA/PEFT adapters  
-✅ **Resume Capability** - Skip already-analyzed models automatically  
-✅ **Parallel Processing** - Dispatch multiple models across GPUs  
-✅ **Error Handling** - Retry logic and failure tracking  
-✅ **Clean Code** - Well-organized, easy to understand and modify  
+### 1. High-Performance Computation
+- **Vectorized operations**: Batch computation of power-law fits across eigenvalue spectrum
+- **Multi-GPU parallel processing**: Distributes layers across available GPUs
+- **Two backends**: Thread-based (shared memory) or process-based (isolated contexts)
+- **SVD or Gram matrix methods**: Choose speed vs. numerical precision
 
-## Example Workflow
+### 2. Intelligent GPU Management
+- **Dynamic GPU allocation**: Monitors GPU memory and assigns jobs automatically
+- **Runtime reconfiguration**: Modify GPU pool without restarting (via SIGHUP signal)
+- **Graceful shutdown**: SIGUSR1 for drain mode, SIGTERM/SIGINT for hard stop
+- **Per-job GPU assignment**: Control how many GPUs each model analysis uses
+
+### 3. Robust Model Loading
+- **PEFT/LoRA adapter support**: Automatically detects and merges adapters with base models
+- **Revision support**: Analyze specific model versions (e.g., `model@revision`)
+- **Retry logic**: Handles transient HuggingFace Hub errors
+- **Memory management**: Automatic cleanup and cache clearing
+
+### 4. Production-Ready Workflow
+- **Resume capability**: Automatically skips already-analyzed models
+- **Failure tracking**: Records failed models with error messages
+- **Progress logging**: Detailed logs for debugging and monitoring
+- **Output formats**: CSV (per-layer metrics) + HDF5 (alpha matrices for ML)
+
+## 📊 Understanding the Output
+
+### Per-Model CSV Files (`results/stats/*.csv`)
+
+Each model produces a CSV with one row per layer containing:
+
+| Metric | Description | Use Case |
+|--------|-------------|----------|
+| `alpha` | Power-law exponent (α > 1) | Model capacity indicator; higher α → more regularized |
+| `spectral_norm` | Largest singular value | Training stability (lower is more stable) |
+| `stable_rank` | Frobenius norm / spectral norm | Effective matrix rank (higher → more expressive) |
+| `entropy` | Spectral entropy | Weight distribution diversity |
+| `log_alpha_norm` | Log of α-weighted norm | Combined metric for model quality |
+| `D` | Kolmogorov-Smirnov statistic | Quality of power-law fit |
+| `num_evals` | Number of eigenvalues | Matrix size indicator |
+
+### Alpha Matrix HDF5 Files (`results/metrics/*.h5`)
+
+Structured format for machine learning pipelines:
+```python
+import h5py
+with h5py.File('results/metrics/model.h5', 'r') as f:
+    alpha_matrix = f['alpha'][:]  # Shape: (num_layers, num_modules)
+    module_names = json.loads(f['alpha'].attrs['module_names_json'])
+    print(f"Model: {f.attrs['full_name']}")
+```
+
+### Summary Statistics (`results/summary.csv`)
+
+Aggregated metrics across all analyzed models for easy comparison.
+
+## 🔧 Advanced Usage
+
+### Custom ESD Parameters
 
 ```bash
-# Run the complete example workflow
-cd examples
-bash workflow.sh
+python esd_experiment/run_experiment.py \
+    --model_list models.csv \
+    --output_dir results/ \
+    --gpus 0 1 2 3 \
+    --fix_fingers xmin_peak \     # or 'xmin_mid' or 'DKS'
+    --evals_thresh 1e-6 \          # Eigenvalue threshold
+    --bins 100 \                   # Histogram bins for xmin_peak
+    --use_svd \                    # Use SVD (slower but more accurate)
+    --parallel_esd                 # Parallel layer processing
 ```
 
-This will:
-1. Create a sample model list
-2. Run ESD analysis on example models
-3. Generate summary statistics
-4. Display results
+**ESD Methods:**
+- `xmin_mid`: Divide spectrum at midpoint (fast, default)
+- `xmin_peak`: Peak histogram method (more accurate for noisy spectra)
+- `DKS`: Full Kolmogorov-Smirnov scan (most accurate, slowest)
 
-## Model List Format
+### Runtime GPU Control
 
-Create a CSV file with your models:
+```bash
+# Start experiment
+python esd_experiment/run_experiment.py \
+    --model_list models.csv \
+    --output_dir results/ \
+    --gpus 0 1 2 3 4 5 6 7 &
 
-```csv
+PID=$!
+
+# Edit GPU pool during runtime
+echo '{"available_gpus": [4, 5, 6, 7], "max_checks": 5, "memory_threshold_mb": 500}' \
+    > results/gpu_config.json
+
+# Reload configuration
+kill -HUP $PID
+
+# Graceful shutdown (finish current jobs)
+kill -USR1 $PID
+
+# Force stop
+kill -TERM $PID
+```
+
+### Working with Adapters
+
+```bash
+# Automatically detects adapters
+cat > adapters.csv << EOF
 model_id,base_model_relation,source_model
-meta-llama/Llama-2-7b-hf,,
-microsoft/phi-2,,
-some/lora-adapter,adapter,meta-llama/Llama-2-7b-hf
+some-user/llama-lora,adapter,meta-llama/Llama-2-7b-hf
+another/phi-peft,adapter,microsoft/phi-2
+EOF
+
+python esd_experiment/run_experiment.py \
+    --model_list adapters.csv \
+    --output_dir adapter_results/ \
+    --gpus 0 1
 ```
 
-**Columns:**
-- `model_id` (required): HuggingFace repository ID
-- `base_model_relation` (optional): "adapter", "lora", or "peft" for adapters
-- `source_model` (optional): Base model for adapters
+The framework automatically:
+1. Loads the base model
+2. Loads and merges the adapter
+3. Analyzes the merged model weights
+4. Records metadata (base model, adapter type)
 
-## Output
-
-Each model generates a CSV file with per-layer metrics:
-- `alpha` - Power law exponent
-- `spectral_norm` - Largest singular value
-- `stable_rank` - Effective rank
-- `entropy` - Spectral entropy
-- And more...
-
-Summary statistics are saved to `results/summary.csv`.
-
-## Requirements
+### Analyzing Results
 
 ```bash
-pip install -r requirements.txt
+# Generate summary statistics
+python esd_experiment/analyze_results.py \
+    --results_dir results/ \
+    --verbose
+
+# Compare two experiment runs (e.g., SVD vs Gram method)
+python scatter.py \
+    --dir_a results_svd/stats/ \
+    --dir_b results_gram/stats/ \
+    --metric alpha \
+    --output alpha_comparison.png
+
+# Interactive plot (for Jupyter or local)
+python scatter.py \
+    --dir_a results_svd/stats/ \
+    --dir_b results_gram/stats/ \
+    --metric alpha \
+    --interactive
 ```
 
-Core dependencies:
-- PyTorch (with CUDA for GPU support)
-- Transformers
-- PEFT
-- Pandas, NumPy
-- GPUstat
+## 🧪 Testing
 
-## Troubleshooting
+```bash
+# Test basic setup
+python esd_experiment/tests/test_setup.py
+
+# Test GPU configuration
+python esd_experiment/tests/test_gpu.py
+
+# Run on small model list
+python esd_experiment/run_experiment.py \
+    --model_list esd_experiment/examples/atlas_models.csv \
+    --output_dir test_results/ \
+    --limit 5 \
+    --gpus 0
+```
+
+## 📚 Documentation
+
+- **[Quick Start Guide](esd_experiment/docs/QUICKSTART.md)**: Get running in 5 minutes
+- **[Full User Guide](esd_experiment/docs/README.md)**: Comprehensive documentation
+- **[Architecture Overview](esd_experiment/docs/OVERVIEW.md)**: Technical implementation details
+- **[GPU Troubleshooting](esd_experiment/docs/GPU_FIX.md)**: Common GPU issues and solutions
+
+## 🛠️ Technical Details
+
+### Core Algorithms
+
+The framework implements efficient spectral analysis:
+
+1. **Weight extraction**: Filters Conv1d/Conv2d/Linear layers from model
+2. **Eigenvalue computation**:
+   - Gram matrix method (fast): Computes eigenvalues of AA^T or A^T A
+   - SVD method (accurate): Direct singular value decomposition
+3. **Power-law fitting**: Vectorized Clauset-Shalizi-Newman estimator
+4. **Metric computation**: Parallel computation across GPU pool
+
+### Performance Optimizations
+
+- **Task ordering**: Largest layers scheduled first (better load balancing)
+- **Pinned memory**: Accelerates CPU→GPU transfers
+- **Batched conv layers**: Processes conv kernels as batched 2D matrices
+- **Numerical stability**: Symmetric Gram matrices, jitter for singular cases
+
+### Model Compatibility
+
+Tested architectures:
+- **Transformers**: GPT-2, Llama, Mistral, Phi, Gemma, Qwen
+- **Vision**: ResNet, ViT (any model with Linear/Conv layers)
+- **Adapters**: LoRA, PEFT, any adapter supported by HuggingFace
+
+## 🐛 Troubleshooting
 
 ### Models running on CPU?
-```bash
-# Verify GPU setup
-python tests/test_gpu.py
 
+```bash
 # Check CUDA availability
 python -c "import torch; print(torch.cuda.is_available())"
+
+# Test GPU setup
+python esd_experiment/tests/test_gpu.py
+
+# Verify CUDA_VISIBLE_DEVICES
+echo $CUDA_VISIBLE_DEVICES
+```
+
+### Out of memory errors?
+
+```python
+# Use gradient checkpointing (in model_loader.py)
+model.gradient_checkpointing_enable()
+
+# Or reduce batch size for conv layers in net_esd/core.py
+# (currently processes all conv kernels at once)
 ```
 
 ### Import errors?
-Make sure you're running from the repository root:
+
 ```bash
-cd /path/to/esd_experiment
-python run_experiment.py ...
+# Always run from project root
+cd /path/to/Model-Zoo
+python esd_experiment/run_experiment.py ...
+
+# Not from subdirectories
 ```
 
-### Need help?
-See [docs/QUICKSTART.md](docs/QUICKSTART.md) for common issues and solutions.
+### Slow analysis?
 
-## Citation
+- Use thread backend (default) instead of process backend
+- Enable `--use_svd` only if numerical precision is critical
+- Increase GPU pool size
+- Check if models are sharded (slower to load)
 
-If you use this framework in your research, please cite the underlying ESD methodology and tools.
+## 📖 Citation
 
-## License
+If you use this framework in your research, please cite:
 
-Follows the license of the parent ESD project.
+```bibtex
+@software{model_zoo_esd,
+  title = {Model-Zoo: Large-Scale Neural Network Spectral Analysis},
+  author = {Your Name},
+  year = {2026},
+  url = {https://github.com/yourusername/Model-Zoo}
+}
+```
+
+## 📄 License
+
+This project follows the license of the parent ESD research project. See [LICENSE](LICENSE) for details.
+
+## 🤝 Contributing
+
+Contributions welcome! Areas for improvement:
+- Additional spectral metrics (e.g., matrix condition number, nuclear norm)
+- Support for quantized models
+- Distributed analysis across multiple nodes
+- Web dashboard for results visualization
+
+## 🙏 Acknowledgments
+
+Built on:
+- **WeightWatcher**: Original ESD methodology for neural networks
+- **HuggingFace**: Model hub and transformers library
+- **PyTorch**: Deep learning framework
+- **PEFT**: Parameter-efficient fine-tuning library
+
+---
+
+**Questions?** Check the [documentation](esd_experiment/docs/) or open an issue.
