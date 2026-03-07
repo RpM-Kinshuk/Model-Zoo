@@ -10,6 +10,7 @@ from gpudispatch.auto import (
     EnvironmentType,
 )
 from gpudispatch.backends.local import LocalBackend
+from gpudispatch.backends.slurm import SLURMBackend
 from gpudispatch.backends.base import Backend
 
 
@@ -126,17 +127,14 @@ class TestAutoDispatcherLocalBackend:
 
 
 class TestAutoDispatcherUnsupportedEnvironments:
-    """Tests for unsupported environments returning NotImplementedError."""
+    """Tests for non-local backend behavior in auto_dispatcher."""
 
-    def test_slurm_raises_not_implemented(self):
-        """SLURM environment raises NotImplementedError with helpful message."""
+    def test_slurm_returns_slurm_backend(self):
+        """SLURM environment returns SLURMBackend."""
         with patch("gpudispatch.auto.detect_environment") as mock_detect:
             mock_detect.return_value = EnvironmentType.SLURM
-            with pytest.raises(NotImplementedError) as exc_info:
-                auto_dispatcher()
-            error_msg = str(exc_info.value).lower()
-            assert "slurm" in error_msg
-            assert "not yet" in error_msg or "not implemented" in error_msg or "future" in error_msg
+            dispatcher = auto_dispatcher()
+            assert isinstance(dispatcher, SLURMBackend)
 
     def test_kubernetes_raises_not_implemented(self):
         """Kubernetes environment raises NotImplementedError with helpful message."""
@@ -220,10 +218,10 @@ class TestForceBackend:
             dispatcher = auto_dispatcher(force_backend="local")
             assert isinstance(dispatcher, LocalBackend)
 
-    def test_force_slurm_raises_not_implemented(self):
-        """Forcing SLURM backend raises NotImplementedError."""
-        with pytest.raises(NotImplementedError):
-            auto_dispatcher(force_backend="slurm")
+    def test_force_slurm_backend(self):
+        """Can force SLURM backend."""
+        dispatcher = auto_dispatcher(force_backend="slurm")
+        assert isinstance(dispatcher, SLURMBackend)
 
     def test_force_kubernetes_raises_not_implemented(self):
         """Forcing Kubernetes backend raises NotImplementedError."""
@@ -235,3 +233,31 @@ class TestForceBackend:
         with pytest.raises(ValueError) as exc_info:
             auto_dispatcher(force_backend="invalid_backend")
         assert "invalid_backend" in str(exc_info.value).lower() or "unknown" in str(exc_info.value).lower()
+
+
+class TestAutoDispatcherSlurmConfig:
+    """Tests for SLURM-specific backend wiring in auto_dispatcher."""
+
+    def test_slurm_uses_list_gpu_len_as_default_gpus_per_node(self):
+        dispatcher = auto_dispatcher(force_backend="slurm", gpus=[0, 1, 2])
+        assert isinstance(dispatcher, SLURMBackend)
+        assert dispatcher.gpus_per_node == 3
+
+    def test_slurm_explicit_kwargs_are_forwarded(self):
+        dispatcher = auto_dispatcher(
+            force_backend="slurm",
+            partition="a100",
+            account="ml-team",
+            time_limit="08:00:00",
+            nodes=2,
+            gpus_per_node=4,
+            polling_interval=11,
+        )
+
+        assert isinstance(dispatcher, SLURMBackend)
+        assert dispatcher.partition == "a100"
+        assert dispatcher.account == "ml-team"
+        assert dispatcher.time_limit == "08:00:00"
+        assert dispatcher.nodes == 2
+        assert dispatcher.gpus_per_node == 4
+        assert dispatcher._polling_interval == 11

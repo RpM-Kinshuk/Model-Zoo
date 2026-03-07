@@ -79,6 +79,8 @@ esd_experiment/
 | `config_example.py` | `examples/config.py` | Renamed |
 | `example_workflow.sh` | `examples/workflow.sh` | Renamed |
 | `sample_models.csv` | `examples/example_models.csv` | Renamed |
+| `results/model--name.csv` | `results/stats/model--name.csv` | Output path updated |
+| `results/failed_models.txt` | `results/logs/failed_models.txt` | Failure log path updated |
 | `README.md` | `docs/README.md` | Copied (+ new root README) |
 | `QUICKSTART.md` | `docs/QUICKSTART.md` | Moved |
 | `OVERVIEW.md` | `docs/OVERVIEW.md` | Moved |
@@ -181,6 +183,17 @@ cmd = "python run_esd_experiment.py ..."
 cmd = "python run_experiment.py ..."
 ```
 
+### Output Paths
+
+Per-model and failure files moved to dedicated subdirectories:
+
+- `results/stats/*.csv` for per-model result CSVs
+- `results/logs/failed_models.txt` for failure tracking
+
+Compatibility behavior:
+- `src/run_experiment.py` checks both current and legacy locations when resuming
+- `utils/analyze_results.py` reads from `results/stats/` first, then falls back to legacy root CSVs
+
 ## Documentation Updates
 
 ### Finding Documentation
@@ -256,7 +269,7 @@ If you're updating from the old structure:
 
 ✅ Root-level command wrappers (`run_experiment.py`, etc.)  
 ✅ Command-line argument names  
-✅ Output file formats  
+✅ Output file schema/format (paths updated; schema unchanged)  
 ✅ Model list CSV format  
 ✅ Result CSV structure  
 
@@ -265,6 +278,7 @@ If you're updating from the old structure:
 ⚠️ Internal import paths (use `src.`, `utils.`)  
 ⚠️ Direct file paths (now in subdirectories)  
 ⚠️ Script names (`run_esd_experiment` → `run_experiment`)  
+⚠️ Default output locations (`results/stats/` and `results/logs/`)  
 
 ## Getting Help
 

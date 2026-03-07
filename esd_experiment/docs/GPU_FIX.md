@@ -4,7 +4,7 @@
 The experiment was running models on CPU instead of GPU, despite gputracker successfully assigning GPU resources.
 
 ## Root Cause
-In `esd_worker.py` line 49, the default `device_map` was set to `"cpu"`:
+In `src/worker.py`, the default `device_map` was set to `"cpu"`:
 ```python
 parser.add_argument("--device_map", type=str, default="cpu", ...)  # OLD
 ```
@@ -25,7 +25,7 @@ With `device_map="auto"`, the model will:
 ## How gputracker Works
 
 ```
-Main Process (run_esd_experiment.py)
+Main Process (run_experiment.py)
     ↓
 DispatchThread
     ↓
@@ -33,7 +33,7 @@ Monitors GPU memory → Finds free GPU (e.g., GPU 2)
     ↓
 Spawns ChildThread with: CUDA_VISIBLE_DEVICES=2
     ↓
-Worker Process (esd_worker.py)
+Worker Process (src/worker.py)
     ↓
 Loads model with device_map="auto"
     ↓
@@ -48,7 +48,7 @@ Model loads on GPU 2 (appears as cuda:0 in worker)
 
 Test your GPU setup:
 ```bash
-python test_gpu.py
+python tests/test_gpu.py
 ```
 
 This will verify:
@@ -90,7 +90,7 @@ tail -f results/logs/esd_experiment.log
    - CHANGELOG.md: Documents the fix
 
 3. **Created test script**:
-   - `test_gpu.py`: Comprehensive GPU setup verification
+   - `tests/test_gpu.py`: Comprehensive GPU setup verification
 
 ## Testing the Fix
 
@@ -102,7 +102,7 @@ echo "model_id,base_model_relation,source_model" > test_models.csv
 echo "sshleifer/tiny-gpt2,," >> test_models.csv
 
 # 2. Run with single GPU
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list test_models.csv \
     --output_dir test_results/ \
     --gpus 0 \
@@ -116,7 +116,7 @@ cat test_results/logs/esd_experiment.log | grep "Model devices"
 
 ```bash
 # Run the example workflow
-bash example_workflow.sh
+bash examples/workflow.sh
 
 # During execution, monitor:
 # - GPU utilization: watch -n 1 nvidia-smi
@@ -159,7 +159,7 @@ If automatic assignment isn't working, you can manually set:
 ```bash
 # Run single model on specific GPU
 export CUDA_VISIBLE_DEVICES=0
-python esd_worker.py \
+python src/worker.py \
     --model_id "meta-llama/Llama-2-7b-hf" \
     --output_dir results/ \
     --fix_fingers xmin_mid
@@ -179,7 +179,7 @@ python esd_worker.py \
 
 ✅ **Fixed**: Changed `device_map` default from `"cpu"` to `"auto"`  
 ✅ **Added**: GPU diagnostics in worker output  
-✅ **Created**: `test_gpu.py` for verification  
+✅ **Created**: `tests/test_gpu.py` for verification  
 ✅ **Updated**: All documentation with GPU guidance  
 
 Your experiments should now properly utilize GPU resources! 🚀

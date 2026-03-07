@@ -10,7 +10,7 @@ This script:
 5. Saves per-model ESD metrics as CSV files
 
 Usage:
-    python run_esd_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
+    python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
 import argparse
 import itertools
@@ -163,6 +163,32 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     return commands
 
 
+def get_failed_models(output_dir: Path) -> set:
+    """Get set of model IDs that previously failed."""
+    failed_models = set()
+    failed_files = [
+        output_dir / "logs" / "failed_models.txt",  # current location
+        output_dir / "failed_models.txt",  # legacy location
+    ]
+
+    for failed_file in failed_files:
+        if not failed_file.exists():
+            continue
+
+        with open(failed_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Format: "model_id\terror message"
+                model_id = line.split("\t", 1)[0].strip()
+                if model_id:
+                    failed_models.add(model_id)
+
+    return failed_models
+
+
 def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     """
     Get set of already-completed model IDs.
@@ -175,25 +201,42 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
         Set of completed model IDs
     """
     completed = set()
-    
-    # Check for existing result CSVs
-    if output_dir.exists():
-        for csv_file in output_dir.glob("*.csv"):
-            # Skip special files
-            if csv_file.name in ["failed_models.txt", "summary.csv"]:
+
+    # Check current and legacy locations for per-model result CSVs.
+    result_dirs = [output_dir / "stats", output_dir]
+    for result_dir in result_dirs:
+        if not result_dir.exists():
+            continue
+
+        for csv_file in result_dir.glob("*.csv"):
+            # Skip aggregate/special files
+            if csv_file.name in ["summary.csv", "batch_meta.csv"]:
                 continue
-            # Extract model ID from filename (reverse safe_filename transformation)
-            model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+
+            # Ignore empty placeholders from interrupted runs
+            if csv_file.stat().st_size == 0:
+                continue
+
+            # Prefer model_id from CSV content (exact/original), fallback to filename decode.
+            model_id = ""
+            try:
+                df_head = pd.read_csv(csv_file, usecols=["model_id"], nrows=1)
+                if not df_head.empty:
+                    model_id = str(df_head["model_id"].iloc[0]).strip()
+            except Exception:
+                # Legacy files may not have model_id column; use filename fallback below.
+                pass
+
+            if not model_id:
+                # Fallback: reverse safe_filename transformation used by worker naming.
+                model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+
             completed.add(model_id)
-    
-    # Remove failed models if requested
+
+    # Optionally skip previously failed models too.
     if skip_failed:
-        failed_file = output_dir / "logs" / "failed_models.txt"
-        if failed_file.exists():
-            with open(failed_file, "r") as f:
-                failed = {line.strip() for line in f if line.strip()}
-            completed -= failed
-    
+        completed |= get_failed_models(output_dir)
+
     return completed
 
 
@@ -221,7 +264,8 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
     
     skipped = len(model_df) - len(filtered_df)
     if skipped > 0:
-        print(f"Skipping {skipped} already-completed models")
+        skipped_reason = "already-completed/failed" if skip_failed else "already-completed"
+        print(f"Skipping {skipped} {skipped_reason} models")
     
     return filtered_df
 
@@ -322,14 +366,10 @@ def main():
     
     # Print summary
     completed = get_completed_models(output_dir, skip_failed=False)
-    failed_file = output_dir / "failed_models.txt"
-    num_failed = 0
-    if failed_file.exists():
-        with open(failed_file, "r") as f:
-            num_failed = sum(1 for line in f if line.strip())
-    
+    failed_models = get_failed_models(output_dir)
+
     logger.info(f"Successfully analyzed: {len(completed)} models")
-    logger.info(f"Failed: {num_failed} models")
+    logger.info(f"Failed: {len(failed_models)} models")
     logger.info(f"Results saved to: {output_dir}")
 
 

@@ -23,6 +23,7 @@ from typing import Any, List, Optional, Union
 
 from gpudispatch.backends.base import Backend
 from gpudispatch.backends.local import LocalBackend
+from gpudispatch.backends.slurm import SLURMBackend
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +93,8 @@ def auto_dispatcher(
     3. AWS/GCP: Check instance metadata endpoints (future)
     4. Default: LocalBackend for single-machine workloads
 
-    Note: In Phase 2, only LocalBackend is fully implemented. Other backends
-    will raise NotImplementedError with a helpful message.
+    Note: Local and SLURM backends are implemented. Kubernetes and cloud
+    backends are planned and still raise NotImplementedError.
 
     Args:
         force_backend: Force a specific backend type instead of auto-detection.
@@ -112,7 +113,7 @@ def auto_dispatcher(
 
     Raises:
         NotImplementedError: If the detected (or forced) environment is not
-            yet supported (SLURM, Kubernetes, AWS, GCP).
+            yet supported (Kubernetes, AWS, GCP).
         ValueError: If force_backend specifies an unknown backend type.
 
     Example:
@@ -218,11 +219,23 @@ def _create_backend(
         )
 
     elif env_type == EnvironmentType.SLURM:
-        raise NotImplementedError(
-            "SLURM backend is not yet implemented. "
-            "This will be available in a future release. "
-            "For now, you can use LocalBackend on SLURM compute nodes by "
-            "setting force_backend='local' in auto_dispatcher()."
+        logger.info("Creating SLURMBackend")
+
+        slurm_gpus_per_node = kwargs.pop("gpus_per_node", None)
+        if slurm_gpus_per_node is None:
+            if isinstance(gpus, list):
+                slurm_gpus_per_node = max(1, len(gpus))
+            else:
+                slurm_gpus_per_node = 1
+
+        return SLURMBackend(
+            partition=kwargs.pop("partition", "gpu"),
+            account=kwargs.pop("account", None),
+            time_limit=kwargs.pop("time_limit", "24:00:00"),
+            nodes=kwargs.pop("nodes", 1),
+            gpus_per_node=slurm_gpus_per_node,
+            polling_interval=polling_interval,
+            **kwargs,
         )
 
     elif env_type == EnvironmentType.KUBERNETES:

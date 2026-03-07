@@ -10,6 +10,20 @@ from typing import Any, Callable, Optional, Sequence, Union
 
 from gpudispatch.core.resources import Memory, ResourceRequirements
 
+CommandType = Union[str, Sequence[str]]
+
+
+def _command_display_name(command: CommandType) -> str:
+    """Build a compact display name for command jobs."""
+    if isinstance(command, str):
+        compact = " ".join(command.strip().split())
+        return compact[:80] if compact else "command"
+
+    parts = list(command)
+    if not parts:
+        return "command"
+    return str(parts[0])
+
 
 class JobStatus(Enum):
     """Job lifecycle status."""
@@ -31,9 +45,16 @@ class JobStatus(Enum):
 class Job:
     """A unit of work to be executed on GPU resources."""
 
-    fn: Callable[..., Any]
+    fn: Optional[Callable[..., Any]]
     args: tuple[Any, ...] = field(default_factory=tuple)
     kwargs: dict[str, Any] = field(default_factory=dict)
+
+    # Command execution (for script/binary workloads)
+    command: Optional[CommandType] = None
+    shell: bool = False
+    cwd: Optional[str] = None
+    env: dict[str, str] = field(default_factory=dict)
+    timeout: Optional[float] = None
 
     # Resource requirements
     gpu_count: int = 1
@@ -62,18 +83,46 @@ class Job:
 
     def __init__(
         self,
-        fn: Callable[..., Any],
+        fn: Optional[Callable[..., Any]] = None,
         args: tuple[Any, ...] = (),
         kwargs: Optional[dict[str, Any]] = None,
+        command: Optional[CommandType] = None,
+        shell: Optional[bool] = None,
+        cwd: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
         gpu: int = 1,
         memory: Optional[Union[str, Memory]] = None,
         priority: int = 0,
         name: Optional[str] = None,
         after: Optional[Sequence[Job]] = None,
     ):
+        if fn is None and command is None:
+            raise ValueError("Job requires either fn or command")
+        if fn is not None and command is not None:
+            raise ValueError("Job cannot specify both fn and command")
+
         self.fn = fn
-        self.args = args
+        self.args = tuple(args)
         self.kwargs = kwargs or {}
+
+        normalized_command: Optional[CommandType] = None
+        if command is not None:
+            if isinstance(command, str):
+                normalized_command = command
+            else:
+                normalized_command = tuple(str(part) for part in command)
+                if not normalized_command:
+                    raise ValueError("Command sequence cannot be empty")
+
+        self.command = normalized_command
+        self.shell = isinstance(self.command, str) if shell is None else shell
+        if self.shell and self.command is not None and not isinstance(self.command, str):
+            raise ValueError("shell=True requires command to be a string")
+
+        self.cwd = cwd
+        self.env = {str(k): str(v) for k, v in (env or {}).items()}
+        self.timeout = timeout
         self.gpu_count = gpu
 
         if memory is None:
@@ -84,7 +133,14 @@ class Job:
             self.memory = memory
 
         self.priority = priority
-        self.name = name or getattr(fn, "__name__", "anonymous")
+        if name is not None:
+            self.name = name
+        elif self.command is not None:
+            self.name = _command_display_name(self.command)
+        elif fn is not None:
+            self.name = getattr(fn, "__name__", "anonymous")
+        else:
+            self.name = "anonymous"
 
         self.dependencies = set()
         if after:
@@ -109,8 +165,32 @@ class Job:
         """Get resource requirements for this job."""
         return ResourceRequirements(gpu=self.gpu_count, memory=self.memory)
 
+    @property
+    def is_command(self) -> bool:
+        """Whether this job executes a shell command instead of a callable."""
+        return self.command is not None
+
     def __repr__(self) -> str:
-        return f"Job(id={self.id}, name={self.name}, status={self.status.value})"
+        mode = "command" if self.is_command else "callable"
+        return (
+            f"Job(id={self.id}, name={self.name}, mode={mode}, "
+            f"status={self.status.value})"
+        )
+
+
+@dataclass
+class CommandResult:
+    """Result payload for command-based jobs."""
+
+    command: CommandType
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def is_success(self) -> bool:
+        """Check if command exited successfully."""
+        return self.returncode == 0
 
 
 @dataclass

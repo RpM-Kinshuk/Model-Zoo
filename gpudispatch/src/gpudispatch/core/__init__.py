@@ -1,7 +1,7 @@
 """Core gpudispatch components."""
 
 from gpudispatch.core.resources import GPU, Memory, Resource, ResourceRequirements
-from gpudispatch.core.job import Job, JobStatus, JobResult
+from gpudispatch.core.job import CommandResult, Job, JobResult, JobStatus
 from gpudispatch.core.queue import FIFOQueue, PriorityQueue, JobQueue
 from gpudispatch.core.dispatcher import Dispatcher, DispatcherStats
 from gpudispatch.core.signals import SignalHandler, load_config_from_file
@@ -14,6 +14,7 @@ __all__ = [
     "Job",
     "JobStatus",
     "JobResult",
+    "CommandResult",
     "FIFOQueue",
     "PriorityQueue",
     "JobQueue",

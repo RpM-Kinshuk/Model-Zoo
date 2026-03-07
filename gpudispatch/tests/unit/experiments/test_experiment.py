@@ -24,6 +24,7 @@ from gpudispatch.experiments.search_space import Distribution, Log, SearchSpace,
 from gpudispatch.experiments.storage import MemoryStorage
 from gpudispatch.experiments.strategies import GridStrategy, RandomStrategy
 from gpudispatch.experiments.trial import Trial, TrialStatus
+from gpudispatch.observability.hooks import EventHook, MetricsHook, TraceHook, hooks
 
 
 # Test fixtures and helper functions
@@ -429,3 +430,76 @@ class TestEdgeCases:
         # Should be marked as failed
         assert len(results.trials) == 1
         assert results.trials[0].status == TrialStatus.FAILED
+
+
+class TestExperimentObservability:
+    """Tests for experiment observability hook emission."""
+
+    def setup_method(self) -> None:
+        hooks.clear()
+
+    def teardown_method(self) -> None:
+        hooks.clear()
+
+    def test_run_emits_experiment_lifecycle_hooks(self) -> None:
+        events = []
+        hooks.register(
+            EventHook(
+                on_experiment_start=lambda **kw: events.append(("start", kw)),
+                on_experiment_complete=lambda **kw: events.append(("complete", kw)),
+            )
+        )
+
+        exp = Experiment(
+            fn=simple_function,
+            name="obs_exp",
+            search_space=SearchSpace.from_dict({"lr": [0.1]}),
+        )
+        exp.run()
+
+        assert [name for name, _ in events] == ["start", "complete"]
+        assert events[0][1]["experiment_id"] == "obs_exp"
+        assert events[1][1]["total_jobs"] == 1
+        assert events[1][1]["successful_trials"] == 1
+        assert events[1][1]["failed_trials"] == 0
+
+    def test_run_emits_trial_complete_and_failed_hooks(self) -> None:
+        events = []
+        hooks.register(
+            EventHook(
+                on_experiment_trial_complete=lambda **kw: events.append(("complete", kw)),
+                on_experiment_trial_failed=lambda **kw: events.append(("failed", kw)),
+            )
+        )
+
+        exp = Experiment(
+            fn=sometimes_failing_function,
+            name="obs_trial_exp",
+            search_space=SearchSpace.from_dict({"lr": [0.001, 0.1]}),
+        )
+        exp.run()
+
+        names = [name for name, _ in events]
+        assert names.count("complete") == 1
+        assert names.count("failed") == 1
+
+    def test_metrics_and_trace_hooks_collect_experiment_signals(self) -> None:
+        metrics_hook = MetricsHook()
+        trace_hook = TraceHook()
+        hooks.register(metrics_hook)
+        hooks.register(trace_hook)
+
+        exp = Experiment(
+            fn=simple_function,
+            name="obs_metrics_exp",
+            search_space=SearchSpace.from_dict({"lr": [0.1]}),
+        )
+        exp.run()
+
+        snapshot = metrics_hook.snapshot()
+        assert snapshot["counters"]["experiment_started"] == 1
+        assert snapshot["counters"]["experiment_completed"] == 1
+        assert snapshot["counters"]["trial_started"] == 1
+        assert snapshot["counters"]["trial_completed"] == 1
+        assert any(span.name == "experiment" for span in trace_hook.spans)
+        assert any(span.name == "experiment_trial" for span in trace_hook.spans)

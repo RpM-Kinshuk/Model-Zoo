@@ -6,7 +6,7 @@ Get started with large-scale ESD analysis in 5 minutes.
 
 ```bash
 # Navigate to project directory
-cd /Users/kigoel/Projects/mlc/ESD
+cd /Users/kigoel/Projects/mlc/Model-Zoo
 
 # Install dependencies (if not already installed)
 pip install torch transformers peft accelerate huggingface_hub
@@ -22,8 +22,8 @@ export HF_TOKEN=your_token_here
 
 **Option A: Start with the sample**
 ```bash
-cd esd_experiment
-cat sample_models.csv
+# Already in esd_experiment/
+cat examples/example_models.csv
 ```
 
 **Option B: Create your own**
@@ -49,15 +49,15 @@ python create_model_list.py from-csv old_format.csv \
 
 **Minimal command:**
 ```bash
-python run_esd_experiment.py \
-    --model_list sample_models.csv \
+python run_experiment.py \
+    --model_list examples/example_models.csv \
     --output_dir results/ \
     --gpus 0
 ```
 
 **Full control:**
 ```bash
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list my_models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 \
@@ -80,7 +80,7 @@ This creates `results/summary.csv` with model-level statistics.
 
 ### Per-Model Results
 
-Each model gets a CSV file: `results/model--name.csv`
+Each model gets a CSV file: `results/stats/model--name.csv`
 
 Key columns:
 - `alpha`: Power law exponent per layer (lower = heavier tails)
@@ -121,16 +121,16 @@ Just rerun the same command - completed models are automatically skipped:
 
 ```bash
 # First run: analyzes 50/100 models, then crashes
-python run_esd_experiment.py --model_list models.csv --output_dir results/
+python run_experiment.py --model_list models.csv --output_dir results/
 
 # Second run: automatically skips first 50, analyzes remaining 50
-python run_esd_experiment.py --model_list models.csv --output_dir results/
+python run_experiment.py --model_list models.csv --output_dir results/
 ```
 
 ### Testing with a Small Subset
 
 ```bash
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir test_results/ \
     --limit 5 \
@@ -141,13 +141,13 @@ python run_esd_experiment.py \
 
 ```bash
 # Use xmin_peak method
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results_peak/ \
     --fix_fingers xmin_peak
 
 # Use DKS method
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results_dks/ \
     --fix_fingers DKS
@@ -167,12 +167,12 @@ watch -n 1 nvidia-smi
 
 ### Count completed models
 ```bash
-ls results/*.csv | wc -l
+ls results/stats/*.csv | wc -l
 ```
 
 ### View failed models
 ```bash
-cat results/failed_models.txt
+cat results/logs/failed_models.txt
 ```
 
 ## Tips & Tricks
@@ -180,8 +180,8 @@ cat results/failed_models.txt
 ### 1. Start Small
 Test with 3-5 models first to ensure everything works:
 ```bash
-python run_esd_experiment.py \
-    --model_list sample_models.csv \
+python run_experiment.py \
+    --model_list examples/example_models.csv \
     --output_dir test/ \
     --gpus 0 \
     --limit 3
@@ -194,9 +194,9 @@ python run_esd_experiment.py \
 
 ### 3. Handle Failures
 If many models fail:
-- Check `results/failed_models.txt` for error patterns
+- Check `results/logs/failed_models.txt` for error patterns
 - Verify HuggingFace token is set correctly
-- Try with `--device_map cpu` for memory issues
+- For memory issues, set `device_map="cpu"` in `src/worker.py`
 
 ### 4. Batch Analysis
 
@@ -209,10 +209,9 @@ from pathlib import Path
 results_dir = Path("results/")
 all_data = []
 
-for csv_file in results_dir.glob("*.csv"):
-    if csv_file.name not in ["summary.csv", "failed_models.txt"]:
-        df = pd.read_csv(csv_file)
-        all_data.append(df)
+for csv_file in (results_dir / "stats").glob("*.csv"):
+    df = pd.read_csv(csv_file)
+    all_data.append(df)
 
 # Combine
 combined = pd.concat(all_data, ignore_index=True)
@@ -252,14 +251,14 @@ If you see `cpu` instead of `cuda:0`, check:
 **Solution**: 
 1. Verify GPU availability: `nvidia-smi`
 2. Check CUDA in PyTorch: `python -c "import torch; print(torch.cuda.is_available())"`
-3. Ensure `device_map="auto"` in esd_worker.py (line 49)
+3. Ensure `device_map="auto"` in `src/worker.py`
 4. Check gputracker is assigning GPUs (look for "CUDA_VISIBLE_DEVICES" in logs)
 
 ### "No module named gputracker"
 Make sure you're running from the correct directory:
 ```bash
-cd /Users/kigoel/Projects/mlc/ESD/esd_experiment
-python run_esd_experiment.py ...
+cd /Users/kigoel/Projects/mlc/Model-Zoo/esd_experiment
+python run_experiment.py ...
 ```
 
 ### "Could not resolve base model for adapter"
@@ -270,21 +269,21 @@ adapter-repo,adapter,base-model-repo
 ```
 
 ### Out of Memory
-- Use CPU mode: edit `esd_worker.py` and set `device_map="cpu"`
+- Use CPU mode: edit `src/worker.py` and set `device_map="cpu"`
 - Reduce parallel jobs by using fewer GPUs
 - Use smaller models first
 
 ### GPU Not Releasing
 - Check if processes are stuck: `nvidia-smi`
-- Kill stuck processes: `pkill -f esd_worker.py`
+- Kill stuck processes: `pkill -f worker.py`
 - Increase `--max_check` for more conservative allocation
 
 ## Next Steps
 
 - Read the full [README.md](README.md) for advanced usage
-- Explore `example_workflow.sh` for a complete pipeline
-- Modify `esd_worker.py` to add custom metrics
-- Check out the analysis utilities in `analyze_results.py`
+- Explore `examples/workflow.sh` for a complete pipeline
+- Modify `src/worker.py` to add custom metrics
+- Check out the analysis utilities in `utils/analyze_results.py`
 
 ## Getting Help
 
@@ -292,4 +291,4 @@ Common issues and solutions:
 1. **Authentication errors**: Set `HF_TOKEN` environment variable
 2. **GPU selection**: Verify GPU IDs with `nvidia-smi`
 3. **Import errors**: Ensure you're in the `esd_experiment/` directory
-4. **Failed models**: Check error messages in `results/failed_models.txt`
+4. **Failed models**: Check error messages in `results/logs/failed_models.txt`

@@ -23,7 +23,7 @@ gpudispatch is a universal GPU orchestration library designed to work seamlessly
 
 - **Job orchestration**: Queue, schedule, and execute GPU workloads
 - **Hyperparameter experiments**: Grid search, random search, with extensible strategies
-- **Multi-backend support**: Local, SLURM (stub), Kubernetes (planned), Cloud (planned)
+- **Multi-backend support**: Local, SLURM, Kubernetes (planned), Cloud (planned)
 - **Observability**: Hook-based event system for monitoring
 
 ### Design Philosophy
@@ -56,7 +56,7 @@ gpudispatch is a universal GPU orchestration library designed to work seamlessly
 │                          Backend Layer                               │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │
 │  │   Local    │  │   SLURM    │  │ Kubernetes │  │   Cloud    │     │
-│  │  Backend   │  │  (stub)    │  │ (planned)  │  │ (planned)  │     │
+│  │  Backend   │  │  Backend   │  │ (planned)  │  │ (planned)  │     │
 │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                        Storage Layer                                 │
@@ -545,7 +545,7 @@ with backend:
 
 ### SLURM Backend (`slurm.py`)
 
-Extensible stub for HPC clusters.
+HPC backend for SLURM environments.
 
 ```python
 class SLURMBackend(Backend):
@@ -559,15 +559,20 @@ class SLURMBackend(Backend):
     ): ...
 ```
 
-Currently raises `NotImplementedError` with helpful messages pointing to extension methods. Designed to be subclassed:
+Behavior highlights:
+
+- Discovers GPUs from `SLURM_STEP_GPUS`, `SLURM_JOB_GPUS`, or `CUDA_VISIBLE_DEVICES`
+- Falls back to SLURM job metadata (`scontrol show job`) and local `nvidia-smi` probes
+- Supports in-process GPU allocation/release/list lifecycle
+- Includes scheduler helpers for `sbatch`, `squeue`/`sacct`, and `scancel`
+
+You can still subclass to customize scheduler integration:
 
 ```python
 class MySLURMBackend(SLURMBackend):
-    def allocate_gpus(self, count, memory=None):
-        # sbatch job submission
-        # squeue monitoring
-        # GPU node allocation
-        ...
+    def _submit_job(self, script: str) -> str:
+        # custom sbatch wrapper
+        return super()._submit_job(script)
 ```
 
 ### Auto-Detection (`auto.py`)
@@ -582,7 +587,7 @@ dispatcher = auto_dispatcher()
 
 # Force specific backend
 dispatcher = auto_dispatcher(force_backend="local")
-dispatcher = auto_dispatcher(force_backend="slurm")  # NotImplementedError
+dispatcher = auto_dispatcher(force_backend="slurm")
 ```
 
 **Detection priority:**
@@ -609,6 +614,10 @@ class EventHook:
     on_job_failed: Optional[Callable] = None
     on_experiment_start: Optional[Callable] = None
     on_experiment_complete: Optional[Callable] = None
+    on_experiment_failed: Optional[Callable] = None
+    on_experiment_trial_start: Optional[Callable] = None
+    on_experiment_trial_complete: Optional[Callable] = None
+    on_experiment_trial_failed: Optional[Callable] = None
 ```
 
 ### HookRegistry

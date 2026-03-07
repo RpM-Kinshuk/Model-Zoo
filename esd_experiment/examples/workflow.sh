@@ -65,7 +65,7 @@ python "$PROJECT_ROOT/run_experiment.py" \
     --max_check 1
 
 # To run with different ESD parameters:
-# python run_esd_experiment.py \
+# python run_experiment.py \
 #     --model_list "$MODEL_LIST" \
 #     --output_dir "$OUTPUT_DIR" \
 #     --gpus ${GPUS[@]} \
@@ -93,16 +93,20 @@ echo ""
 echo "Results saved to: $OUTPUT_DIR"
 echo "Summary saved to: $OUTPUT_DIR/summary.csv"
 
-# Count files
-NUM_RESULTS=$(find "$OUTPUT_DIR" -name "*.csv" -not -name "summary.csv" -not -name "failed_models.txt" | wc -l)
+# Count per-model result files
+if [ -d "$OUTPUT_DIR/stats" ]; then
+    NUM_RESULTS=$(find "$OUTPUT_DIR/stats" -name "*.csv" | wc -l)
+else
+    NUM_RESULTS=0
+fi
 echo "Number of analyzed models: $NUM_RESULTS"
 
-if [ -f "$OUTPUT_DIR/failed_models.txt" ]; then
-    NUM_FAILED=$(wc -l < "$OUTPUT_DIR/failed_models.txt")
+if [ -f "$OUTPUT_DIR/logs/failed_models.txt" ]; then
+    NUM_FAILED=$(wc -l < "$OUTPUT_DIR/logs/failed_models.txt")
     echo "Number of failed models: $NUM_FAILED"
     echo ""
     echo "Failed models:"
-    cat "$OUTPUT_DIR/failed_models.txt"
+    cat "$OUTPUT_DIR/logs/failed_models.txt"
 fi
 
 if [ $? -eq 130 ]; then

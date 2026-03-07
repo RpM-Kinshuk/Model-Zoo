@@ -23,7 +23,7 @@ ESD_CONFIG = {
 
 # Model Loading Parameters
 MODEL_CONFIG = {
-    "device_map": "cpu",  # Device map for initial loading
+    "device_map": "auto",  # Device map for initial loading
     "torch_dtype": "float16",  # Model precision
     "max_retries": 2,  # Retry attempts on failure
 }

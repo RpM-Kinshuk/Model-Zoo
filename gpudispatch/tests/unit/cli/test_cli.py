@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from gpudispatch.cli.main import main
+from gpudispatch.core import CommandResult
 from gpudispatch.experiments import Experiment
 from gpudispatch.experiments.registry import _reset_storage
 from gpudispatch.experiments.storage import MemoryStorage
 from gpudispatch.utils.gpu import GPUInfo
+
+
+@dataclass
+class _FakeJob:
+    id: str
+    name: str
 
 
 @pytest.fixture
@@ -150,3 +158,87 @@ class TestListCommand:
             result = runner.invoke(main, ["list"])
             assert result.exit_code == 0
             assert "No experiments found" in result.output
+
+
+class TestProfilesCommand:
+    def test_profiles_lists_presets(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["profiles"])
+        assert result.exit_code == 0
+        assert "quickstart" in result.output
+        assert "batch" in result.output
+        assert "high_reliability" in result.output
+
+
+class TestRunScriptCommand:
+    def _mock_dispatcher(self) -> MagicMock:
+        dispatcher = MagicMock()
+        dispatcher.__enter__.return_value = dispatcher
+        dispatcher.__exit__.return_value = None
+        return dispatcher
+
+    def test_run_script_submits_script_with_profile_defaults(
+        self,
+        runner: CliRunner,
+    ) -> None:
+        dispatcher = self._mock_dispatcher()
+        job = _FakeJob(id="job123", name="train")
+        dispatcher.submit_script.return_value = job
+        dispatcher.wait.return_value = CommandResult(
+            command=["python", "train.py"],
+            returncode=0,
+            stdout="done\n",
+            stderr="",
+        )
+
+        with patch("gpudispatch.cli.main.dispatcher_from_profile", return_value=dispatcher):
+            result = runner.invoke(
+                main,
+                [
+                    "run-script",
+                    "--profile",
+                    "quickstart",
+                    "--gpu",
+                    "2",
+                    "--memory",
+                    "8GB",
+                    "--priority",
+                    "3",
+                    "--env",
+                    "A=1",
+                    "--env",
+                    "B=2",
+                    "train.py",
+                    "--",
+                    "--epochs",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "done" in result.output
+        assert "Job completed: train (job123)" in result.output
+
+        dispatcher.submit_script.assert_called_once()
+        kwargs = dispatcher.submit_script.call_args.kwargs
+        assert kwargs["script_path"] == "train.py"
+        assert kwargs["script_args"] == ("--epochs", "5")
+        assert kwargs["gpu"] == 2
+        assert kwargs["memory"] == "8GB"
+        assert kwargs["priority"] == 3
+        assert kwargs["env"] == {"A": "1", "B": "2"}
+
+    def test_run_script_rejects_invalid_env_format(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["run-script", "--env", "BROKEN", "train.py"])
+        assert result.exit_code != 0
+        assert "Invalid --env value" in result.output
+
+    def test_run_script_surfaces_job_failure(self, runner: CliRunner) -> None:
+        dispatcher = self._mock_dispatcher()
+        dispatcher.submit_script.return_value = _FakeJob(id="job999", name="failing-job")
+        dispatcher.wait.side_effect = RuntimeError("boom")
+
+        with patch("gpudispatch.cli.main.dispatcher_from_profile", return_value=dispatcher):
+            result = runner.invoke(main, ["run-script", "train.py"])
+
+        assert result.exit_code == 1
+        assert "Job failed: boom" in result.output

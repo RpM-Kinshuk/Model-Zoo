@@ -34,8 +34,8 @@ some/lora-adapter,adapter,meta-llama/Llama-2-7b-hf
 ### 2. Run the Experiment
 
 ```bash
-python run_esd_experiment.py \
-    --model_list sample_models.csv \
+python run_experiment.py \
+    --model_list examples/example_models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 \
     --num_gpus_per_job 1 \
@@ -44,7 +44,7 @@ python run_esd_experiment.py \
 
 ### 3. View Results
 
-Each model gets its own CSV file in the output directory with per-layer metrics:
+Each model gets its own CSV file in `results/stats/` with per-layer metrics:
 - `alpha`: Power law exponent
 - `spectral_norm`: Largest singular value
 - `stable_rank`: Effective rank
@@ -87,23 +87,23 @@ Each model gets its own CSV file in the output directory with per-layer metrics:
 
 ```
 esd_experiment/
-├── run_esd_experiment.py   # Main experiment runner
-│   └── Uses gputracker to dispatch jobs
+├── run_experiment.py       # Main experiment entry point
+│   └── Calls src/run_experiment.py
 │
-├── esd_worker.py           # Per-model analysis worker
+├── src/worker.py           # Per-model analysis worker
 │   └── Loads model and runs ESD analysis
 │
-├── model_loader.py         # Robust model loading
+├── src/model_loader.py     # Robust model loading
 │   ├── Handles standard models
 │   ├── Handles PEFT adapters
 │   └── Auto-detects adapter base models
 │
-└── sample_models.csv       # Example model list
+└── examples/example_models.csv  # Example model list
 ```
 
 ### How It Works
 
-1. **Main Runner** (`run_esd_experiment.py`):
+1. **Main Runner** (`run_experiment.py` → `src/run_experiment.py`):
    - Reads model list CSV
    - Filters out already-completed models (resume)
    - Generates worker commands for each model
@@ -115,13 +115,13 @@ esd_experiment/
    - Dispatches jobs with `CUDA_VISIBLE_DEVICES` set
    - Tracks occupied GPUs to avoid conflicts
 
-3. **Worker** (`esd_worker.py`):
+3. **Worker** (`src/worker.py`):
    - Loads single model (adapter or standard)
    - Runs `net_esd_estimator` from `net_esd.py`
    - Saves per-layer metrics to CSV
    - Records failures for retry/skip
 
-4. **Model Loader** (`model_loader.py`):
+4. **Model Loader** (`src/model_loader.py`):
    - Detects if model is PEFT adapter
    - Loads and merges adapter weights robustly
    - Handles HuggingFace authentication
@@ -139,7 +139,7 @@ The gputracker automatically sets `CUDA_VISIBLE_DEVICES` for each worker process
 
 To force CPU mode (e.g., for very large models):
 ```bash
-# Edit esd_worker.py and change line 49 to:
+# Edit src/worker.py and change the --device_map default to:
 # parser.add_argument("--device_map", type=str, default="cpu", ...)
 ```
 
@@ -164,23 +164,23 @@ Simply rerun the same command - already-completed models are automatically skipp
 
 ```bash
 # Run 1: Analyzes models 1-50, crashes
-python run_esd_experiment.py --model_list models.csv --output_dir results/
+python run_experiment.py --model_list models.csv --output_dir results/
 
 # Run 2: Automatically skips models 1-50, starts from 51
-python run_esd_experiment.py --model_list models.csv --output_dir results/
+python run_experiment.py --model_list models.csv --output_dir results/
 ```
 
 To force recomputation:
 ```bash
-python run_esd_experiment.py --model_list models.csv --output_dir results/ --overwrite
+python run_experiment.py --model_list models.csv --output_dir results/ --overwrite
 ```
 
 ### Custom Analysis Pipeline
 
-You can easily modify `esd_worker.py` to add custom analysis:
+You can easily modify `src/worker.py` to add custom analysis:
 
 ```python
-# In esd_worker.py, after net_esd_estimator:
+# In src/worker.py, after net_esd_estimator:
 
 # Add custom metric computation
 custom_metrics = compute_my_metrics(model)
@@ -200,7 +200,7 @@ from pathlib import Path
 results_dir = Path("results/")
 all_results = []
 
-for csv_file in results_dir.glob("*.csv"):
+for csv_file in (results_dir / "stats").glob("*.csv"):
     df = pd.read_csv(csv_file)
     # Compute model-level statistics
     model_stats = {
@@ -230,7 +230,7 @@ This framework builds on your existing codebase:
 ### GPU Not Releasing
 
 If GPUs aren't being released properly:
-- Check `logs/esd_experiment.log` for errors
+- Check `results/logs/esd_experiment.log` for errors
 - Ensure worker processes are completing
 - Increase `--max_check` for more conservative GPU allocation
 
@@ -245,23 +245,23 @@ If adapters fail to load:
 
 If you run out of GPU memory:
 - Use `--num_gpus_per_job 2` for larger models
-- Set `device_map="cpu"` in `esd_worker.py` for CPU analysis
+- Set `device_map="cpu"` in `src/worker.py` for CPU analysis
 - Reduce number of parallel jobs with fewer `--gpus`
 
 ### Failed Models
 
-Check `results/failed_models.txt` for errors:
+Check `results/logs/failed_models.txt` for errors:
 ```bash
-cat results/failed_models.txt
+cat results/logs/failed_models.txt
 ```
 
 To retry failed models:
 ```bash
 # Remove from failed list
-rm results/failed_models.txt
+rm results/logs/failed_models.txt
 
 # Rerun (will skip successful, retry failed)
-python run_esd_experiment.py --model_list models.csv --output_dir results/
+python run_experiment.py --model_list models.csv --output_dir results/
 ```
 
 ## Environment Setup

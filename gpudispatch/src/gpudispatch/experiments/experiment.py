@@ -17,6 +17,7 @@ from gpudispatch.experiments.search_space import SearchSpace
 from gpudispatch.experiments.storage import MemoryStorage, Storage
 from gpudispatch.experiments.strategies import GridStrategy, RandomStrategy, Strategy
 from gpudispatch.experiments.trial import Trial, TrialStatus
+from gpudispatch.observability.hooks import hooks
 
 
 class Experiment:
@@ -128,54 +129,103 @@ class Experiment:
         Returns:
             Results object containing all executed trials.
         """
-        # Handle trials=0 case
-        if trials == 0:
-            return Results(
-                trials=[],
+        run_started_at = datetime.now()
+        hooks.emit(
+            "on_experiment_start",
+            experiment_id=self._name,
+            metric=self._metric,
+            maximize=self._maximize,
+            requested_trials=trials,
+        )
+
+        try:
+            # Handle trials=0 case
+            if trials == 0:
+                results = Results(
+                    trials=[],
+                    metric=self._metric,
+                    maximize=self._maximize,
+                    experiment_name=self._name,
+                )
+                hooks.emit(
+                    "on_experiment_complete",
+                    experiment_id=self._name,
+                    total_jobs=0,
+                    successful_trials=0,
+                    failed_trials=0,
+                    runtime_seconds=(datetime.now() - run_started_at).total_seconds(),
+                )
+                return results
+
+            # Determine trial count based on strategy type
+            trial_count = 0
+            max_trials = trials
+
+            # For grid strategies without explicit trial count, run all combinations
+            if max_trials is None and isinstance(self._strategy, GridStrategy):
+                max_trials = self._search_space.grid_size or 1
+
+            # For random strategies without explicit trial count, use strategy's n_trials
+            if max_trials is None and isinstance(self._strategy, RandomStrategy):
+                max_trials = self._strategy.n_trials
+
+            # Default to 1 trial if nothing else specified
+            if max_trials is None:
+                max_trials = 1
+
+            while trial_count < max_trials:
+                # Get next suggested params
+                params = self._strategy.suggest(self._search_space, self._trials)
+
+                # If strategy returns None, it's exhausted
+                if params is None:
+                    break
+
+                # Execute trial
+                trial = self._execute_trial(params)
+                self._trials.append(trial)
+
+                # Save to storage
+                self._storage.save_trial(self._name, trial)
+
+                trial_count += 1
+
+            results = Results(
+                trials=list(self._trials),
                 metric=self._metric,
                 maximize=self._maximize,
                 experiment_name=self._name,
             )
 
-        # Determine trial count based on strategy type
-        trial_count = 0
-        max_trials = trials
+            successful_trials = len(
+                [trial for trial in self._trials if trial.status == TrialStatus.COMPLETED]
+            )
+            failed_trials = len(
+                [trial for trial in self._trials if trial.status == TrialStatus.FAILED]
+            )
 
-        # For grid strategies without explicit trial count, run all combinations
-        if max_trials is None and isinstance(self._strategy, GridStrategy):
-            max_trials = self._search_space.grid_size or 1
+            hooks.emit(
+                "on_experiment_complete",
+                experiment_id=self._name,
+                total_jobs=len(self._trials),
+                successful_trials=successful_trials,
+                failed_trials=failed_trials,
+                runtime_seconds=(datetime.now() - run_started_at).total_seconds(),
+                metric=self._metric,
+                maximize=self._maximize,
+            )
+            return results
 
-        # For random strategies without explicit trial count, use strategy's n_trials
-        if max_trials is None and isinstance(self._strategy, RandomStrategy):
-            max_trials = self._strategy.n_trials
-
-        # Default to 1 trial if nothing else specified
-        if max_trials is None:
-            max_trials = 1
-
-        while trial_count < max_trials:
-            # Get next suggested params
-            params = self._strategy.suggest(self._search_space, self._trials)
-
-            # If strategy returns None, it's exhausted
-            if params is None:
-                break
-
-            # Execute trial
-            trial = self._execute_trial(params)
-            self._trials.append(trial)
-
-            # Save to storage
-            self._storage.save_trial(self._name, trial)
-
-            trial_count += 1
-
-        return Results(
-            trials=list(self._trials),
-            metric=self._metric,
-            maximize=self._maximize,
-            experiment_name=self._name,
-        )
+        except Exception as exc:
+            hooks.emit(
+                "on_experiment_failed",
+                experiment_id=self._name,
+                error=str(exc),
+                runtime_seconds=(datetime.now() - run_started_at).total_seconds(),
+                metric=self._metric,
+                maximize=self._maximize,
+            )
+            raise
 
     @classmethod
     def load(cls, name: str, storage: Optional[Storage] = None) -> Optional["Experiment"]:
@@ -263,6 +313,13 @@ class Experiment:
         )
         self._next_trial_id += 1
 
+        hooks.emit(
+            "on_experiment_trial_start",
+            experiment_id=self._name,
+            trial_id=trial.id,
+            params=params,
+        )
+
         try:
             result = self._fn(params)
 
@@ -275,9 +332,27 @@ class Experiment:
             trial.metrics = result
             trial.status = TrialStatus.COMPLETED
 
+            hooks.emit(
+                "on_experiment_trial_complete",
+                experiment_id=self._name,
+                trial_id=trial.id,
+                params=params,
+                metrics=trial.metrics,
+                runtime_seconds=(datetime.now() - trial.started_at).total_seconds(),
+            )
+
         except Exception as e:
             trial.status = TrialStatus.FAILED
             trial.error = str(e)
+
+            hooks.emit(
+                "on_experiment_trial_failed",
+                experiment_id=self._name,
+                trial_id=trial.id,
+                params=params,
+                error=trial.error,
+                runtime_seconds=(datetime.now() - trial.started_at).total_seconds(),
+            )
 
         trial.completed_at = datetime.now()
         return trial

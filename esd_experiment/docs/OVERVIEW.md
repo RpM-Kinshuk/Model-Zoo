@@ -18,14 +18,14 @@ Analyzes **hundreds of models** from HuggingFace in parallel across multiple GPU
 
 ```bash
 # 1. Test your setup
-python test_setup.py
+python tests/test_setup.py
 
 # 2. Create model list
 python create_model_list.py create --output models.csv \
     --models "meta-llama/Llama-2-7b-hf" "microsoft/phi-2"
 
 # 3. Run experiment
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3
@@ -41,30 +41,31 @@ python analyze_results.py --results_dir results/ --verbose
 ```
 esd_experiment/
 │
-├── run_esd_experiment.py      # Main experiment orchestrator
+├── run_experiment.py          # Main experiment entry point
+│   ├── Calls src/run_experiment.py
 │   ├── Reads model list
 │   ├── Filters completed models (resume)
 │   ├── Generates worker commands
 │   └── Uses DispatchThread for GPU scheduling
 │
-├── esd_worker.py               # Per-model analysis worker
+├── src/worker.py              # Per-model analysis worker
 │   ├── Loads single model
 │   ├── Runs net_esd_estimator
 │   ├── Saves results to CSV
 │   └── Records failures
 │
-├── model_loader.py             # Robust model loading
+├── src/model_loader.py        # Robust model loading
 │   ├── Detects adapter vs standard models
 │   ├── Loads and merges PEFT adapters
 │   ├── Handles authentication
 │   └── Parses model IDs with revisions
 │
-├── analyze_results.py          # Post-experiment analysis
+├── utils/analyze_results.py   # Post-experiment analysis
 │   ├── Aggregates per-model results
 │   ├── Computes summary statistics
 │   └── Generates reports
 │
-└── create_model_list.py        # Model list utilities
+└── utils/create_model_list.py # Model list utilities
     ├── Convert from various formats
     ├── Merge multiple lists
     └── Create templates
@@ -92,8 +93,8 @@ Heavy inspiration from `calculate_adapters.py`:
 
 ### 3. Resume by Default
 Automatically skips models with existing results:
-- Checks for output CSV files
-- Optionally respects failed_models.txt
+- Checks for output CSV files in `results/stats/`
+- Optionally respects `results/logs/failed_models.txt`
 - Can force recomputation with --overwrite
 
 ### 4. Simple & Modular
@@ -106,16 +107,16 @@ Automatically skips models with existing results:
 
 ### Executable Scripts
 
-- **run_esd_experiment.py**: Main experiment runner
-- **esd_worker.py**: Single model analysis worker
-- **analyze_results.py**: Results aggregation and analysis
-- **create_model_list.py**: Model list management
-- **test_setup.py**: Framework setup verification
+- **run_experiment.py**: Main experiment runner (wrapper for `src/run_experiment.py`)
+- **src/worker.py**: Single model analysis worker
+- **analyze_results.py**: Results aggregation and analysis (wrapper for `utils/analyze_results.py`)
+- **create_model_list.py**: Model list management (wrapper for `utils/create_model_list.py`)
+- **tests/test_setup.py**: Framework setup verification
 
 ### Utilities
 
-- **model_loader.py**: Model loading with adapter support
-- **config_example.py**: Example configuration patterns
+- **src/model_loader.py**: Model loading with adapter support
+- **examples/config.py**: Example configuration patterns
 
 ### Documentation
 
@@ -125,8 +126,8 @@ Automatically skips models with existing results:
 
 ### Examples
 
-- **sample_models.csv**: Example model list
-- **example_workflow.sh**: Complete workflow example
+- **examples/example_models.csv**: Example model list
+- **examples/workflow.sh**: Complete workflow example
 - **requirements.txt**: Python dependencies
 
 ## Workflow
@@ -193,7 +194,7 @@ summary_df.to_csv("summary.csv")
 
 ### Per-Model CSV
 
-Each model gets: `results/model--name.csv`
+Each model gets: `results/stats/model--name.csv`
 
 Columns:
 - `model_id`: Model identifier
@@ -232,7 +233,7 @@ Columns:
 
 ### Failure Tracking
 
-`results/failed_models.txt` lists failed models:
+`results/logs/failed_models.txt` lists failed models:
 ```
 model-id-1    Error: Out of memory
 model-id-2    Error: Model not found
@@ -243,7 +244,7 @@ model-id-2    Error: Model not found
 ### Via Command Line
 
 ```bash
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 \
@@ -259,8 +260,8 @@ python run_esd_experiment.py \
 ### Via Configuration File
 
 ```python
-# config_example.py
-from config_example import build_command
+# examples/config.py
+from examples.config import build_command
 
 cmd = build_command("models.csv", "standard", gpus=[0,1,2,3])
 print(cmd)
@@ -270,7 +271,7 @@ print(cmd)
 
 ### Add Custom Metrics
 
-Edit `esd_worker.py`:
+Edit `src/worker.py`:
 
 ```python
 # After net_esd_estimator call
@@ -299,7 +300,7 @@ def load_model(...):
 
 ### Custom GPU Allocation
 
-Modify `run_esd_experiment.py`:
+Modify `src/run_experiment.py`:
 
 ```python
 dispatch_thread = DispatchThread(
@@ -313,7 +314,7 @@ dispatch_thread = DispatchThread(
 
 ### For Small Experiments (< 20 models)
 ```bash
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results/ \
     --gpus 0 \
@@ -322,7 +323,7 @@ python run_esd_experiment.py \
 
 ### For Medium Experiments (20-100 models)
 ```bash
-python run_esd_experiment.py \
+python run_experiment.py \
     --model_list models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 \
@@ -333,7 +334,7 @@ python run_esd_experiment.py \
 ### For Large Experiments (100+ models)
 ```bash
 # Run in background with nohup
-nohup python run_esd_experiment.py \
+nohup python run_experiment.py \
     --model_list models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 4 5 6 7 \
@@ -348,11 +349,12 @@ tail -f results/logs/esd_experiment.log
 
 ### For Very Large Models (> 30B params)
 ```bash
-python run_esd_experiment.py \
+# Use 2 GPUs per model
+python run_experiment.py \
     --model_list large_models.csv \
     --output_dir results/ \
     --gpus 0 1 2 3 \
-    --num_gpus_per_job 2 \  # Use 2 GPUs per model
+    --num_gpus_per_job 2 \
     --gpu_memory_threshold 1000
 ```
 
@@ -371,13 +373,13 @@ watch -n 1 nvidia-smi
 ### Progress Check
 ```bash
 # Count completed
-ls results/*.csv | wc -l
+ls results/stats/*.csv | wc -l
 
 # View failures
-cat results/failed_models.txt
+cat results/logs/failed_models.txt
 
 # Check specific model
-cat results/meta-llama--Llama-2-7b-hf.csv | head
+cat results/stats/meta-llama--Llama-2-7b-hf.csv | head
 ```
 
 ## Troubleshooting
@@ -385,23 +387,23 @@ cat results/meta-llama--Llama-2-7b-hf.csv | head
 ### Setup Issues
 Run the test script:
 ```bash
-python test_setup.py
+python tests/test_setup.py
 ```
 
 ### Import Errors
 Ensure you're in the correct directory:
 ```bash
-cd /Users/kigoel/Projects/mlc/ESD/esd_experiment
+cd /Users/kigoel/Projects/mlc/Model-Zoo/esd_experiment
 ```
 
 ### GPU Issues
 - Check GPU IDs: `nvidia-smi`
 - Increase max_check for more conservative allocation
-- Kill stuck processes: `pkill -f esd_worker`
+- Kill stuck processes: `pkill -f worker.py`
 
 ### Memory Issues
 - Use `--num_gpus_per_job 2` for large models
-- Edit `esd_worker.py` to use `device_map="cpu"`
+- Edit `src/worker.py` to use `device_map="cpu"`
 - Reduce parallel jobs with fewer GPUs
 
 ### Adapter Failures

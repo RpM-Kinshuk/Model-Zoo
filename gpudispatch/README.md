@@ -2,7 +2,7 @@
 
 **Universal GPU orchestration - from laptop to supercomputer.**
 
-[![Tests](https://img.shields.io/badge/tests-491%20passed-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-517%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
@@ -10,7 +10,7 @@ gpudispatch is a production-ready GPU orchestration library that provides:
 
 - **Job Orchestration**: Queue, schedule, and execute GPU workloads with dependency management
 - **Hyperparameter Experiments**: Grid search, random search with extensible strategies
-- **Multi-Backend Support**: Local machines, SLURM clusters (stub), Kubernetes (planned)
+- **Multi-Backend Support**: Local machines, SLURM clusters, Kubernetes (planned)
 - **Zero Config**: Auto-detects GPUs and environment, works out of the box
 
 ## Installation
@@ -42,6 +42,59 @@ with Dispatcher(gpus=[0, 1, 2, 3]) as d:
     # Submit dependent job
     eval_job = d.submit(evaluate, args=(job,), gpu=1, after=[job])
 ```
+
+### Plug In Existing Python/Bash Scripts
+
+```python
+from gpudispatch import Dispatcher
+
+with Dispatcher(gpus=[0, 1]) as d:
+    # Existing Python script (uses current Python by default)
+    train_job = d.submit_script(
+        "./scripts/train.py",
+        script_args=["--config", "configs/base.yaml"],
+        env={"WANDB_MODE": "offline"},
+        timeout=3600,
+        gpu=1,
+    )
+
+    # Existing bash workflow with dependency + custom working directory
+    report_job = d.submit_script(
+        "./scripts/report.sh",
+        interpreter="bash",
+        cwd="./runs/latest",
+        after=[train_job],
+        gpu=1,
+    )
+
+    # Or run raw command directly
+    smoke = d.submit_command("python scripts/check_metrics.py --strict", gpu=1)
+
+    result = d.wait(smoke)
+    print(result.stdout)
+```
+
+Command/script jobs run in isolated subprocesses and automatically receive:
+- `CUDA_VISIBLE_DEVICES`
+- `GPUDISPATCH_ASSIGNED_GPUS`
+
+### Opinionated Dispatcher Profiles
+
+```python
+from gpudispatch import dispatcher_from_profile
+
+# quickstart | batch | high_reliability
+dispatcher = dispatcher_from_profile("quickstart", gpus=[0, 1])
+
+with dispatcher:
+    job = dispatcher.submit_script("./scripts/train.py", script_args=["--epochs", "3"])
+    dispatcher.wait(job)
+```
+
+Available presets:
+- `quickstart`: low-latency scheduling for iterative development
+- `batch`: throughput-oriented defaults for long-running workloads
+- `high_reliability`: conservative defaults for stable production-style runs
 
 ### Hyperparameter Experiments (Beginner)
 
@@ -186,6 +239,12 @@ hooks.register(my_hook)
 # Show GPU status
 gpudispatch status
 
+# Show available dispatcher profiles
+gpudispatch profiles
+
+# Run an existing script with profile defaults and full control flags
+gpudispatch run-script --profile high_reliability --gpu 1 --env WANDB_MODE=offline ./scripts/train.py -- --epochs 10
+
 # List all experiments
 gpudispatch list
 
@@ -199,10 +258,10 @@ gpudispatch is designed to be extended:
 
 | Component | Interface | Built-in | Extend for |
 |-----------|-----------|----------|------------|
-| Backends | `Backend` ABC | Local, SLURM (stub) | K8s, AWS, GCP, Custom clusters |
+| Backends | `Backend` ABC | Local, SLURM | K8s, AWS, GCP, Custom clusters |
 | Strategies | `Strategy` ABC | Grid, Random | Bayesian, Evolutionary, NSGA-II |
 | Storage | `Storage` ABC | Memory, File, SQLite | S3, MLflow, Weights & Biases |
-| Hooks | `EventHook` | Logging | Prometheus, OpenTelemetry, Slack |
+| Hooks | `EventHook` | Logging, MetricsHook, TraceHook | Prometheus, OpenTelemetry, Slack |
 
 ### Example: Custom Backend
 
@@ -285,20 +344,26 @@ gpudispatch/
 ├── src/gpudispatch/
 │   ├── core/               # Job, Queue, Dispatcher, Signals
 │   ├── experiments/        # Search spaces, Trials, Results, Strategies, Storage
-│   ├── backends/           # Local, SLURM (stub)
+│   ├── backends/           # Local, SLURM
 │   ├── observability/      # Event hooks
 │   ├── cli/                # Command-line interface
 │   ├── utils/              # GPU detection utilities
 │   ├── auto.py             # Environment auto-detection
 │   └── decorators.py       # @gpu decorator
-├── tests/                  # 491 tests
+├── tests/                  # 517 tests
 └── docs/
-    └── ARCHITECTURE.md     # Comprehensive technical guide
+    ├── ARCHITECTURE.md     # Comprehensive technical guide
+    ├── COMPATIBILITY.md    # Support matrix and compatibility policy
+    └── CONTRIBUTING_*.md   # Extension author guides
 ```
 
 ## Documentation
 
 - [Architecture Guide](docs/ARCHITECTURE.md) - Comprehensive technical documentation
+- [Compatibility Matrix](docs/COMPATIBILITY.md) - Python/backend support and CI matrix
+- [Backend Contributor Guide](docs/CONTRIBUTING_BACKENDS.md)
+- [Strategy Contributor Guide](docs/CONTRIBUTING_STRATEGIES.md)
+- [Plugin Contributor Guide](docs/CONTRIBUTING_PLUGINS.md)
 - [API Reference](docs/API.md) - (Coming soon)
 
 ## Testing
@@ -313,6 +378,17 @@ pytest tests/unit/experiments/ -v
 # Run with coverage
 pytest tests/ --cov=gpudispatch
 ```
+
+## CI + Release Automation
+
+- CI workflow: `.github/workflows/gpudispatch-ci.yml`
+  - Unit tests on Python 3.9, 3.10, 3.11, and 3.12
+  - Package build smoke + `twine check`
+- Release workflow: `.github/workflows/gpudispatch-release.yml`
+  - Tag-based publish from `gpudispatch-v*`
+  - Manual TestPyPI/PyPI publish via `workflow_dispatch`
+
+> Maintainers must configure PyPI/TestPyPI trusted publishing for these workflows.
 
 ## Requirements
 
@@ -331,7 +407,6 @@ Apache 2.0
 Contributions welcome! Please read the [Architecture Guide](docs/ARCHITECTURE.md) to understand the codebase before contributing.
 
 Key areas for contribution:
-- [ ] SLURM backend implementation
 - [ ] Kubernetes backend
 - [ ] Bayesian optimization strategy
 - [ ] MLflow/W&B storage integrations

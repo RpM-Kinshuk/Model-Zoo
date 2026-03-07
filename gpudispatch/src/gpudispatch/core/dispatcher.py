@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, TYPE_CHECKING, Union
 
-from gpudispatch.core.job import Job, JobStatus
+from gpudispatch.core.job import CommandResult, Job, JobStatus
 from gpudispatch.core.queue import JobQueue, PriorityQueue
 from gpudispatch.core.resources import GPU, Memory
+from gpudispatch.observability import hooks
 from gpudispatch.utils.gpu import detect_gpus, is_gpu_available
 
 if TYPE_CHECKING:
@@ -53,6 +56,10 @@ class Dispatcher:
             Can be string like "500MB" or integer in MB.
         queue: Custom JobQueue implementation. Defaults to PriorityQueue.
         polling_interval: Seconds between queue checks. Default 5.0.
+        default_command_timeout: Default timeout in seconds for command/script
+            jobs submitted without an explicit timeout.
+        default_command_env: Default environment variables merged into every
+            command/script job's environment.
     """
 
     def __init__(
@@ -61,6 +68,8 @@ class Dispatcher:
         memory_threshold: Union[str, int] = "500MB",
         queue: Optional[JobQueue] = None,
         polling_interval: float = 5.0,
+        default_command_timeout: Optional[float] = None,
+        default_command_env: Optional[dict[str, str]] = None,
     ):
         # Parse memory threshold
         if isinstance(memory_threshold, str):
@@ -86,11 +95,18 @@ class Dispatcher:
         # GPU tracking
         self._occupied_gpus: set[int] = set()
         self._lock = threading.Lock()
+        self._env_lock = threading.Lock()
 
         # Dispatcher state
         self._running = False
         self._dispatch_thread: Optional[threading.Thread] = None
         self._polling_interval = polling_interval
+
+        # Command/script defaults
+        self._default_command_timeout = default_command_timeout
+        self._default_command_env = {
+            str(k): str(v) for k, v in (default_command_env or {}).items()
+        }
 
         # Control events
         self._shutdown_event = threading.Event()
@@ -141,6 +157,127 @@ class Dispatcher:
             after=after,
         )
 
+        return self._enqueue_job(job)
+
+    def submit_command(
+        self,
+        command: Union[str, Sequence[str]],
+        *,
+        shell: Optional[bool] = None,
+        cwd: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
+        gpu: int = 1,
+        memory: Optional[str] = None,
+        priority: int = 0,
+        name: Optional[str] = None,
+        after: Optional[Sequence[Job]] = None,
+    ) -> Job:
+        """Submit a command/script job to run in an isolated subprocess.
+
+        Args:
+            command: Command string or argv sequence.
+            shell: Whether to execute via shell. Defaults to True for string
+                commands and False for sequence commands.
+            cwd: Optional working directory for command execution.
+            env: Optional environment variable overrides for this job.
+            timeout: Optional execution timeout in seconds.
+            gpu: Number of GPUs required.
+            memory: Memory requirement (e.g., "16GB").
+            priority: Job priority (higher = more important).
+            name: Optional job name for logging.
+            after: Jobs that must complete before this one starts.
+
+        Returns:
+            The created Job object.
+        """
+        merged_env = dict(self._default_command_env)
+        if env:
+            merged_env.update({str(k): str(v) for k, v in env.items()})
+
+        effective_timeout = self._default_command_timeout if timeout is None else timeout
+
+        job = Job(
+            command=command,
+            shell=shell,
+            cwd=cwd,
+            env=merged_env,
+            timeout=effective_timeout,
+            gpu=gpu,
+            memory=memory,
+            priority=priority,
+            name=name,
+            after=after,
+        )
+
+        return self._enqueue_job(job)
+
+    def submit_script(
+        self,
+        script_path: str,
+        script_args: Optional[Sequence[str]] = None,
+        *,
+        interpreter: Optional[Union[str, Sequence[str]]] = None,
+        cwd: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+        timeout: Optional[float] = None,
+        gpu: int = 1,
+        memory: Optional[str] = None,
+        priority: int = 0,
+        name: Optional[str] = None,
+        after: Optional[Sequence[Job]] = None,
+    ) -> Job:
+        """Submit a script file as a command job.
+
+        This helper is intended for plugging in existing experiment scripts
+        (bash, python, etc.) with dispatcher controls.
+
+        Args:
+            script_path: Path to the script file to execute.
+            script_args: Optional command-line arguments for the script.
+            interpreter: Optional interpreter command. If omitted and script_path
+                ends with ".py", uses the current Python executable.
+            cwd: Optional working directory for command execution.
+            env: Optional environment variable overrides for this job.
+            timeout: Optional execution timeout in seconds.
+            gpu: Number of GPUs required.
+            memory: Memory requirement (e.g., "16GB").
+            priority: Job priority (higher = more important).
+            name: Optional job name for logging.
+            after: Jobs that must complete before this one starts.
+
+        Returns:
+            The created Job object.
+        """
+        normalized_args = [str(arg) for arg in (script_args or ())]
+        script = str(script_path)
+
+        if interpreter is None:
+            if script.endswith(".py"):
+                command: list[str] = [sys.executable, script, *normalized_args]
+            else:
+                command = [script, *normalized_args]
+        elif isinstance(interpreter, str):
+            command = [interpreter, script, *normalized_args]
+        else:
+            command = [*(str(part) for part in interpreter), script, *normalized_args]
+
+        return self.submit_command(
+            command=command,
+            shell=False,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            gpu=gpu,
+            memory=memory,
+            priority=priority,
+            name=name,
+            after=after,
+        )
+
+    def _enqueue_job(self, job: Job) -> Job:
+        """Register a job and enqueue it for scheduling."""
+
         with self._lock:
             self._jobs[job.id] = job
             job.status = JobStatus.QUEUED
@@ -174,6 +311,60 @@ class Dispatcher:
 
         logger.info(f"Job {job_id} cancelled")
         return True
+
+    def wait(
+        self,
+        job: Job,
+        timeout: Optional[float] = None,
+        poll_interval: float = 0.1,
+    ) -> Any:
+        """Wait for a submitted job to finish and return its result.
+
+        Args:
+            job: Job returned by :meth:`submit`.
+            timeout: Optional timeout in seconds. If exceeded, raises TimeoutError.
+            poll_interval: How often to check job status.
+
+        Returns:
+            The job return value.
+
+        Raises:
+            ValueError: If the job is unknown to this dispatcher.
+            RuntimeError: If the job failed or was cancelled.
+            TimeoutError: If timeout is exceeded before completion.
+        """
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be > 0")
+
+        with self._lock:
+            if job.id not in self._jobs:
+                raise ValueError(f"Unknown job: {job.id}")
+
+        # Allow submit()+wait() usage without requiring explicit start().
+        if not self._running and not job.status.is_terminal:
+            self.start()
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+
+        while True:
+            status = job.status
+
+            if status == JobStatus.COMPLETED:
+                return job.result
+
+            if status == JobStatus.FAILED:
+                error_msg = job.error or "Unknown error"
+                raise RuntimeError(f"Job {job.id} failed: {error_msg}")
+
+            if status == JobStatus.CANCELLED:
+                raise RuntimeError(f"Job {job.id} was cancelled")
+
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for job {job.id} after {timeout:.1f}s"
+                )
+
+            time.sleep(poll_interval)
 
     def stats(self) -> DispatcherStats:
         """Get current dispatcher statistics.
@@ -397,11 +588,19 @@ class Dispatcher:
             self._occupied_gpus.add(gpu)
 
         logger.info(f"Starting job {job.id} on GPUs {gpus}")
+        hooks.emit(
+            "on_job_start",
+            job_id=job.id,
+            job_name=job.name or "anonymous",
+            gpus=list(gpus),
+            is_command=job.is_command,
+        )
 
         thread = threading.Thread(
             target=self._execute_job,
             args=(job, gpus),
             daemon=True,
+            name=f"gpudispatch-job-{job.id}",
         )
         thread.start()
 
@@ -413,20 +612,42 @@ class Dispatcher:
             gpus: GPU indices allocated to this job.
         """
         job.started_at = datetime.now()
-
-        # Set CUDA_VISIBLE_DEVICES for the worker
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpus)
+        job_env = self._build_job_env(gpus, job.env)
 
         try:
-            result = job.fn(*job.args, **job.kwargs)
+            if job.is_command:
+                result = self._execute_command_job(job, job_env)
+            else:
+                result = self._execute_callable_job(job, job_env)
+
             job.result = result
             job.status = JobStatus.COMPLETED
             logger.info(f"Job {job.id} completed")
+            runtime_seconds = 0.0
+            if job.started_at is not None:
+                runtime_seconds = (datetime.now() - job.started_at).total_seconds()
+            hooks.emit(
+                "on_job_complete",
+                job_id=job.id,
+                job_name=job.name or "anonymous",
+                runtime_seconds=runtime_seconds,
+                gpus=list(gpus),
+                is_command=job.is_command,
+                result=result,
+            )
 
         except Exception as e:
             job.error = str(e)
             job.status = JobStatus.FAILED
             logger.error(f"Job {job.id} failed: {e}")
+            hooks.emit(
+                "on_job_failed",
+                job_id=job.id,
+                job_name=job.name or "anonymous",
+                error=job.error,
+                gpus=list(gpus),
+                is_command=job.is_command,
+            )
 
         finally:
             job.completed_at = datetime.now()
@@ -437,6 +658,74 @@ class Dispatcher:
 
                 for gpu in gpus:
                     self._occupied_gpus.discard(gpu)
+
+    def _build_job_env(self, gpus: list[int], extra_env: dict[str, str]) -> dict[str, str]:
+        """Build environment variables for a running job."""
+        assigned_gpus = ",".join(str(g) for g in gpus)
+        job_env = os.environ.copy()
+        job_env["CUDA_VISIBLE_DEVICES"] = assigned_gpus
+        job_env["GPUDISPATCH_ASSIGNED_GPUS"] = assigned_gpus
+        job_env.update(extra_env)
+        return job_env
+
+    def _execute_callable_job(self, job: Job, job_env: dict[str, str]) -> Any:
+        """Execute an in-process callable job with temporary env overrides."""
+        if job.fn is None:
+            raise RuntimeError("Callable job is missing function")
+
+        env_overrides = {
+            "CUDA_VISIBLE_DEVICES": job_env["CUDA_VISIBLE_DEVICES"],
+            "GPUDISPATCH_ASSIGNED_GPUS": job_env["GPUDISPATCH_ASSIGNED_GPUS"],
+            **job.env,
+        }
+
+        # Process environment is global. Guard and restore to prevent leakage
+        # between jobs while preserving compatibility for callable workflows.
+        with self._env_lock:
+            previous = {key: os.environ.get(key) for key in env_overrides}
+            os.environ.update(env_overrides)
+            try:
+                return job.fn(*job.args, **job.kwargs)
+            finally:
+                for key, old_value in previous.items():
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+
+    def _execute_command_job(self, job: Job, job_env: dict[str, str]) -> CommandResult:
+        """Execute a command job in a subprocess with isolated environment."""
+        if job.command is None:
+            raise RuntimeError("Command job is missing command")
+
+        try:
+            completed = subprocess.run(
+                job.command,
+                shell=job.shell,
+                cwd=job.cwd,
+                env=job_env,
+                capture_output=True,
+                text=True,
+                timeout=job.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"Command timed out after {job.timeout}s") from e
+
+        result = CommandResult(
+            command=job.command,
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+        )
+
+        if not result.is_success:
+            stderr_preview = (result.stderr.strip() or "command exited with non-zero status")
+            raise RuntimeError(
+                f"Command failed (exit={result.returncode}): {stderr_preview}"
+            )
+
+        return result
 
     def __enter__(self) -> Dispatcher:
         """Enter context manager - start the dispatcher."""

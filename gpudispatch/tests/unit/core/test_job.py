@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime, timedelta
-from gpudispatch.core.job import Job, JobStatus, JobResult
+from gpudispatch.core.job import CommandResult, Job, JobResult, JobStatus
 
 
 class TestJobStatus:
@@ -48,6 +48,32 @@ class TestJob:
 
         job = Job(fn=greet, kwargs={"name": "World", "greeting": "Hi"})
         assert job.kwargs == {"name": "World", "greeting": "Hi"}
+
+    def test_command_job_creation_from_argv(self):
+        job = Job(command=["python", "train.py", "--epochs", 5])
+        assert job.is_command
+        assert job.command == ("python", "train.py", "--epochs", "5")
+        assert job.shell is False
+
+    def test_command_job_string_defaults_to_shell(self):
+        job = Job(command="bash run.sh --fast")
+        assert job.is_command
+        assert job.shell is True
+
+    def test_job_requires_exactly_one_execution_target(self):
+        with pytest.raises(ValueError, match="either fn or command"):
+            Job()
+
+        with pytest.raises(ValueError, match="both fn and command"):
+            Job(fn=lambda: None, command=["echo", "hello"])
+
+    def test_command_job_validates_shell_input(self):
+        with pytest.raises(ValueError, match="shell=True"):
+            Job(command=["echo", "hello"], shell=True)
+
+    def test_command_job_rejects_empty_sequence(self):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            Job(command=[])
 
     def test_job_creation_with_resources(self):
         job = Job(fn=lambda: None, gpu=2, memory="16GB", priority=10)
@@ -126,3 +152,12 @@ class TestJobResult:
             end_time=end
         )
         assert result.runtime_seconds == 60.0
+
+
+class TestCommandResult:
+    def test_command_result_success_flag(self):
+        ok = CommandResult(command=["echo", "ok"], returncode=0, stdout="ok", stderr="")
+        fail = CommandResult(command=["false"], returncode=1, stdout="", stderr="boom")
+
+        assert ok.is_success is True
+        assert fail.is_success is False

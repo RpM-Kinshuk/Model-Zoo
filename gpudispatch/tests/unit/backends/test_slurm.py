@@ -1,198 +1,224 @@
-"""Tests for SLURMBackend stub implementation."""
+"""Tests for SLURMBackend implementation."""
 
-import pytest
+from __future__ import annotations
 
-from gpudispatch.backends.slurm import SLURMBackend
+import os
+import subprocess
+from unittest.mock import patch
+
 from gpudispatch.backends.base import Backend
+from gpudispatch.backends.slurm import SLURMBackend
 from gpudispatch.core.resources import GPU, Memory
 
 
-class TestSLURMBackendInstantiation:
-    """Tests for SLURMBackend creation and configuration storage."""
+def _completed(
+    args: list[str],
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
+
+class TestSLURMBackendInstantiation:
     def test_inherits_from_backend(self):
-        """SLURMBackend inherits from Backend ABC."""
         assert issubclass(SLURMBackend, Backend)
 
     def test_default_instantiation(self):
-        """SLURMBackend can be instantiated with defaults."""
         backend = SLURMBackend()
         assert backend is not None
 
-    def test_name_property(self):
-        """SLURMBackend has name 'slurm'."""
-        backend = SLURMBackend()
-        assert backend.name == "slurm"
-
-    def test_default_partition(self):
-        """Default partition is 'gpu'."""
-        backend = SLURMBackend()
-        assert backend.partition == "gpu"
-
-    def test_custom_partition(self):
-        """Custom partition is stored correctly."""
-        backend = SLURMBackend(partition="high-priority")
-        assert backend.partition == "high-priority"
-
-    def test_default_account_is_none(self):
-        """Default account is None."""
-        backend = SLURMBackend()
-        assert backend.account is None
-
-    def test_custom_account(self):
-        """Custom account is stored correctly."""
-        backend = SLURMBackend(account="my-project-account")
-        assert backend.account == "my-project-account"
-
-    def test_default_time_limit(self):
-        """Default time limit is '24:00:00'."""
-        backend = SLURMBackend()
-        assert backend.time_limit == "24:00:00"
-
-    def test_custom_time_limit(self):
-        """Custom time limit is stored correctly."""
-        backend = SLURMBackend(time_limit="48:00:00")
-        assert backend.time_limit == "48:00:00"
-
-    def test_default_nodes(self):
-        """Default nodes is 1."""
-        backend = SLURMBackend()
-        assert backend.nodes == 1
-
-    def test_custom_nodes(self):
-        """Custom nodes value is stored correctly."""
-        backend = SLURMBackend(nodes=4)
-        assert backend.nodes == 4
-
-    def test_default_gpus_per_node(self):
-        """Default gpus_per_node is 1."""
-        backend = SLURMBackend()
-        assert backend.gpus_per_node == 1
-
-    def test_custom_gpus_per_node(self):
-        """Custom gpus_per_node is stored correctly."""
-        backend = SLURMBackend(gpus_per_node=8)
-        assert backend.gpus_per_node == 8
-
-    def test_extra_kwargs_stored(self):
-        """Extra kwargs are stored for extensibility."""
+    def test_properties_are_exposed(self):
         backend = SLURMBackend(
-            constraint="a100",
+            partition="a100",
+            account="ml-team",
+            time_limit="08:00:00",
+            nodes=2,
+            gpus_per_node=4,
+            polling_interval=9,
             qos="high",
-            mem_per_cpu="4G",
         )
-        assert backend._extra_config["constraint"] == "a100"
+        assert backend.name == "slurm"
+        assert backend.partition == "a100"
+        assert backend.account == "ml-team"
+        assert backend.time_limit == "08:00:00"
+        assert backend.nodes == 2
+        assert backend.gpus_per_node == 4
+        assert backend._polling_interval == 9
         assert backend._extra_config["qos"] == "high"
-        assert backend._extra_config["mem_per_cpu"] == "4G"
 
 
-class TestSLURMBackendLifecycle:
-    """Tests for start/shutdown lifecycle."""
-
-    def test_is_running_false_initially(self):
-        """Backend is not running before start."""
+class TestSLURMBackendDiscoveryAndLifecycle:
+    def test_start_discovers_gpus_from_slurm_env(self):
         backend = SLURMBackend()
-        assert backend.is_running is False
 
-    def test_start_sets_running_true(self):
-        """start() sets is_running to True."""
-        backend = SLURMBackend()
-        backend.start()
+        with (
+            patch.dict(os.environ, {"SLURM_JOB_GPUS": "gpu[0-2]"}, clear=True),
+            patch.object(backend, "_run_command", return_value=None),
+        ):
+            backend.start()
+
         assert backend.is_running is True
-
-    def test_shutdown_sets_running_false(self):
-        """shutdown() sets is_running to False."""
-        backend = SLURMBackend()
-        backend.start()
+        assert [gpu.index for gpu in backend.list_available()] == [0, 1, 2]
         backend.shutdown()
-        assert backend.is_running is False
 
-    def test_context_manager(self):
-        """Backend works as context manager."""
-        with SLURMBackend() as backend:
-            assert backend.is_running is True
-        assert backend.is_running is False
+    def test_start_discovers_gpus_from_cuda_visible_devices(self):
+        backend = SLURMBackend()
 
-    def test_health_check_returns_running_state(self):
-        """health_check() returns is_running state."""
+        with (
+            patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "3,1"}, clear=True),
+            patch.object(backend, "_run_command", return_value=None),
+        ):
+            backend.start()
+
+        assert [gpu.index for gpu in backend.list_available()] == [1, 3]
+        backend.shutdown()
+
+    def test_start_discovers_gpu_count_from_scontrol_job_output(self):
+        backend = SLURMBackend()
+
+        def fake_run(command, timeout=15):  # noqa: ANN001
+            if command[:3] == ["scontrol", "show", "job"]:
+                return _completed(
+                    command,
+                    stdout="JobId=123 AllocTRES=cpu=8,gres/gpu=2",
+                )
+            return None
+
+        with (
+            patch.dict(os.environ, {"SLURM_JOB_ID": "123"}, clear=True),
+            patch.object(backend, "_run_command", side_effect=fake_run),
+        ):
+            backend.start()
+
+        assert [gpu.index for gpu in backend.list_available()] == [0, 1]
+        backend.shutdown()
+
+    def test_start_falls_back_to_nodes_times_gpus_per_node(self):
+        backend = SLURMBackend(nodes=2, gpus_per_node=2)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(backend, "_run_command", return_value=None),
+        ):
+            backend.start()
+
+        assert [gpu.index for gpu in backend.list_available()] == [0, 1, 2, 3]
+        backend.shutdown()
+
+
+class TestSLURMBackendAllocation:
+    def test_allocate_release_and_list_available(self):
+        backend = SLURMBackend()
+
+        with (
+            patch.dict(os.environ, {"SLURM_JOB_GPUS": "0,1"}, clear=True),
+            patch.object(backend, "_run_command", return_value=None),
+        ):
+            backend.start()
+
+        first = backend.allocate_gpus(1)
+        assert len(first) == 1
+        assert len(backend.list_available()) == 1
+
+        second = backend.allocate_gpus(1)
+        assert len(second) == 1
+        assert first[0].index != second[0].index
+        assert backend.allocate_gpus(1) == []
+
+        backend.release_gpus(first)
+        assert len(backend.list_available()) == 1
+        backend.shutdown()
+
+    def test_allocate_respects_memory_requirement_when_known(self):
+        backend = SLURMBackend()
+        backend._running = True
+        backend._gpu_pool = [GPU(index=0, memory=1024), GPU(index=1, memory=16384)]
+
+        selected = backend.allocate_gpus(1, memory=Memory.from_string("8GB"))
+        assert len(selected) == 1
+        assert selected[0].index == 1
+
+    def test_allocate_non_positive_count_returns_empty(self):
+        backend = SLURMBackend()
+        backend._running = True
+        backend._gpu_pool = [GPU(index=0)]
+
+        assert backend.allocate_gpus(0) == []
+        assert backend.allocate_gpus(-1) == []
+
+
+class TestSLURMBackendHealthAndSchedulerHelpers:
+    def test_health_check_requires_running(self):
         backend = SLURMBackend()
         assert backend.health_check() is False
-        backend.start()
-        assert backend.health_check() is True
-        backend.shutdown()
-        assert backend.health_check() is False
 
-
-class TestSLURMBackendStubMethods:
-    """Tests for stub methods that raise NotImplementedError."""
-
-    def test_allocate_gpus_raises_not_implemented(self):
-        """allocate_gpus() raises NotImplementedError with helpful message."""
+    def test_health_check_uses_scontrol_ping_when_available(self):
         backend = SLURMBackend()
-        backend.start()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend.allocate_gpus(2)
-        assert "_submit_job" in str(exc_info.value)
+        backend._running = True
+        with patch.object(
+            backend,
+            "_run_command",
+            return_value=_completed(["scontrol", "ping"], returncode=0),
+        ):
+            assert backend.health_check() is True
 
-    def test_release_gpus_raises_not_implemented(self):
-        """release_gpus() raises NotImplementedError with helpful message."""
+    def test_health_check_falls_back_to_true_when_scontrol_unavailable(self):
         backend = SLURMBackend()
-        backend.start()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend.release_gpus([GPU(index=0)])
-        assert "_cancel_job" in str(exc_info.value)
+        backend._running = True
+        with patch.object(backend, "_run_command", return_value=None):
+            assert backend.health_check() is True
 
-    def test_list_available_raises_not_implemented(self):
-        """list_available() raises NotImplementedError with helpful message."""
+    def test_submit_job_returns_sbatch_job_id(self):
         backend = SLURMBackend()
-        backend.start()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend.list_available()
-        assert "sinfo" in str(exc_info.value) or "squeue" in str(exc_info.value)
 
-    def test_submit_job_raises_not_implemented(self):
-        """_submit_job() raises NotImplementedError."""
-        backend = SLURMBackend()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend._submit_job("#!/bin/bash\necho hello")
-        assert "_submit_job" in str(exc_info.value)
+        with patch.object(
+            backend,
+            "_run_required_command",
+            return_value=_completed(["sbatch"], stdout="12345;cluster"),
+        ) as mocked:
+            job_id = backend._submit_job("echo hello")
 
-    def test_check_job_status_raises_not_implemented(self):
-        """_check_job_status() raises NotImplementedError."""
-        backend = SLURMBackend()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend._check_job_status("12345")
-        assert "_check_job_status" in str(exc_info.value)
-
-    def test_cancel_job_raises_not_implemented(self):
-        """_cancel_job() raises NotImplementedError."""
-        backend = SLURMBackend()
-        with pytest.raises(NotImplementedError) as exc_info:
-            backend._cancel_job("12345")
-        assert "_cancel_job" in str(exc_info.value)
-
-
-class TestSLURMBackendExtensibility:
-    """Tests demonstrating extensibility patterns."""
-
-    def test_subclass_can_override_submit_job(self):
-        """Subclass can override _submit_job()."""
-
-        class CustomSLURMBackend(SLURMBackend):
-            def _submit_job(self, script: str) -> str:
-                return "12345"
-
-        backend = CustomSLURMBackend()
-        job_id = backend._submit_job("#!/bin/bash\necho hello")
         assert job_id == "12345"
+        assert mocked.call_count == 1
+        submitted_args = mocked.call_args.args[0]
+        assert submitted_args[:2] == ["sbatch", "--parsable"]
 
-    def test_subclass_can_override_check_job_status(self):
-        """Subclass can override _check_job_status()."""
+    def test_check_job_status_prefers_squeue_then_falls_back_to_sacct(self):
+        backend = SLURMBackend()
 
-        class CustomSLURMBackend(SLURMBackend):
-            def _check_job_status(self, job_id: str) -> str:
-                return "RUNNING"
+        with patch.object(
+            backend,
+            "_run_command",
+            side_effect=[
+                _completed(["squeue"], stdout="RUNNING\n"),
+            ],
+        ):
+            assert backend._check_job_status("123") == "RUNNING"
 
-        backend = CustomSLURMBackend()
-        status = backend._check_job_status("12345")
-        assert status == "RUNNING"
+        with patch.object(
+            backend,
+            "_run_command",
+            side_effect=[
+                _completed(["squeue"], stdout=""),
+                _completed(["sacct"], stdout="COMPLETED\n"),
+            ],
+        ):
+            assert backend._check_job_status("123") == "COMPLETED"
+
+    def test_check_job_status_returns_unknown_when_scheduler_unavailable(self):
+        backend = SLURMBackend()
+        with patch.object(backend, "_run_command", return_value=None):
+            assert backend._check_job_status("123") == "UNKNOWN"
+
+    def test_cancel_job_calls_scancel(self):
+        backend = SLURMBackend()
+        with patch.object(backend, "_run_required_command") as mocked:
+            backend._cancel_job("123")
+        mocked.assert_called_once_with(["scancel", "123"])

@@ -23,7 +23,7 @@ def parse_args():
         "--results_dir",
         type=str,
         required=True,
-        help="Directory containing result CSV files"
+        help="Directory containing experiment output (per-model CSVs in results_dir/stats/)"
     )
     parser.add_argument(
         "--output",
@@ -41,7 +41,9 @@ def parse_args():
 
 def load_all_results(results_dir: Path) -> List[pd.DataFrame]:
     """Load all result CSV files."""
-    csv_files = list(results_dir.glob("*.csv"))
+    stats_dir = results_dir / "stats"
+    search_dir = stats_dir if stats_dir.exists() else results_dir
+    csv_files = list(search_dir.glob("*.csv"))
     
     # Filter out special files
     csv_files = [
@@ -50,10 +52,10 @@ def load_all_results(results_dir: Path) -> List[pd.DataFrame]:
     ]
     
     if not csv_files:
-        print(f"No result files found in {results_dir}")
+        print(f"No result files found in {search_dir}")
         return []
     
-    print(f"Found {len(csv_files)} result files")
+    print(f"Found {len(csv_files)} result files in {search_dir}")
     
     results = []
     for csv_file in csv_files:

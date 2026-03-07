@@ -174,7 +174,7 @@ Each model produces:
 - **HDF5** (`results/metrics/model--name.h5`): Alpha matrices with metadata for ML pipelines
 - **Summary** (`results/summary.csv`): Model-level aggregated statistics
 
-Failed models are logged to `results/failed_models.txt` with error messages.
+Failed models are logged to `results/logs/failed_models.txt` with error messages.
 
 ## Important Patterns
 
@@ -296,4 +296,4 @@ python esd_experiment/analyze_results.py --results_dir test_results/ --verbose
 For production runs on hundreds of models, monitor:
 1. GPU utilization: `watch -n 1 nvidia-smi`
 2. Progress: `tail -f results/logs/esd_experiment.log`
-3. Failures: `wc -l results/failed_models.txt`
+3. Failures: `wc -l results/logs/failed_models.txt`

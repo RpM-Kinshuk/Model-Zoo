@@ -2,7 +2,14 @@
 
 import logging
 import pytest
-from gpudispatch.observability.hooks import EventHook, HookRegistry, LoggingHook, hooks
+from gpudispatch.observability.hooks import (
+    EventHook,
+    HookRegistry,
+    LoggingHook,
+    MetricsHook,
+    TraceHook,
+    hooks,
+)
 
 
 class TestEventHook:
@@ -13,6 +20,10 @@ class TestEventHook:
         assert hook.on_job_failed is None
         assert hook.on_experiment_start is None
         assert hook.on_experiment_complete is None
+        assert hook.on_experiment_failed is None
+        assert hook.on_experiment_trial_start is None
+        assert hook.on_experiment_trial_complete is None
+        assert hook.on_experiment_trial_failed is None
 
     def test_hook_with_callbacks(self):
         calls = []
@@ -156,3 +167,66 @@ class TestGlobalHooksRegistry:
         hook = EventHook()
         hooks.register(hook)
         assert hook in hooks.hooks
+
+
+class TestMetricsHook:
+    def test_metrics_hook_tracks_counts_and_runtime(self):
+        metrics = MetricsHook()
+
+        metrics.on_experiment_start(experiment_id="exp")
+        metrics.on_experiment_trial_start(experiment_id="exp", trial_id=1)
+        metrics.on_experiment_trial_complete(
+            experiment_id="exp",
+            trial_id=1,
+            metrics={"loss": 0.1},
+            runtime_seconds=2.5,
+        )
+        metrics.on_experiment_complete(experiment_id="exp", total_jobs=1, runtime_seconds=4.0)
+
+        snapshot = metrics.snapshot()
+        assert snapshot["counters"]["experiment_started"] == 1
+        assert snapshot["counters"]["trial_started"] == 1
+        assert snapshot["counters"]["trial_completed"] == 1
+        assert snapshot["counters"]["experiment_completed"] == 1
+        assert snapshot["runtime_seconds"]["trial_runtime_seconds"] == 2.5
+        assert snapshot["runtime_seconds"]["experiment_runtime_seconds"] == 4.0
+        assert snapshot["latest_trial_metrics"]["exp:1"]["loss"] == 0.1
+
+
+class TestTraceHook:
+    def test_trace_hook_records_successful_spans(self):
+        traces = TraceHook()
+
+        traces.on_experiment_start(experiment_id="exp")
+        traces.on_experiment_trial_start(experiment_id="exp", trial_id=1)
+        traces.on_experiment_trial_complete(
+            experiment_id="exp",
+            trial_id=1,
+            runtime_seconds=0.5,
+        )
+        traces.on_experiment_complete(
+            experiment_id="exp",
+            total_jobs=1,
+            runtime_seconds=1.0,
+        )
+
+        spans = traces.spans
+        assert len(spans) == 2
+        assert {span.name for span in spans} == {"experiment", "experiment_trial"}
+        assert all(span.status == "ok" for span in spans)
+
+    def test_trace_hook_records_failed_spans(self):
+        traces = TraceHook()
+
+        traces.on_experiment_start(experiment_id="exp")
+        traces.on_experiment_trial_start(experiment_id="exp", trial_id=7)
+        traces.on_experiment_trial_failed(
+            experiment_id="exp",
+            trial_id=7,
+            error="boom",
+        )
+
+        span = traces.spans[0]
+        assert span.name == "experiment_trial"
+        assert span.status == "error"
+        assert span.attributes["error"] == "boom"
