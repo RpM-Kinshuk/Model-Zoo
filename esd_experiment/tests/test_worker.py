@@ -150,6 +150,240 @@ def test_classify_retryable_failure_marks_only_transient_cases_retryable():
     assert worker.classify_retryable_failure(stage="load", reason="model_load_error") is True
 
 
+def test_classify_retryable_failure_requires_stage_specific_reason_matches():
+    worker = load_worker_module()
+
+    assert worker.classify_retryable_failure(stage="load", reason="model_load_error") is True
+    assert worker.classify_retryable_failure(stage="analyze", reason="model_load_error") is False
+    assert worker.classify_retryable_failure(stage="save", reason="save_error") is True
+    assert worker.classify_retryable_failure(stage="load", reason="save_error") is False
+
+
+def test_main_regenerates_when_final_csv_exists_without_h5(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _FakeParam:
+        def numel(self):
+            return 1
+
+        @property
+        def device(self):
+            return "cpu"
+
+    class _FakeModel:
+        def parameters(self):
+            return [_FakeParam()]
+
+    output_file = tmp_path / "stats" / "org--model.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text("stale\n")
+
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="standard_transformers",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=False,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(return_value=(_FakeModel(), False))
+    worker.net_esd_estimator = Mock(
+        return_value={
+            "longname": ["model.layers.0.mlp.up_proj"],
+            "alpha": [1.0],
+        }
+    )
+
+    def fake_save_results(metrics, output_path, *args, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("alpha\n1.0\n")
+        h5_output_path = kwargs["h5_output_path"]
+        h5_output_path.parent.mkdir(parents=True, exist_ok=True)
+        h5_output_path.write_text("h5-temp")
+
+    worker.save_results = fake_save_results
+
+    exit_code = worker.main()
+
+    metrics_file = tmp_path / "metrics" / "org--model.h5"
+
+    assert exit_code == 0
+    assert worker.load_model.call_count == 1
+    assert worker.net_esd_estimator.call_count == 1
+    assert output_file.read_text() == "alpha\n1.0\n"
+    assert metrics_file.exists()
+    assert metrics_file.read_text() == "h5-temp"
+
+
+def test_main_clears_stale_partial_outputs_before_failed_regeneration(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _FakeLoaderFailure(Exception):
+        def __init__(self, stage: str, reason: str, message: str):
+            self.stage = stage
+            self.reason = reason
+            self.message = message
+            super().__init__(message)
+
+        def __str__(self):
+            return self.message
+
+    output_file = tmp_path / "stats" / "org--model.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text("stale\n")
+
+    worker.LoaderFailure = _FakeLoaderFailure
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="quantized_alt_format",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=False,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(
+        side_effect=_FakeLoaderFailure("load", "unsupported_loader_scenario", "unsupported")
+    )
+    worker.net_esd_estimator = Mock()
+    worker.save_results = Mock()
+
+    exit_code = worker.main()
+
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert not output_file.exists()
+    assert failure_record["stage"] == "load"
+    assert failure_record["reason"] == "unsupported_loader_scenario"
+
+
+def test_main_clears_existing_outputs_when_overwrite_is_requested(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _FakeLoaderFailure(Exception):
+        def __init__(self, stage: str, reason: str, message: str):
+            self.stage = stage
+            self.reason = reason
+            self.message = message
+            super().__init__(message)
+
+        def __str__(self):
+            return self.message
+
+    output_file = tmp_path / "stats" / "org--model.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text("old\n")
+    metrics_file = tmp_path / "metrics" / "org--model.h5"
+    metrics_file.parent.mkdir(parents=True, exist_ok=True)
+    metrics_file.write_text("old-h5\n")
+
+    worker.LoaderFailure = _FakeLoaderFailure
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="quantized_alt_format",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=True,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(
+        side_effect=_FakeLoaderFailure("load", "unsupported_loader_scenario", "unsupported")
+    )
+    worker.net_esd_estimator = Mock()
+    worker.save_results = Mock()
+
+    exit_code = worker.main()
+
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert not output_file.exists()
+    assert not metrics_file.exists()
+    assert failure_record["stage"] == "load"
+    assert failure_record["reason"] == "unsupported_loader_scenario"
+
+
+def test_main_records_preflight_cleanup_failure(tmp_path: Path):
+    worker = load_worker_module()
+
+    output_file = tmp_path / "stats" / "org--model.csv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text("old\n")
+
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="standard_transformers",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=True,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+
+    original_cleanup_output_artifacts = worker.cleanup_output_artifacts
+
+    def failing_cleanup_output_artifacts(*paths):
+        raise RuntimeError("cleanup failed")
+
+    worker.cleanup_output_artifacts = failing_cleanup_output_artifacts
+    worker.load_model = Mock()
+    worker.net_esd_estimator = Mock()
+    worker.save_results = Mock()
+
+    try:
+        exit_code = worker.main()
+    finally:
+        worker.cleanup_output_artifacts = original_cleanup_output_artifacts
+
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert worker.load_model.call_count == 0
+    assert failure_record["attempt"] == 0
+    assert failure_record["stage"] == "save"
+    assert failure_record["reason"] == "save_error"
+    assert "cleanup failed" in failure_record["message"]
+
+
 def test_main_records_permanent_loader_failure_without_retry_or_final_outputs(tmp_path: Path):
     worker = load_worker_module()
 
@@ -253,6 +487,47 @@ def test_main_rejects_empty_metrics_as_failure(tmp_path: Path):
     assert failure_record["reason"] == "analysis_empty"
 
 
+def test_main_classifies_unwrapped_post_load_exception_as_analyze_failure(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _BrokenModel:
+        def parameters(self):
+            raise RuntimeError("parameter inspection failed")
+
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="standard_transformers",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=False,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(return_value=(_BrokenModel(), False))
+    worker.net_esd_estimator = Mock()
+    worker.save_results = Mock()
+
+    exit_code = worker.main()
+
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert worker.net_esd_estimator.call_count == 0
+    assert worker.save_results.call_count == 0
+    assert failure_record["stage"] == "analyze"
+    assert failure_record["reason"] == "analysis_exception"
+    assert "parameter inspection failed" in failure_record["message"]
+
+
 def test_main_treats_h5_write_failure_as_failed_run_without_final_csv(tmp_path: Path):
     worker = load_worker_module()
 
@@ -318,6 +593,73 @@ def test_main_treats_h5_write_failure_as_failed_run_without_final_csv(tmp_path: 
     assert failure_record["stage"] == "save"
     assert failure_record["reason"] == "save_error"
     assert "disk full" in failure_record["message"]
+
+
+def test_main_classifies_unwrapped_pre_save_exception_as_save_failure(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _FakeParam:
+        def numel(self):
+            return 1
+
+        @property
+        def device(self):
+            return "cpu"
+
+    class _FakeModel:
+        def parameters(self):
+            return [_FakeParam()]
+
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="standard_transformers",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=False,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(return_value=(_FakeModel(), False))
+    worker.net_esd_estimator = Mock(
+        return_value={
+            "longname": ["model.layers.0.mlp.up_proj"],
+            "alpha": [1.0],
+        }
+    )
+    worker.save_results = Mock()
+
+    original_cleanup_temp_path = worker.cleanup_temp_path
+    cleanup_calls = {"count": 0}
+
+    def flaky_cleanup_temp_path(path):
+        if path.suffix == ".tmp" and cleanup_calls["count"] == 0:
+            cleanup_calls["count"] += 1
+            raise RuntimeError("temp cleanup failed")
+        original_cleanup_temp_path(path)
+
+    worker.cleanup_temp_path = flaky_cleanup_temp_path
+
+    try:
+        exit_code = worker.main()
+    finally:
+        worker.cleanup_temp_path = original_cleanup_temp_path
+
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert worker.save_results.call_count == 0
+    assert failure_record["stage"] == "save"
+    assert failure_record["reason"] == "save_error"
+    assert "temp cleanup failed" in failure_record["message"]
 
 
 def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_path: Path):

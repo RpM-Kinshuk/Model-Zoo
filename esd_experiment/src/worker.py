@@ -332,15 +332,24 @@ def validate_metrics_output(metrics: dict):
 
 
 def classify_retryable_failure(stage: str, reason: str) -> bool:
-    if reason in {
-        "unsupported_loader_scenario",
-        "adapter_base_unresolved",
-        "repo_missing_or_private",
-        "repo_gated",
-        "analysis_empty",
-    }:
+    non_retryable_by_stage = {
+        "load": {
+            "unsupported_loader_scenario",
+            "adapter_base_unresolved",
+            "repo_missing_or_private",
+            "repo_gated",
+        },
+        "analyze": {"analysis_empty"},
+    }
+    retryable_by_stage = {
+        "load": {"model_load_error", "cuda_oom"},
+        "analyze": {"analysis_exception", "cuda_oom"},
+        "save": {"save_error", "cuda_oom"},
+    }
+
+    if reason in non_retryable_by_stage.get(stage, set()):
         return False
-    if reason in {"model_load_error", "cuda_oom", "analysis_exception", "save_error"}:
+    if reason in retryable_by_stage.get(stage, set()):
         return True
     return False
 
@@ -384,9 +393,32 @@ def main():
     temp_metrics_file = temp_output_path(metrics_file)
     
     # Check if already done
-    if output_file.exists() and not args.overwrite:
-        print(f"Results already exist: {output_file}")
-        return 0
+    try:
+        if args.overwrite:
+            if output_file.exists() or metrics_file.exists() or temp_output_file.exists() or temp_metrics_file.exists():
+                print("Overwrite requested; clearing existing artifacts before regeneration")
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
+        else:
+            if output_file.exists() and metrics_file.exists():
+                print(f"Results already exist: {output_file}")
+                return 0
+            if output_file.exists() or metrics_file.exists():
+                print("Incomplete existing outputs detected; clearing stale artifacts before regeneration")
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
+    except Exception as exc:
+        stage, reason, message = classify_runtime_error("save", exc)
+        record_failure(output_dir, display_name, stage, reason, message, attempt=0)
+        return 1
     
     print("=" * 80)
     print(f"Analyzing model: {display_name}")
@@ -408,6 +440,7 @@ def main():
     success = False
     
     for attempt in range(1, args.max_retries + 2):
+        current_stage = "load"
         try:
             print(f"\nAttempt {attempt}/{args.max_retries + 1}")
             
@@ -432,6 +465,7 @@ def main():
                 stage, reason, message = classify_runtime_error("load", exc)
                 raise LoaderFailure(stage, reason, message) from exc
             
+            current_stage = "analyze"
             print(f"Model loaded successfully (adapter: {is_adapter})")
             print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
             
@@ -468,6 +502,7 @@ def main():
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
             
             # Save results
+            current_stage = "save"
             cleanup_temp_path(temp_output_file)
             cleanup_temp_path(temp_metrics_file)
             try:
@@ -522,7 +557,7 @@ def main():
             error_msg = str(e)
             print(f"\nAttempt {attempt} failed: {error_msg}")
 
-            stage, reason, message = classify_runtime_error("load", e)
+            stage, reason, message = classify_runtime_error(current_stage, e)
             retryable = classify_retryable_failure(stage, reason)
             if retryable and attempt <= args.max_retries:
                 print("Retrying...")
