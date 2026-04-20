@@ -274,6 +274,12 @@ def cleanup_temp_path(path: Path) -> None:
         path.unlink()
 
 
+def cleanup_output_artifacts(*paths: Path) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
+
+
 def record_failure(
     output_dir: Path,
     model_id: str,
@@ -479,8 +485,12 @@ def main():
                 if temp_metrics_file.exists():
                     finalize_output_path(temp_metrics_file, metrics_file)
             except Exception as exc:
-                cleanup_temp_path(temp_output_file)
-                cleanup_temp_path(temp_metrics_file)
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
                 stage, reason, message = classify_runtime_error("save", exc)
                 raise LoaderFailure(stage, reason, message) from exc
             

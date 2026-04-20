@@ -318,3 +318,81 @@ def test_main_treats_h5_write_failure_as_failed_run_without_final_csv(tmp_path: 
     assert failure_record["stage"] == "save"
     assert failure_record["reason"] == "save_error"
     assert "disk full" in failure_record["message"]
+
+
+def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_path: Path):
+    worker = load_worker_module()
+
+    class _FakeParam:
+        def numel(self):
+            return 1
+
+        @property
+        def device(self):
+            return "cpu"
+
+    class _FakeModel:
+        def parameters(self):
+            return [_FakeParam()]
+
+    worker.parse_args = lambda: SimpleNamespace(
+        model_id="org/model",
+        revision="",
+        base_model_relation="",
+        source_model="",
+        loader_scenario="standard_transformers",
+        primary_type_bucket="",
+        output_dir=str(tmp_path),
+        overwrite=False,
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        parallel_esd=True,
+        use_svd=False,
+        device_map="cpu",
+        max_retries=0,
+    )
+    worker.load_model = Mock(return_value=(_FakeModel(), False))
+    worker.net_esd_estimator = Mock(
+        return_value={
+            "longname": ["model.layers.0.mlp.up_proj"],
+            "alpha": [1.0],
+        }
+    )
+
+    def fake_save_results(metrics, output_path, *args, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("alpha\n1.0\n")
+        h5_output_path = kwargs["h5_output_path"]
+        h5_output_path.parent.mkdir(parents=True, exist_ok=True)
+        h5_output_path.write_text("h5-temp")
+
+    original_finalize_output_path = worker.finalize_output_path
+    finalize_calls = []
+
+    def flaky_finalize_output_path(temp_path, final_path):
+        finalize_calls.append(final_path.name)
+        original_finalize_output_path(temp_path, final_path)
+        if final_path.suffix == ".h5":
+            raise RuntimeError("rename failed")
+
+    worker.save_results = fake_save_results
+    worker.finalize_output_path = flaky_finalize_output_path
+
+    try:
+        exit_code = worker.main()
+    finally:
+        worker.finalize_output_path = original_finalize_output_path
+
+    output_file = tmp_path / "stats" / "org--model.csv"
+    metrics_file = tmp_path / "metrics" / "org--model.h5"
+    failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+
+    assert exit_code == 1
+    assert finalize_calls == ["org--model.csv", "org--model.h5"]
+    assert not output_file.exists()
+    assert not metrics_file.exists()
+    assert failure_record["stage"] == "save"
+    assert failure_record["reason"] == "save_error"
+    assert "rename failed" in failure_record["message"]
