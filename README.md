@@ -48,9 +48,9 @@ python esd_experiment/tests/test_setup.py
 # 2. Create a model list
 cd esd_experiment
 cat > my_models.csv << EOF
-model_id,base_model_relation,source_model
-meta-llama/Llama-2-7b-hf,,
-microsoft/phi-2,,
+model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
+meta-llama/Llama-2-7b-hf,main,source,,,base_source
+some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
 EOF
 
 # 3. Run analysis with GPU scheduling
@@ -62,6 +62,8 @@ python run_experiment.py \
 # 4. Analyze results
 python analyze_results.py --results_dir results/ --verbose
 ```
+
+Legacy three-column CSVs (`model_id,base_model_relation,source_model`) are still accepted, but curated tables are now the preferred input.
 
 ## 📁 Repository Structure
 
@@ -128,7 +130,7 @@ Model-Zoo/
 
 ### 4. Production-Ready Workflow
 - **Resume capability**: Automatically skips already-analyzed models
-- **Failure tracking**: Records failed models with error messages
+- **Failure tracking**: Records failed models in both `logs/failed_models.txt` and machine-readable `logs/failure_records.jsonl`
 - **Progress logging**: Detailed logs for debugging and monitoring
 - **Output formats**: CSV (per-layer metrics) + HDF5 (alpha matrices for ML)
 

@@ -10,7 +10,7 @@ This script:
 5. Saves per-model ESD metrics as CSV files
 
 Usage:
-    python run_esd_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
+    python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
 import argparse
 import itertools
@@ -42,16 +42,27 @@ def parse_args():
         description="Run large-scale ESD analysis with GPU resource management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-        Example model list CSV format:
+        Supported model list CSV formats:
+
+        Minimal / legacy:
             model_id,base_model_relation,source_model
             meta-llama/Llama-2-7b-hf,,
             some/adapter-model,adapter,meta-llama/Llama-2-7b-hf
             org/model@revision,,
 
+        Curated table (preferred):
+            model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
+            meta-llama/Llama-2-7b-hf,main,source,,,base_source
+            some/adapter-model,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
+            org/model,commit-sha,,,,quantized
+
         Columns:
             - model_id: HuggingFace repo ID (required)
-            - base_model_relation: "adapter", "lora", "peft" for adapters (optional)
-            - source_model: Base model for adapters (optional, will be inferred if missing)
+            - revision_norm: explicit revision override (optional)
+            - base_model_relation: lineage / adapter relation (optional)
+            - source_model: base model for adapters (optional, inferred when possible)
+            - loader_scenario: curated loader hint such as standard_transformers or adapter_requires_base (optional)
+            - primary_type_bucket: curated type bucket for logging / analysis (optional)
         """
     )
     
@@ -90,6 +101,9 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         - model_id (required): HuggingFace repository ID
         - base_model_relation (optional): "adapter", "lora", "peft" for adapters
         - source_model (optional): Base model for adapters
+        - revision_norm (optional): Curated revision override
+        - loader_scenario (optional): Curated loader dispatch hint
+        - primary_type_bucket (optional): Curated type bucket
     
     Returns:
         DataFrame with model information
@@ -195,13 +209,14 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     """
     completed = set()
     
-    # Check for existing result CSVs
-    if output_dir.exists():
-        for csv_file in output_dir.glob("*.csv"):
-            # Skip special files
-            if csv_file.name in ["failed_models.txt", "summary.csv"]:
+    stats_dir = output_dir / "stats"
+    metrics_dir = output_dir / "metrics"
+
+    if stats_dir.exists():
+        for csv_file in stats_dir.glob("*.csv"):
+            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
+            if not metrics_file.exists():
                 continue
-            # Extract model ID from filename (reverse safe_filename transformation)
             model_id = csv_file.stem.replace("--", "/").replace("__", "@")
             completed.add(model_id)
     
@@ -210,7 +225,11 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
         failed_file = output_dir / "logs" / "failed_models.txt"
         if failed_file.exists():
             with open(failed_file, "r") as f:
-                failed = {line.strip() for line in f if line.strip()}
+                failed = {
+                    line.strip().split("\t", 1)[0]
+                    for line in f
+                    if line.strip()
+                }
             completed -= failed
     
     return completed

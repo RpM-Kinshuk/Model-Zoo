@@ -10,9 +10,12 @@ A clean, organized framework for analyzing Empirical Spectral Density (ESD) metr
 # 1. Test your setup
 python tests/test_setup.py
 
-# 2. Create a model list
-python create_model_list.py create --output my_models.csv \
-    --models "meta-llama/Llama-2-7b-hf" "microsoft/phi-2"
+# 2. Create a curated model list
+cat > my_models.csv << EOF
+model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
+meta-llama/Llama-2-7b-hf,main,source,,,base_source
+some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
+EOF
 
 # 3. Run the experiment
 python run_experiment.py \
@@ -95,20 +98,32 @@ This will:
 Create a CSV file with your models:
 
 ```csv
-model_id,base_model_relation,source_model
-meta-llama/Llama-2-7b-hf,,
-microsoft/phi-2,,
-some/lora-adapter,adapter,meta-llama/Llama-2-7b-hf
+model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
+meta-llama/Llama-2-7b-hf,main,source,,,base_source
+some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
 ```
 
 **Columns:**
 - `model_id` (required): HuggingFace repository ID
-- `base_model_relation` (optional): "adapter", "lora", or "peft" for adapters
+- `revision_norm` (optional): Curated revision override
+- `base_model_relation` (optional): adapter or lineage relation
 - `source_model` (optional): Base model for adapters
+- `loader_scenario` (optional): curated loader hint such as `standard_transformers` or `adapter_requires_base`
+- `primary_type_bucket` (optional): curated type bucket for logging / downstream analysis
+
+Legacy three-column CSVs (`model_id,base_model_relation,source_model`) remain supported.
 
 ## Output
 
-Each model generates a CSV file with per-layer metrics:
+Each successful model generates:
+- `results/stats/*.csv` for per-layer metrics
+- `results/metrics/*.h5` for alpha matrices
+
+Failures are recorded in:
+- `results/logs/failed_models.txt`
+- `results/logs/failure_records.jsonl`
+
+The per-layer CSV contains metrics such as:
 - `alpha` - Power law exponent
 - `spectral_norm` - Largest singular value
 - `stable_rank` - Effective rank

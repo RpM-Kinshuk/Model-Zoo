@@ -21,6 +21,7 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(run_experiment)
 
 generate_commands = run_experiment.generate_commands
+get_completed_models = run_experiment.get_completed_models
 load_model_list = run_experiment.load_model_list
 
 
@@ -183,6 +184,40 @@ def test_generate_commands_passes_curated_loader_fields(tmp_path: Path):
     assert "--revision 'rev-a'" in commands[0]
     assert "--loader_scenario 'adapter_requires_base'" in commands[0]
     assert "--primary_type_bucket 'adapter'" in commands[0]
+
+
+def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):
+    stats_dir = tmp_path / "stats"
+    metrics_dir = tmp_path / "metrics"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
+    (metrics_dir / "org--model-a.h5").write_text("ok")
+    (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
+
+    completed = get_completed_models(tmp_path, skip_failed=False)
+
+    assert completed == {"org/model-a"}
+
+
+def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Path):
+    stats_dir = tmp_path / "stats"
+    metrics_dir = tmp_path / "metrics"
+    logs_dir = tmp_path / "logs"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
+    (metrics_dir / "org--model-a.h5").write_text("ok")
+    (logs_dir / "failed_models.txt").write_text(
+        "org/model-a\tload\tunsupported_loader_scenario\tunsupported\n"
+    )
+
+    completed = get_completed_models(tmp_path, skip_failed=True)
+
+    assert completed == set()
 
 
 def test_worker_honors_revision_override_when_model_id_contains_revision():
