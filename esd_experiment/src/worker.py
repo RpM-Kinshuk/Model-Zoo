@@ -35,8 +35,11 @@ def parse_args():
     
     # Model specification
     parser.add_argument("--model_id", type=str, required=True, help="HuggingFace model ID")
+    parser.add_argument("--revision", type=str, default="", help="Optional model revision")
     parser.add_argument("--base_model_relation", type=str, default="", help="Adapter relation type")
     parser.add_argument("--source_model", type=str, default="", help="Base model for adapters")
+    parser.add_argument("--loader_scenario", type=str, default="", help="Curated loader scenario hint")
+    parser.add_argument("--primary_type_bucket", type=str, default="", help="Curated type bucket")
     
     # Output
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")

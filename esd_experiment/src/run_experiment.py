@@ -30,6 +30,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
 
 
+def _normalize_text(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -95,17 +101,22 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         raise ValueError(
             f"CSV must have 'model_id' column. Found columns: {list(df.columns)}"
         )
-    
-    # Add optional columns if missing
-    if "base_model_relation" not in df.columns:
-        df["base_model_relation"] = ""
-    if "source_model" not in df.columns:
-        df["source_model"] = ""
-    
+
+    optional_columns = [
+        "base_model_relation",
+        "source_model",
+        "revision_norm",
+        "loader_scenario",
+        "primary_type_bucket",
+    ]
+    for column in optional_columns:
+        if column not in df.columns:
+            df[column] = ""
+
     # Clean up data
-    df["model_id"] = df["model_id"].astype(str).str.strip()
-    df["base_model_relation"] = df["base_model_relation"].fillna("").astype(str).str.strip()
-    df["source_model"] = df["source_model"].fillna("").astype(str).str.strip()
+    df["model_id"] = df["model_id"].map(_normalize_text)
+    for column in optional_columns:
+        df[column] = df[column].map(_normalize_text)
     
     # Remove empty rows
     df = df[df["model_id"] != ""]
@@ -134,9 +145,12 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     worker_script = SCRIPT_DIR / "worker.py"
     
     for idx, row in model_df.iterrows():
-        model_id = row["model_id"]
-        base_relation = row["base_model_relation"]
-        source_model = row["source_model"]
+        model_id = _normalize_text(row["model_id"])
+        base_relation = _normalize_text(row["base_model_relation"])
+        source_model = _normalize_text(row["source_model"])
+        revision_norm = _normalize_text(row.get("revision_norm", ""))
+        loader_scenario = _normalize_text(row.get("loader_scenario", ""))
+        primary_type_bucket = _normalize_text(row.get("primary_type_bucket", ""))
         
         # Build command
         cmd_parts = [
@@ -153,6 +167,9 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         if args.use_svd: cmd_parts.append("--use_svd")
         if args.parallel_esd: cmd_parts.append("--parallel_esd")
         if args.overwrite: cmd_parts.append("--overwrite")
+        if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
+        if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")
+        if primary_type_bucket: cmd_parts.append(f"--primary_type_bucket '{primary_type_bucket}'")
         if base_relation: cmd_parts.append(f"--base_model_relation '{base_relation}'")
         if source_model: cmd_parts.append(f"--source_model '{source_model}'")
         
