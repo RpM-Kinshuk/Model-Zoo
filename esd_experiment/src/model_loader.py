@@ -58,7 +58,12 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
 
 def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional[LoaderFailure]:
     scenario = (loader_scenario or "").strip().lower()
-    if not scenario or scenario == "standard_transformers" or scenario == "adapter_requires_base":
+    if not scenario or scenario in {
+        "standard_transformers",
+        "adapter_requires_base",
+        "quantized_transformers_native",
+        "multimodal_transformers",
+    }:
         return None
     if scenario == "quantized_alt_format":
         return LoaderFailure(

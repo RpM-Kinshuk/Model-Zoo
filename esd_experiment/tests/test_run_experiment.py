@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from types import ModuleType
+from unittest.mock import Mock
 
 import pandas as pd
 
@@ -185,3 +186,51 @@ def test_worker_honors_revision_override_when_model_id_contains_revision():
 
     assert repo_id == "org/model"
     assert revision == "curated-rev"
+
+
+def test_worker_threads_loader_scenario_into_load_model(tmp_path: Path):
+    class _FakeParam:
+        def numel(self):
+            return 1
+
+        @property
+        def device(self):
+            return "cpu"
+
+    class _FakeModel:
+        def parameters(self):
+            return [_FakeParam(), _FakeParam()]
+
+    with _worker_module_context():
+        module_path = PROJECT_ROOT / "src" / "worker.py"
+        spec = importlib.util.spec_from_file_location("worker_under_test", module_path)
+        worker = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(worker)
+
+        worker.parse_args = lambda: SimpleNamespace(
+            model_id="org/model",
+            revision="rev-a",
+            base_model_relation="",
+            source_model="",
+            loader_scenario="quantized_transformers_native",
+            primary_type_bucket="",
+            output_dir=str(tmp_path),
+            overwrite=True,
+            fix_fingers="xmin_mid",
+            evals_thresh=1e-5,
+            bins=100,
+            filter_zeros=True,
+            parallel_esd=True,
+            use_svd=False,
+            device_map="cpu",
+            max_retries=0,
+        )
+        worker.load_model = Mock(return_value=(_FakeModel(), False))
+        worker.net_esd_estimator = Mock(return_value={})
+        worker.record_failure = Mock()
+
+        exit_code = worker.main()
+
+    assert exit_code == 0
+    assert worker.load_model.call_args.kwargs["loader_scenario"] == "quantized_transformers_native"

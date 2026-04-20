@@ -92,6 +92,14 @@ def test_classify_loader_scenario_support_accepts_standard_transformers():
     assert classify_loader_scenario_support("standard_transformers") is None
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    ["quantized_transformers_native", "multimodal_transformers"],
+)
+def test_classify_loader_scenario_support_accepts_current_policy_allowlist(scenario):
+    assert classify_loader_scenario_support(scenario) is None
+
+
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 def test_load_model_raises_structured_failure_for_unresolved_adapter(mock_is_adapter):
     with patch("model_loader_under_test.resolve_base_model", side_effect=RuntimeError("missing base")):

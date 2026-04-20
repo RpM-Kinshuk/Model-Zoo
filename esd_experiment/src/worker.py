@@ -337,6 +337,7 @@ def main():
                 device_map=args.device_map,
                 torch_dtype=torch.float16,
                 revision=revision,
+                loader_scenario=args.loader_scenario if args.loader_scenario else None,
             )
             
             print(f"Model loaded successfully (adapter: {is_adapter})")
