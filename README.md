@@ -364,7 +364,7 @@ If you use this framework in your research, please cite:
   title = {Model-Zoo: Large-Scale Neural Network Spectral Analysis},
   author = {Your Name},
   year = {2026},
-  url = {https://github.com/yourusername/Model-Zoo}
+  url = {https://github.com/RpM-Kinshuk/Model-Zoo.git}
 }
 ```
 
