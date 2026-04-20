@@ -28,7 +28,7 @@ These metrics provide insights into:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/Model-Zoo.git
+git clone <your-model-zoo-remote> Model-Zoo
 cd Model-Zoo
 
 # Create conda environment (recommended)
@@ -153,6 +153,7 @@ Each model produces a CSV with one row per layer under the chosen run directory,
 
 Structured format for machine learning pipelines:
 ```python
+import json
 import h5py
 with h5py.File('analysis_runs/phase2/example_run/metrics/model.h5', 'r') as f:
     alpha_matrix = f['alpha'][:]  # Shape: (num_layers, num_modules)
