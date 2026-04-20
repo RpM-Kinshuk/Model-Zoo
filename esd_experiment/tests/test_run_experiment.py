@@ -1,6 +1,7 @@
 import sys
 import importlib.util
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from types import ModuleType
@@ -44,7 +45,17 @@ def _worker_module_context():
     fake_h5py = ModuleType("h5py")
     fake_h5py.File = lambda *args, **kwargs: None
 
+    @dataclass
+    class _FakeLoaderFailure(Exception):
+        stage: str
+        reason: str
+        message: str
+
+        def __post_init__(self) -> None:
+            super().__init__(self.message)
+
     fake_model_loader = ModuleType("model_loader")
+    fake_model_loader.LoaderFailure = _FakeLoaderFailure
     fake_model_loader.load_model = lambda *args, **kwargs: None
     fake_model_loader.parse_model_string = lambda model_id: (
         model_id.split("@", 1)[0],
@@ -227,7 +238,13 @@ def test_worker_threads_loader_scenario_into_load_model(tmp_path: Path):
             max_retries=0,
         )
         worker.load_model = Mock(return_value=(_FakeModel(), False))
-        worker.net_esd_estimator = Mock(return_value={})
+        worker.net_esd_estimator = Mock(return_value={"longname": ["layer.0"], "alpha": [1.0]})
+        worker.save_results = Mock(
+            side_effect=lambda metrics, output_path, *args, **kwargs: (
+                output_path.parent.mkdir(parents=True, exist_ok=True),
+                output_path.write_text("alpha\n1.0\n"),
+            )
+        )
         worker.record_failure = Mock()
 
         exit_code = worker.main()

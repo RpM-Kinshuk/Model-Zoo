@@ -10,6 +10,7 @@ import warnings
 import traceback
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 
 import torch
 import pandas as pd
@@ -25,7 +26,7 @@ EXPERIMENT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from model_loader import load_model, parse_model_string, safe_filename
+from model_loader import LoaderFailure, load_model, parse_model_string, safe_filename
 from net_esd import net_esd_estimator
 
 
@@ -166,6 +167,7 @@ def save_results(
     source_model: Optional[str] = None,
     base_model_relation: str = "",
     fix_fingers: str = "",
+    h5_output_path: Optional[Path] = None,
 ):
     """
     Save ESD metrics to CSV file and write alpha matrix to HDF5.
@@ -240,8 +242,11 @@ def save_results(
 
         if longnames and alphas:
             mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
-            h5_dir = output_path.parent.parent / "metrics"
-            h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
+            if h5_output_path is None:
+                h5_dir = output_path.parent.parent / "metrics"
+                h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
+            else:
+                h5_path = h5_output_path
             relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
             file_attrs = {
                 "full_name": model_id,
@@ -258,15 +263,84 @@ def save_results(
         print(f"Failed to write H5 for {model_id}: {e}")
 
 
-def record_failure(output_dir: Path, model_id: str, error: str):
-    """Record failed model in failed_models.txt."""
-    failed_file = output_dir / "logs" / "failed_models.txt"
-    failed_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(failed_file, "a") as f:
-        f.write(f"{model_id}\t{error}\n")
-    
-    print(f"Recorded failure for {model_id}")
+def temp_output_path(final_path: Path) -> Path:
+    return final_path.with_name(f".{final_path.name}.tmp")
+
+
+def finalize_output_path(temp_path: Path, final_path: Path) -> None:
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path.replace(final_path)
+
+
+def cleanup_temp_path(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def record_failure(
+    output_dir: Path,
+    model_id: str,
+    stage: str,
+    reason: str,
+    message: str,
+    attempt: int,
+):
+    """Record machine-readable failure details and keep a text summary."""
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    jsonl_path = logs_dir / "failure_records.jsonl"
+    text_path = logs_dir / "failed_models.txt"
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model_id": model_id,
+        "stage": stage,
+        "reason": reason,
+        "message": message,
+        "attempt": attempt,
+    }
+
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with open(text_path, "a", encoding="utf-8") as f:
+        f.write(f"{model_id}\t{stage}\t{reason}\t{message}\n")
+
+    print(f"Recorded failure for {model_id}: {stage}/{reason}")
+
+
+def validate_metrics_output(metrics: dict):
+    longnames = metrics.get("longname", []) or []
+    if longnames and longnames[-1] is None:
+        longnames = longnames[:-1]
+    if not longnames:
+        return ("analyze", "analysis_empty")
+    return None
+
+
+def classify_retryable_failure(stage: str, reason: str) -> bool:
+    if reason in {
+        "unsupported_loader_scenario",
+        "adapter_base_unresolved",
+        "repo_missing_or_private",
+        "repo_gated",
+        "analysis_empty",
+    }:
+        return False
+    if reason in {"model_load_error", "cuda_oom", "analysis_exception", "save_error"}:
+        return True
+    return False
+
+
+def classify_runtime_error(stage: str, error: Exception):
+    message = str(error)
+    lowered = message.lower()
+    if "out of memory" in lowered and "cuda" in lowered:
+        return stage, "cuda_oom", message
+    if stage == "load":
+        return stage, "model_load_error", message
+    if stage == "save":
+        return stage, "save_error", message
+    return stage, "analysis_exception", message
 
 
 def cleanup_model(model):
@@ -291,16 +365,14 @@ def main():
     # Setup output path
     output_dir = Path(args.output_dir)
     output_file = output_dir / "stats" / f"{safe_filename(args.model_id)}.csv"
+    temp_output_file = temp_output_path(output_file)
+    metrics_file = output_dir / "metrics" / f"{safe_filename(args.model_id)}.h5"
+    temp_metrics_file = temp_output_path(metrics_file)
     
     # Check if already done
     if output_file.exists() and not args.overwrite:
         print(f"Results already exist: {output_file}")
         return 0
-    
-    # Create placeholder to indicate work in progress
-    if not args.overwrite:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.touch()
     
     print("=" * 80)
     print(f"Analyzing model: {display_name}")
@@ -330,15 +402,21 @@ def main():
             base_relation = args.base_model_relation if args.base_model_relation else None
             source_model = args.source_model if args.source_model else None
             
-            model, is_adapter = load_model(
-                repo_id=repo_id,
-                base_model_relation=base_relation,
-                source_model=source_model,
-                device_map=args.device_map,
-                torch_dtype=torch.float16,
-                revision=revision,
-                loader_scenario=args.loader_scenario if args.loader_scenario else None,
-            )
+            try:
+                model, is_adapter = load_model(
+                    repo_id=repo_id,
+                    base_model_relation=base_relation,
+                    source_model=source_model,
+                    device_map=args.device_map,
+                    torch_dtype=torch.float16,
+                    revision=revision,
+                    loader_scenario=args.loader_scenario if args.loader_scenario else None,
+                )
+            except LoaderFailure as exc:
+                raise exc
+            except Exception as exc:
+                stage, reason, message = classify_runtime_error("load", exc)
+                raise LoaderFailure(stage, reason, message) from exc
             
             print(f"Model loaded successfully (adapter: {is_adapter})")
             print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -353,29 +431,50 @@ def main():
             print("\nRunning ESD analysis...")
             fix_fingers_value = None if args.fix_fingers == "DKS" else args.fix_fingers
             
-            metrics = net_esd_estimator(
-                model,
-                EVALS_THRESH=args.evals_thresh,
-                bins=args.bins,
-                fix_fingers=fix_fingers_value,
-                filter_zeros=args.filter_zeros,
-                use_svd=args.use_svd,
-                parallel=args.parallel_esd,
-            )
+            try:
+                metrics = net_esd_estimator(
+                    model,
+                    EVALS_THRESH=args.evals_thresh,
+                    bins=args.bins,
+                    fix_fingers=fix_fingers_value,
+                    filter_zeros=args.filter_zeros,
+                    use_svd=args.use_svd,
+                    parallel=args.parallel_esd,
+                )
+            except Exception as exc:
+                stage, reason, message = classify_runtime_error("analyze", exc)
+                raise LoaderFailure(stage, reason, message) from exc
+
+            validation_failure = validate_metrics_output(metrics)
+            if validation_failure is not None:
+                stage, reason = validation_failure
+                raise LoaderFailure(stage, reason, "ESD analysis returned no layer metrics")
             
             print(f"ESD analysis completed successfully")
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
             
             # Save results
-            save_results(
-                metrics,
-                output_file,
-                display_name,
-                is_adapter,
-                source_model if is_adapter else None,
-                base_model_relation=args.base_model_relation or "",
-                fix_fingers=args.fix_fingers or "",
-            )
+            cleanup_temp_path(temp_output_file)
+            cleanup_temp_path(temp_metrics_file)
+            try:
+                save_results(
+                    metrics,
+                    temp_output_file,
+                    display_name,
+                    is_adapter,
+                    source_model if is_adapter else None,
+                    base_model_relation=args.base_model_relation or "",
+                    fix_fingers=args.fix_fingers or "",
+                    h5_output_path=temp_metrics_file,
+                )
+                finalize_output_path(temp_output_file, output_file)
+                if temp_metrics_file.exists():
+                    finalize_output_path(temp_metrics_file, metrics_file)
+            except Exception as exc:
+                cleanup_temp_path(temp_output_file)
+                cleanup_temp_path(temp_metrics_file)
+                stage, reason, message = classify_runtime_error("save", exc)
+                raise LoaderFailure(stage, reason, message) from exc
             
             success = True
             break
@@ -383,33 +482,48 @@ def main():
         except KeyboardInterrupt:
             print("\nInterrupted by user")
             cleanup_model(model)
-            if output_file.exists() and output_file.stat().st_size == 0:
-                output_file.unlink()
+            cleanup_temp_path(temp_output_file)
+            cleanup_temp_path(temp_metrics_file)
             return 1
             
-        except Exception as e:
+        except LoaderFailure as e:
             error_msg = str(e)
             print(f"\nAttempt {attempt} failed: {error_msg}")
-            
-            if attempt <= args.max_retries:
+
+            retryable = classify_retryable_failure(e.stage, e.reason)
+            if retryable and attempt <= args.max_retries:
                 print("Retrying...")
                 warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
             else:
                 print("\nAll attempts failed!")
                 print("Full traceback:")
                 traceback.print_exc()
-                
-                # Record failure
-                record_failure(output_dir, display_name, error_msg)
+                record_failure(output_dir, display_name, e.stage, e.reason, error_msg, attempt)
+                break
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\nAttempt {attempt} failed: {error_msg}")
+
+            stage, reason, message = classify_runtime_error("load", e)
+            retryable = classify_retryable_failure(stage, reason)
+            if retryable and attempt <= args.max_retries:
+                print("Retrying...")
+                warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
+            else:
+                print("\nAll attempts failed!")
+                print("Full traceback:")
+                traceback.print_exc()
+                record_failure(output_dir, display_name, stage, reason, message, attempt)
+                break
         
         finally:
             # Cleanup
             cleanup_model(model)
     
-    # Final cleanup of empty file if failed
+    cleanup_temp_path(temp_output_file)
+    cleanup_temp_path(temp_metrics_file)
+
     if not success:
-        if output_file.exists() and output_file.stat().st_size == 0:
-            output_file.unlink()
         print(f"\nFailed to analyze {display_name}")
         return 1
     
