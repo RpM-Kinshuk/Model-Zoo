@@ -2,7 +2,9 @@
 
 Run phase 2 analysis from `data/curated/model_zoo_phase2.csv` and write outputs under `analysis_runs/phase2/<run_name>/`.
 
-## Preferred command
+## Quick Spin-Up
+
+If you just want to run phase 2, this is the default pattern:
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -11,21 +13,23 @@ python esd_experiment/run_experiment.py \
   --gpus 0 1 2 3
 ```
 
-## Output layout
+Use a short run name in place of `example_run`.
 
-- Expected outputs:
+## What To Check After The Run
+
+- successful models should have both:
   - `stats/*.csv`
   - `metrics/*.h5`
+- failures should appear in:
   - `logs/failed_models.txt`
   - `logs/failure_records.jsonl`
-- Summary files are written below the chosen `--output_dir`.
-- Use one subdirectory per run so results stay easy to compare and delete.
+- `summary.csv` is useful for quick inspection, but it is not the success rule
 
 ## Completion Rule
 
 A phase 2 run is complete only when both the per-model `stats/*.csv` and the matching `metrics/*.h5` exist for the run's successful models.
 
-## Relative-path variant
+## From `esd_experiment/`
 
 From `esd_experiment/`, use:
 
