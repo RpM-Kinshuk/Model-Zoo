@@ -132,9 +132,9 @@ Model-Zoo/
 
 ## 📊 Understanding the Output
 
-### Per-Model CSV Files (`results/stats/*.csv`)
+### Per-Model CSV Files
 
-Each model produces a CSV with one row per layer containing:
+Each model produces a CSV with one row per layer under the chosen run directory, for example `analysis_runs/phase2/example_run/stats/*.csv`:
 
 | Metric | Description | Use Case |
 |--------|-------------|----------|
@@ -146,18 +146,18 @@ Each model produces a CSV with one row per layer containing:
 | `D` | Kolmogorov-Smirnov statistic | Quality of power-law fit |
 | `num_evals` | Number of eigenvalues | Matrix size indicator |
 
-### Alpha Matrix HDF5 Files (`results/metrics/*.h5`)
+### Alpha Matrix HDF5 Files
 
 Structured format for machine learning pipelines:
 ```python
 import h5py
-with h5py.File('results/metrics/model.h5', 'r') as f:
+with h5py.File('analysis_runs/phase2/example_run/metrics/model.h5', 'r') as f:
     alpha_matrix = f['alpha'][:]  # Shape: (num_layers, num_modules)
     module_names = json.loads(f['alpha'].attrs['module_names_json'])
     print(f"Model: {f.attrs['full_name']}")
 ```
 
-### Summary Statistics (`results/summary.csv`)
+### Summary Statistics
 
 Aggregated metrics across all analyzed models for easy comparison. Canonical phase-2 summaries live under `analysis_runs/phase2/<run_name>/summary.csv`.
 
@@ -219,7 +219,7 @@ EOF
 
 python esd_experiment/run_experiment.py \
     --model_list adapters.csv \
-    --output_dir adapter_results/ \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1
 ```
 
@@ -234,20 +234,20 @@ The framework automatically:
 ```bash
 # Generate summary statistics
 python esd_experiment/analyze_results.py \
-    --results_dir results/ \
+    --results_dir analysis_runs/phase2/example_run \
     --verbose
 
 # Compare two experiment runs (e.g., SVD vs Gram method)
 python scatter.py \
-    --dir_a results_svd/stats/ \
-    --dir_b results_gram/stats/ \
+    --dir_a analysis_runs/phase2/example_run/stats/ \
+    --dir_b analysis_runs/phase2/example_run_alt/stats/ \
     --metric alpha \
     --output alpha_comparison.png
 
 # Interactive plot (for Jupyter or local)
 python scatter.py \
-    --dir_a results_svd/stats/ \
-    --dir_b results_gram/stats/ \
+    --dir_a analysis_runs/phase2/example_run/stats/ \
+    --dir_b analysis_runs/phase2/example_run_alt/stats/ \
     --metric alpha \
     --interactive
 ```
