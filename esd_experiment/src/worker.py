@@ -228,39 +228,36 @@ def save_results(
             print(f"  Layers: {len(alpha_values)}")
 
     # ---- Also write per-model H5 (alpha matrix) in output_dir/metrics ----
-    try:
-        longnames = metrics.get("longname", [])
-        alphas = metrics.get("alpha", [])
-        # strip trailing None if present
-        if longnames and longnames[-1] is None:
-            longnames = longnames[:-1]
-        if alphas and alphas[-1] is None:
-            alphas = alphas[:-1]
-        if len(longnames) != len(alphas):
-            n = min(len(longnames), len(alphas))
-            longnames, alphas = longnames[:n], alphas[:n]
+    longnames = metrics.get("longname", [])
+    alphas = metrics.get("alpha", [])
+    # strip trailing None if present
+    if longnames and longnames[-1] is None:
+        longnames = longnames[:-1]
+    if alphas and alphas[-1] is None:
+        alphas = alphas[:-1]
+    if len(longnames) != len(alphas):
+        n = min(len(longnames), len(alphas))
+        longnames, alphas = longnames[:n], alphas[:n]
 
-        if longnames and alphas:
-            mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
-            if h5_output_path is None:
-                h5_dir = output_path.parent.parent / "metrics"
-                h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
-            else:
-                h5_path = h5_output_path
-            relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
-            file_attrs = {
-                "full_name": model_id,
-                "source_model": source_model or "",
-                "base_model_relation": relation_attr,
-                "fix_fingers": fix_fingers,
-                "alpha_only": "true",
-            }
-            save_h5(h5_path, mat, module_names, num_layers, file_attrs)
-            print(f"Saved H5 alpha matrix to: {h5_path}")
+    if longnames and alphas:
+        mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+        if h5_output_path is None:
+            h5_dir = output_path.parent.parent / "metrics"
+            h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
         else:
-            print("Skipping H5 save (no longname/alpha)")
-    except Exception as e:
-        print(f"Failed to write H5 for {model_id}: {e}")
+            h5_path = h5_output_path
+        relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
+        file_attrs = {
+            "full_name": model_id,
+            "source_model": source_model or "",
+            "base_model_relation": relation_attr,
+            "fix_fingers": fix_fingers,
+            "alpha_only": "true",
+        }
+        save_h5(h5_path, mat, module_names, num_layers, file_attrs)
+        print(f"Saved H5 alpha matrix to: {h5_path}")
+    else:
+        print("Skipping H5 save (no longname/alpha)")
 
 
 def temp_output_path(final_path: Path) -> Path:
@@ -310,9 +307,20 @@ def record_failure(
 
 def validate_metrics_output(metrics: dict):
     longnames = metrics.get("longname", []) or []
+    alphas = metrics.get("alpha", []) or []
     if longnames and longnames[-1] is None:
         longnames = longnames[:-1]
+    if alphas and alphas[-1] is None:
+        alphas = alphas[:-1]
     if not longnames:
+        return ("analyze", "analysis_empty")
+    usable_pairs = zip(longnames, alphas)
+    usable_alpha_count = sum(
+        1
+        for longname, alpha in usable_pairs
+        if longname is not None and not pd.isna(alpha)
+    )
+    if usable_alpha_count == 0:
         return ("analyze", "analysis_empty")
     return None
 
