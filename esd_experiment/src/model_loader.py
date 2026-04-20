@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoConfig
+try:
+    from transformers import AutoModelForImageTextToText
+except ImportError:  # pragma: no cover - depends on transformers version
+    AutoModelForImageTextToText = None
 from peft import PeftModel, PeftConfig
 from huggingface_hub import HfApi, get_token
 
@@ -76,6 +80,30 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
         "unsupported_loader_scenario",
         f"Unsupported loader scenario: {loader_scenario}",
     )
+
+
+def classify_quantized_dependency_failure(error: Exception) -> Optional[LoaderFailure]:
+    message = str(error)
+    lowered = message.lower()
+    package_hints = {
+        "gptqmodel": "gptqmodel",
+        "autoawq": "autoawq",
+        "bitsandbytes": "bitsandbytes",
+    }
+    for marker, package in package_hints.items():
+        if marker in lowered:
+            return LoaderFailure(
+                "load",
+                "quantized_dependency_missing",
+                f"Quantized-native loading requires the optional dependency `{package}`: {message}",
+            )
+    if "meta tensors" in lowered or "incompatible torch version" in lowered:
+        return LoaderFailure(
+            "load",
+            "quantized_backend_incompatible",
+            f"Quantized-native backend is incompatible with the current runtime: {message}",
+        )
+    return None
 
 
 def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
@@ -255,13 +283,29 @@ def load_model(
         return model, True
     else:
         print(f"[STANDARD] Loading standard model: {repo_id}")
-        model = hf_from_pretrained(
-            AutoModelForCausalLM,
-            repo_id,
-            device_map=device_map,
-            torch_dtype=torch_dtype,
-            revision=revision,
-        )
+        auto_model_cls = AutoModelForCausalLM
+        if (loader_scenario or "").strip().lower() == "multimodal_transformers":
+            if AutoModelForImageTextToText is None:
+                raise LoaderFailure(
+                    "load",
+                    "unsupported_loader_scenario",
+                    "Multimodal loading requires transformers with AutoModelForImageTextToText support",
+                )
+            auto_model_cls = AutoModelForImageTextToText
+        try:
+            model = hf_from_pretrained(
+                auto_model_cls,
+                repo_id,
+                device_map=device_map,
+                torch_dtype=torch_dtype,
+                revision=revision,
+            )
+        except Exception as exc:
+            if (loader_scenario or "").strip().lower() == "quantized_transformers_native":
+                dependency_failure = classify_quantized_dependency_failure(exc)
+                if dependency_failure is not None:
+                    raise dependency_failure from exc
+            raise
         model.eval()
         return model, False
 

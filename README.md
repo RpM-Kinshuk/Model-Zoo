@@ -124,6 +124,8 @@ Model-Zoo/
 
 ### 3. Robust Model Loading
 - **PEFT/LoRA adapter support**: Automatically detects and merges adapters with base models
+- **Multimodal support**: Routes Llava-style image-text-to-text repos through the appropriate auto model class
+- **Quantized-native support**: Supports common HF-native quantized repos when the required backend is available, and records structured incompatibility failures otherwise
 - **Revision support**: Analyze specific model versions (e.g., `model@revision`)
 - **Retry logic**: Handles transient HuggingFace Hub errors
 - **Memory management**: Automatic cleanup and cache clearing

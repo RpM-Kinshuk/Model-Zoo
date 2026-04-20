@@ -74,6 +74,8 @@ esd_experiment/
 
 ✅ **GPU Resource Management** - Automatic scheduling using gputracker  
 ✅ **PEFT Adapter Support** - Robust loading and merging of LoRA/PEFT adapters  
+✅ **Multimodal Support** - Llava-style image-text-to-text models load through the multimodal auto class  
+✅ **Quantized-Native Support** - Common HF-native 4-bit repos work when the required quant backend is available  
 ✅ **Resume Capability** - Skip already-analyzed models automatically  
 ✅ **Parallel Processing** - Dispatch multiple models across GPUs  
 ✅ **Error Handling** - Retry logic and failure tracking  
@@ -112,6 +114,12 @@ some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,ad
 - `primary_type_bucket` (optional): curated type bucket for logging / downstream analysis
 
 Legacy three-column CSVs (`model_id,base_model_relation,source_model`) remain supported.
+
+### Loader Notes
+
+- `multimodal_transformers` routes through `AutoModelForImageTextToText`.
+- `quantized_transformers_native` works for common HF-native quantized repos, but some backends such as AWQ/GPTQ may still depend on optional packages and a compatible torch/runtime stack.
+- When a quantized backend is missing or incompatible, the worker records a structured load failure instead of leaving partial outputs behind.
 
 ## Output
 

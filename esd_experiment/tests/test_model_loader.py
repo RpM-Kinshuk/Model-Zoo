@@ -31,6 +31,11 @@ fake_transformers.AutoModelForCausalLM = type(
     (),
     {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
 )
+fake_transformers.AutoModelForImageTextToText = type(
+    "AutoModelForImageTextToText",
+    (),
+    {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
+)
 fake_transformers.AutoConfig = type(
     "AutoConfig",
     (),
@@ -130,6 +135,47 @@ def test_load_model_forwards_revision_to_standard_load(mock_from_pretrained):
     assert model is mock_model
     assert is_adapter is False
     assert mock_from_pretrained.call_args.kwargs["revision"] == "rev-a"
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_uses_multimodal_auto_class(mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/multimodal-model",
+        loader_scenario="multimodal_transformers",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForImageTextToText
+
+
+@patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."))
+def test_load_model_raises_structured_failure_for_missing_quantized_dependency(mock_from_pretrained):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/quantized-model",
+            loader_scenario="quantized_transformers_native",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_dependency_missing"
+    assert "gptqmodel" in exc.value.message
+
+
+@patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Tensor.item() cannot be called on meta tensors"))
+def test_load_model_raises_structured_failure_for_incompatible_quantized_backend(mock_from_pretrained):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/quantized-model",
+            loader_scenario="quantized_transformers_native",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_backend_incompatible"
+    assert "incompatible" in exc.value.message
 
 
 @patch("model_loader_under_test.PeftModel.from_pretrained")
