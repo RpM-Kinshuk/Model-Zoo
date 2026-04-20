@@ -6,11 +6,25 @@ import os
 import re
 import torch
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoConfig
 from peft import PeftModel, PeftConfig
 from huggingface_hub import HfApi, get_token
+
+
+@dataclass
+class LoaderFailure(Exception):
+    stage: str
+    reason: str
+    message: str
+
+    def __post_init__(self) -> None:
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def get_hf_token() -> Optional[str]:
@@ -40,6 +54,23 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
             return AutoModelCls.from_pretrained(repo_id, use_auth_token=token, **kwargs)
     else:
         return AutoModelCls.from_pretrained(repo_id, **kwargs)
+
+
+def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional[LoaderFailure]:
+    scenario = (loader_scenario or "").strip().lower()
+    if not scenario or scenario == "standard_transformers" or scenario == "adapter_requires_base":
+        return None
+    if scenario == "quantized_alt_format":
+        return LoaderFailure(
+            "load",
+            "unsupported_loader_scenario",
+            "GGUF-style repos are not supported by the current loader",
+        )
+    return LoaderFailure(
+        "load",
+        "unsupported_loader_scenario",
+        f"Unsupported loader scenario: {loader_scenario}",
+    )
 
 
 def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
@@ -130,7 +161,8 @@ def load_and_merge_adapter(
     adapter_repo: str,
     base_repo: Optional[str] = None,
     device_map: str = "cpu",
-    torch_dtype = torch.float16
+    torch_dtype = torch.float16,
+    revision: Optional[str] = None,
 ) -> torch.nn.Module:
     """
     Load base model and merge PEFT adapter weights.
@@ -146,7 +178,10 @@ def load_and_merge_adapter(
     """
     # Resolve base model
     if base_repo is None:
-        base_repo = resolve_base_model(adapter_repo)
+        try:
+            base_repo = resolve_base_model(adapter_repo)
+        except RuntimeError as exc:
+            raise LoaderFailure("load", "adapter_base_unresolved", str(exc)) from exc
     
     print(f"Loading base model: {base_repo}")
     base = hf_from_pretrained(
@@ -154,6 +189,7 @@ def load_and_merge_adapter(
         base_repo,
         device_map=device_map,
         torch_dtype=torch_dtype,
+        revision=revision,
     )
     base.eval()
     
@@ -163,7 +199,8 @@ def load_and_merge_adapter(
         base,
         adapter_repo,
         is_trainable=False,
-        token=token
+        token=token,
+        revision=revision,
     )
     
     print("Merging adapter weights into base model...")
@@ -180,6 +217,7 @@ def load_model(
     device_map: str = "cpu",
     torch_dtype = torch.float16,
     revision: Optional[str] = None,
+    loader_scenario: Optional[str] = None,
 ) -> Tuple[torch.nn.Module, bool]:
     """
     Load a model, handling both regular models and PEFT adapters.
@@ -195,6 +233,10 @@ def load_model(
     Returns:
         Tuple of (model, is_adapter)
     """
+    scenario_failure = classify_loader_scenario_support(loader_scenario)
+    if scenario_failure is not None:
+        raise scenario_failure
+
     # Check if this is an adapter
     if is_adapter_model(repo_id, base_model_relation):
         print(f"[ADAPTER] Loading adapter model: {repo_id}")
@@ -202,7 +244,8 @@ def load_model(
             adapter_repo=repo_id,
             base_repo=source_model,
             device_map=device_map,
-            torch_dtype=torch_dtype
+            torch_dtype=torch_dtype,
+            revision=revision,
         )
         return model, True
     else:
