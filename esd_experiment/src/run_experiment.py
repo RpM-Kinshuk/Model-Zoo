@@ -108,6 +108,8 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         "revision_norm",
         "loader_scenario",
         "primary_type_bucket",
+        "lineage_status",
+        "candidate_source",
     ]
     for column in optional_columns:
         if column not in df.columns:

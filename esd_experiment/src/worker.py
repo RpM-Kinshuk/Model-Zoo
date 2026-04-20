@@ -60,6 +60,14 @@ def parse_args():
     return parser.parse_args()
 
 
+def resolve_model_revision(model_id: str, revision_override: str = ""):
+    """Resolve repo ID and effective revision, honoring curated overrides."""
+    repo_id, revision = parse_model_string(model_id)
+    if revision_override and revision_override.strip():
+        revision = revision_override.strip()
+    return repo_id, revision
+
+
 # ------------------------------------------------------------
 # Minimal helpers to build and save alpha matrices as .h5 files
 # (mirrors ESD-Independence/Classification/run_metric.py format)
@@ -276,8 +284,8 @@ def main():
     """Main worker function."""
     args = parse_args()
     
-    # Parse model ID (may include revision)
-    repo_id, revision = parse_model_string(args.model_id)
+    # Parse model ID (may include revision) and allow curated revision override
+    repo_id, revision = resolve_model_revision(args.model_id, args.revision)
     display_name = args.model_id
     
     # Setup output path
