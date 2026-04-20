@@ -45,25 +45,19 @@ pip install -r requirements.txt
 # 1. Test your setup
 python esd_experiment/tests/test_setup.py
 
-# 2. Create a model list
-cd esd_experiment
-cat > my_models.csv << EOF
-model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
-meta-llama/Llama-2-7b-hf,main,source,,,base_source
-some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
-EOF
-
-# 3. Run analysis with GPU scheduling
-python run_experiment.py \
-    --model_list my_models.csv \
-    --output_dir results/ \
+# 2. Run analysis with the canonical curated list
+python esd_experiment/run_experiment.py \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3
 
-# 4. Analyze results
-python analyze_results.py --results_dir results/ --verbose
+# 3. Analyze results
+python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/example_run --verbose
 ```
 
 Legacy three-column CSVs (`model_id,base_model_relation,source_model`) are still accepted, but curated tables are now the preferred input.
+
+Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
 
 ## 📁 Repository Structure
 
@@ -165,7 +159,7 @@ with h5py.File('results/metrics/model.h5', 'r') as f:
 
 ### Summary Statistics (`results/summary.csv`)
 
-Aggregated metrics across all analyzed models for easy comparison.
+Aggregated metrics across all analyzed models for easy comparison. Canonical phase-2 summaries live under `analysis_runs/phase2/<run_name>/summary.csv`.
 
 ## 🔧 Advanced Usage
 
@@ -173,8 +167,8 @@ Aggregated metrics across all analyzed models for easy comparison.
 
 ```bash
 python esd_experiment/run_experiment.py \
-    --model_list models.csv \
-    --output_dir results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3 \
     --fix_fingers xmin_peak \     # or 'xmin_mid' or 'DKS'
     --evals_thresh 1e-6 \          # Eigenvalue threshold
@@ -193,15 +187,15 @@ python esd_experiment/run_experiment.py \
 ```bash
 # Start experiment
 python esd_experiment/run_experiment.py \
-    --model_list models.csv \
-    --output_dir results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3 4 5 6 7 &
 
 PID=$!
 
 # Edit GPU pool during runtime
 echo '{"available_gpus": [4, 5, 6, 7], "max_checks": 5, "memory_threshold_mb": 500}' \
-    > results/gpu_config.json
+    > analysis_runs/phase2/example_run/gpu_config.json
 
 # Reload configuration
 kill -HUP $PID
@@ -269,8 +263,8 @@ python esd_experiment/tests/test_gpu.py
 
 # Run on small model list
 python esd_experiment/run_experiment.py \
-    --model_list esd_experiment/examples/atlas_models.csv \
-    --output_dir test_results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --limit 5 \
     --gpus 0
 ```

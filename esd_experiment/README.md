@@ -10,22 +10,17 @@ A clean, organized framework for analyzing Empirical Spectral Density (ESD) metr
 # 1. Test your setup
 python tests/test_setup.py
 
-# 2. Create a curated model list
-cat > my_models.csv << EOF
-model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
-meta-llama/Llama-2-7b-hf,main,source,,,base_source
-some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
-EOF
-
-# 3. Run the experiment
+# 2. Run the experiment with the canonical curated list
 python run_experiment.py \
-    --model_list my_models.csv \
-    --output_dir results/ \
+    --model_list ../data/curated/model_zoo_phase2.csv \
+    --output_dir ../analysis_runs/phase2/example_run \
     --gpus 0 1 2 3
 
-# 4. Analyze results
-python analyze_results.py --results_dir results/ --verbose
+# 3. Analyze results
+python analyze_results.py --results_dir ../analysis_runs/phase2/example_run --verbose
 ```
+
+Canonical phase-2 outputs belong under `../analysis_runs/phase2/`.
 
 ## Documentation
 
@@ -124,12 +119,12 @@ Legacy three-column CSVs (`model_id,base_model_relation,source_model`) remain su
 ## Output
 
 Each successful model generates:
-- `results/stats/*.csv` for per-layer metrics
-- `results/metrics/*.h5` for alpha matrices
+- `../analysis_runs/phase2/example_run/stats/*.csv` for per-layer metrics
+- `../analysis_runs/phase2/example_run/metrics/*.h5` for alpha matrices
 
 Failures are recorded in:
-- `results/logs/failed_models.txt`
-- `results/logs/failure_records.jsonl`
+- `../analysis_runs/phase2/example_run/logs/failed_models.txt`
+- `../analysis_runs/phase2/example_run/logs/failure_records.jsonl`
 
 The per-layer CSV contains metrics such as:
 - `alpha` - Power law exponent
@@ -138,7 +133,7 @@ The per-layer CSV contains metrics such as:
 - `entropy` - Spectral entropy
 - And more...
 
-Summary statistics are saved to `results/summary.csv`.
+Summary statistics are saved to `../analysis_runs/phase2/example_run/summary.csv`.
 
 ## Requirements
 
