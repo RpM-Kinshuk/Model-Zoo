@@ -33,36 +33,17 @@ Canonical phase-2 outputs belong under `../analysis_runs/phase2/`.
 
 ```
 esd_experiment/
-│
-├── src/                      # Core framework code
-│   ├── run_experiment.py     # Main experiment orchestrator
-│   ├── worker.py             # Per-model analysis worker
-│   └── model_loader.py       # Robust model loading with adapter support
-│
-├── utils/                    # Utility scripts
-│   ├── analyze_results.py    # Results aggregation and analysis
-│   └── create_model_list.py  # Model list management
-│
-├── docs/                     # Documentation
-│   ├── README.md             # Full user guide
-│   ├── QUICKSTART.md         # Quick start guide
-│   ├── OVERVIEW.md           # Architecture overview
-│   └── GPU_FIX.md            # GPU troubleshooting
-│
-├── examples/                 # Example files
-│   ├── workflow.sh           # Complete workflow example
-│   ├── config.py             # Configuration patterns
-│   └── example_models.csv    # Sample model list
-│
-├── tests/                    # Testing scripts
-│   ├── test_setup.py         # Framework setup verification
-│   └── test_gpu.py           # GPU setup testing
-│
-├── run_experiment.py         # Main entry point (wrapper)
-├── analyze_results.py        # Analysis entry point (wrapper)
-├── create_model_list.py      # Model list entry point (wrapper)
-├── requirements.txt          # Python dependencies
-└── CHANGELOG.md              # Version history
+├── README.md
+├── STRUCTURE.md
+├── analyze_results.py
+├── docs/
+├── examples/
+├── gputracker/
+├── requirements.txt
+├── run_experiment.py
+├── src/
+├── tests/
+└── utils/
 ```
 
 ## Features

@@ -63,6 +63,9 @@ Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
 
 ```
 Model-Zoo/
+├── data/curated/               # Canonical phase-1 artifacts and synced views
+├── analysis_runs/phase2/       # Canonical phase-2 run outputs
+├── docs/operations/            # Human operational docs for phases 1 and 2
 ├── net_esd/                      # Core ESD computation library
 │   ├── core.py                   # Main ESD algorithms (vectorized, multi-GPU)
 │   ├── utils.py                  # Helper functions (rank, entropy, layer filtering)
@@ -170,12 +173,18 @@ python esd_experiment/run_experiment.py \
     --model_list data/curated/model_zoo_phase2.csv \
     --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3 \
-    --fix_fingers xmin_peak \     # or 'xmin_mid' or 'DKS'
-    --evals_thresh 1e-6 \          # Eigenvalue threshold
-    --bins 100 \                   # Histogram bins for xmin_peak
-    --use_svd \                    # Use SVD (slower but more accurate)
-    --parallel_esd                 # Parallel layer processing
+    --fix_fingers xmin_peak \
+    --evals_thresh 1e-6 \
+    --bins 100 \
+    --use_svd \
+    --parallel_esd
 ```
+
+Optional tuning:
+- `--fix_fingers xmin_mid` or `DKS`
+- `--evals_thresh 1e-6`
+- `--bins 100`
+- `--use_svd`
 
 **ESD Methods:**
 - `xmin_mid`: Divide spectrum at midpoint (fast, default)

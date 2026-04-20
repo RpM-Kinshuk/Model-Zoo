@@ -1,6 +1,6 @@
 # Curated Data
 
-Canonical phase-2 inputs for Model-Zoo live here.
+Canonical phase-1 artifacts for Model-Zoo live here, and phase 2 consumes them as operational inputs.
 
 ## Files
 
@@ -11,5 +11,6 @@ Canonical phase-2 inputs for Model-Zoo live here.
 
 ## Notes
 
-- Treat these files as the operational source of truth for phase-2 runs.
+- These files are generated/synced outputs, not hand-edited inputs.
+- Treat them as the operational source of truth for phases 1 and 2 use.
 - Keep derived analysis output in `analysis_runs/phase2/`, not in this directory.

@@ -1,6 +1,8 @@
 # Curation
 
-The curated tables in this folder are the canonical phase 1 outputs for Model-Zoo.
+The curated tables in this folder are the canonical phase 1 artifacts for Model-Zoo and the phase 2 operational inputs.
+
+These CSVs are generated/synced outputs, not hand-edited files.
 
 Phase 1 stops at curation, enrichment, and probe status tracking. It does not include ESD analysis outputs.
 
@@ -13,7 +15,7 @@ Phase 1 stops at curation, enrichment, and probe status tracking. It does not in
 
 ## Rules
 
-- Treat the curated CSVs as generated artifacts.
+- Treat the curated CSVs as generated/synced artifacts.
 - Update them together when the phase-2 source table changes.
 - Keep local experiment outputs out of `data/curated/`.
 

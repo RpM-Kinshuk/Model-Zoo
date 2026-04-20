@@ -22,6 +22,8 @@ Model-Zoo owns phases 1 and 2. Model-Research owns phase 3.
   - `model_zoo_phase2_probe_failures.csv`
 - `data/manual_audits/` if present, for manual audit artifacts that support phase 1
 
+These are generated/synced artifacts, not hand-edited files.
+
 Phase 1 stops at curation, enrichment, and probe status tracking. It does not produce ESD run artifacts.
 
 ## Canonical Phase 2 Inputs
