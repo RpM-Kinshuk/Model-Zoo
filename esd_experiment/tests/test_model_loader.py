@@ -31,6 +31,11 @@ fake_transformers.AutoModelForCausalLM = type(
     (),
     {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
 )
+fake_transformers.AutoModelForSeq2SeqLM = type(
+    "AutoModelForSeq2SeqLM",
+    (),
+    {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
+)
 fake_transformers.AutoModelForImageTextToText = type(
     "AutoModelForImageTextToText",
     (),
@@ -83,10 +88,19 @@ finally:
 LoaderFailure = model_loader.LoaderFailure
 classify_loader_scenario_support = model_loader.classify_loader_scenario_support
 load_model = model_loader.load_model
+resolve_adapter_effective_loader = model_loader.resolve_adapter_effective_loader
 
 
 def test_classify_loader_scenario_support_rejects_quantized_alt_format():
     failure = classify_loader_scenario_support("quantized_alt_format")
+
+    assert isinstance(failure, LoaderFailure)
+    assert failure.stage == "load"
+    assert failure.reason == "unsupported_loader_scenario"
+
+
+def test_classify_loader_scenario_support_rejects_gguf():
+    failure = classify_loader_scenario_support("gguf")
 
     assert isinstance(failure, LoaderFailure)
     assert failure.stage == "load"
@@ -152,6 +166,21 @@ def test_load_model_uses_multimodal_auto_class(mock_from_pretrained):
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForImageTextToText
 
 
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_uses_seq2seq_auto_class(mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/seq2seq-model",
+        loader_scenario="seq2seq",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
+
+
 @patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."))
 def test_load_model_raises_structured_failure_for_missing_quantized_dependency(mock_from_pretrained):
     with pytest.raises(LoaderFailure) as exc:
@@ -176,6 +205,28 @@ def test_load_model_raises_structured_failure_for_incompatible_quantized_backend
     assert exc.value.stage == "load"
     assert exc.value.reason == "quantized_backend_incompatible"
     assert "incompatible" in exc.value.message
+
+
+def test_resolve_adapter_effective_loader_is_backend_sensitive():
+    assert resolve_adapter_effective_loader("gptq") == "gptq"
+    assert resolve_adapter_effective_loader("awq") == "awq"
+    assert resolve_adapter_effective_loader("standard_causal") == "standard_causal"
+
+
+@patch("model_loader_under_test.resolve_adapter_effective_loader", return_value="gptq")
+def test_load_model_raises_structured_failure_for_adapter_gptq_backend(mock_resolve_adapter_effective_loader):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/adapter",
+            base_model_relation="adapter",
+            source_model="base/model",
+            loader_scenario="adapter_requires_base",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "unsupported_backend"
+    assert "gptq" in exc.value.message.lower()
+    assert mock_resolve_adapter_effective_loader.called
 
 
 @patch("model_loader_under_test.PeftModel.from_pretrained")

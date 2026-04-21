@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoConfig
 try:
+    from transformers import AutoModelForSeq2SeqLM
+except ImportError:  # pragma: no cover - depends on transformers version
+    AutoModelForSeq2SeqLM = None
+try:
     from transformers import AutoModelForImageTextToText
 except ImportError:  # pragma: no cover - depends on transformers version
     AutoModelForImageTextToText = None
@@ -67,9 +71,10 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
         "adapter_requires_base",
         "quantized_transformers_native",
         "multimodal_transformers",
+        "seq2seq",
     }:
         return None
-    if scenario == "quantized_alt_format":
+    if scenario in {"quantized_alt_format", "gguf"}:
         return LoaderFailure(
             "load",
             "unsupported_loader_scenario",
@@ -104,6 +109,52 @@ def classify_quantized_dependency_failure(error: Exception) -> Optional[LoaderFa
             f"Quantized-native backend is incompatible with the current runtime: {message}",
         )
     return None
+
+
+def resolve_effective_loader_for_repo(
+    repo_id: str,
+    loader_scenario: Optional[str] = None,
+    base_model_relation: Optional[str] = None,
+    source_model: Optional[str] = None,
+) -> str:
+    scenario = (loader_scenario or "").strip().lower()
+    relation = (base_model_relation or "").strip().lower()
+    repo_hint = " ".join(
+        part for part in [repo_id, source_model or ""] if part
+    ).lower()
+
+    if relation in {"adapter", "lora", "peft"}:
+        return resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=scenario)
+    if scenario == "seq2seq" or "seq2seq" in repo_hint:
+        return "seq2seq"
+    if scenario == "multimodal_transformers":
+        return "multimodal"
+    if scenario == "quantized_transformers_native":
+        if any(marker in repo_hint for marker in ("gptq", "awq")):
+            return "gptq" if "gptq" in repo_hint else "awq"
+    if scenario == "gguf":
+        return "gguf"
+    return "standard_causal"
+
+
+def resolve_adapter_effective_loader(
+    base_loader_or_repo: Optional[str],
+    loader_scenario: Optional[str] = None,
+) -> str:
+    candidates = " ".join(
+        part for part in [base_loader_or_repo or "", loader_scenario or ""] if part
+    ).lower()
+    if "gptq" in candidates:
+        return "gptq"
+    if "awq" in candidates:
+        return "awq"
+    if "gguf" in candidates:
+        return "gguf"
+    if "seq2seq" in candidates:
+        return "seq2seq"
+    if "multimodal" in candidates:
+        return "multimodal"
+    return "standard_causal"
 
 
 def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
@@ -272,6 +323,13 @@ def load_model(
 
     # Check if this is an adapter
     if is_adapter_model(repo_id, base_model_relation):
+        effective_loader = resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=loader_scenario)
+        if effective_loader in {"gptq", "awq", "gguf"}:
+            raise LoaderFailure(
+                "load",
+                "unsupported_backend",
+                f"Adapter loading does not support {effective_loader} base loaders",
+            )
         print(f"[ADAPTER] Loading adapter model: {repo_id}")
         model = load_and_merge_adapter(
             adapter_repo=repo_id,
@@ -283,8 +341,22 @@ def load_model(
         return model, True
     else:
         print(f"[STANDARD] Loading standard model: {repo_id}")
+        effective_loader = resolve_effective_loader_for_repo(
+            repo_id,
+            loader_scenario=loader_scenario,
+            base_model_relation=base_model_relation,
+            source_model=source_model,
+        )
         auto_model_cls = AutoModelForCausalLM
-        if (loader_scenario or "").strip().lower() == "multimodal_transformers":
+        if effective_loader == "seq2seq":
+            if AutoModelForSeq2SeqLM is None:
+                raise LoaderFailure(
+                    "load",
+                    "unsupported_loader_scenario",
+                    "Seq2seq loading requires transformers with AutoModelForSeq2SeqLM support",
+                )
+            auto_model_cls = AutoModelForSeq2SeqLM
+        elif effective_loader == "multimodal":
             if AutoModelForImageTextToText is None:
                 raise LoaderFailure(
                     "load",
