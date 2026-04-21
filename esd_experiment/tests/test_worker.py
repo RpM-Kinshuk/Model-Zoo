@@ -101,6 +101,37 @@ def test_finalize_output_path_renames_temp_file(tmp_path: Path):
     assert not temp_path.exists()
 
 
+def test_terminal_status_path_uses_per_model_json_file(tmp_path: Path):
+    worker = load_worker_module()
+
+    path = worker._terminal_status_path(tmp_path, "org/model")
+
+    assert path == tmp_path / "logs" / "terminal_status" / "org--model.json"
+
+
+def test_record_terminal_status_writes_one_json_file_per_model(tmp_path: Path):
+    worker = load_worker_module()
+    output_dir = tmp_path / "results"
+
+    worker.record_terminal_status(
+        output_dir=output_dir,
+        model_id="org/model",
+        status="success",
+        stage="save",
+        reason="completed",
+        message="done",
+    )
+
+    status_file = output_dir / "logs" / "terminal_status" / "org--model.json"
+    payload = json.loads(status_file.read_text())
+
+    assert payload["model_id"] == "org/model"
+    assert payload["status"] == "success"
+    assert payload["stage"] == "save"
+    assert payload["reason"] == "completed"
+    assert payload["message"] == "done"
+
+
 def test_record_failure_writes_jsonl_and_text_summary(tmp_path: Path):
     worker = load_worker_module()
     output_dir = tmp_path / "results"
@@ -124,6 +155,38 @@ def test_record_failure_writes_jsonl_and_text_summary(tmp_path: Path):
     assert record["message"] == "access denied"
     assert record["attempt"] == 1
     assert "org/model\tload\trepo_gated\taccess denied" in text_path.read_text()
+
+
+def test_record_failure_appends_one_valid_json_line_per_call(tmp_path: Path):
+    worker = load_worker_module()
+    output_dir = tmp_path / "results"
+
+    worker.record_failure(
+        output_dir=output_dir,
+        model_id="org/model-a",
+        stage="load",
+        reason="repo_gated",
+        message="access denied",
+        attempt=1,
+    )
+    worker.record_failure(
+        output_dir=output_dir,
+        model_id="org/model-b",
+        stage="save",
+        reason="save_error",
+        message="disk full",
+        attempt=2,
+    )
+
+    jsonl_path = output_dir / "logs" / "failure_records.jsonl"
+    lines = jsonl_path.read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+
+    assert len(lines) == 2
+    assert records[0]["model_id"] == "org/model-a"
+    assert records[1]["model_id"] == "org/model-b"
+    assert records[0]["attempt"] == 1
+    assert records[1]["attempt"] == 2
 
 
 def test_validate_metrics_output_rejects_empty_longname_rows():
@@ -216,6 +279,7 @@ def test_main_regenerates_when_final_csv_exists_without_h5(tmp_path: Path):
     exit_code = worker.main()
 
     metrics_file = tmp_path / "metrics" / "org--model.h5"
+    terminal_status_file = tmp_path / "logs" / "terminal_status" / "org--model.json"
 
     assert exit_code == 0
     assert worker.load_model.call_count == 1
@@ -223,6 +287,7 @@ def test_main_regenerates_when_final_csv_exists_without_h5(tmp_path: Path):
     assert output_file.read_text() == "alpha\n1.0\n"
     assert metrics_file.exists()
     assert metrics_file.read_text() == "h5-temp"
+    assert json.loads(terminal_status_file.read_text())["status"] == "success"
 
 
 def test_main_clears_stale_partial_outputs_before_failed_regeneration(tmp_path: Path):
@@ -270,11 +335,15 @@ def test_main_clears_stale_partial_outputs_before_failed_regeneration(tmp_path: 
     exit_code = worker.main()
 
     failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
+    terminal_status_file = tmp_path / "logs" / "terminal_status" / "org--model.json"
+    terminal_record = json.loads(terminal_status_file.read_text())
 
     assert exit_code == 1
     assert not output_file.exists()
     assert failure_record["stage"] == "load"
     assert failure_record["reason"] == "unsupported_loader_scenario"
+    assert terminal_record["status"] == "failed"
+    assert terminal_record["reason"] == "unsupported_loader_scenario"
 
 
 def test_main_clears_existing_outputs_when_overwrite_is_requested(tmp_path: Path):

@@ -280,6 +280,41 @@ def cleanup_output_artifacts(*paths: Path) -> None:
             path.unlink()
 
 
+def _terminal_status_path(output_dir: Path, model_id: str) -> Path:
+    return output_dir / "logs" / "terminal_status" / f"{safe_filename(model_id)}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+        f.write("\n")
+    temp_path.replace(path)
+
+
+def record_terminal_status(
+    output_dir: Path,
+    model_id: str,
+    status: str,
+    stage: str,
+    reason: str,
+    message: str,
+    attempt: int = 0,
+):
+    """Record the final terminal outcome for a model."""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model_id": model_id,
+        "status": status,
+        "stage": stage,
+        "reason": reason,
+        "message": message,
+        "attempt": attempt,
+    }
+    _write_json_atomic(_terminal_status_path(output_dir, model_id), record)
+
+
 def record_failure(
     output_dir: Path,
     model_id: str,
@@ -406,6 +441,15 @@ def main():
         else:
             if output_file.exists() and metrics_file.exists():
                 print(f"Results already exist: {output_file}")
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="success",
+                    stage="skip",
+                    reason="already_complete",
+                    message="Results already exist",
+                    attempt=0,
+                )
                 return 0
             if output_file.exists() or metrics_file.exists():
                 print("Incomplete existing outputs detected; clearing stale artifacts before regeneration")
@@ -418,6 +462,7 @@ def main():
     except Exception as exc:
         stage, reason, message = classify_runtime_error("save", exc)
         record_failure(output_dir, display_name, stage, reason, message, attempt=0)
+        record_terminal_status(output_dir, display_name, "failed", stage, reason, message, attempt=0)
         return 1
     
     print("=" * 80)
@@ -537,6 +582,15 @@ def main():
             cleanup_model(model)
             cleanup_temp_path(temp_output_file)
             cleanup_temp_path(temp_metrics_file)
+            record_terminal_status(
+                output_dir,
+                display_name,
+                status="failed",
+                stage="save",
+                reason="interrupted",
+                message="Interrupted by user",
+                attempt=attempt,
+            )
             return 1
             
         except LoaderFailure as e:
@@ -552,6 +606,15 @@ def main():
                 print("Full traceback:")
                 traceback.print_exc()
                 record_failure(output_dir, display_name, e.stage, e.reason, error_msg, attempt)
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="failed",
+                    stage=e.stage,
+                    reason=e.reason,
+                    message=error_msg,
+                    attempt=attempt,
+                )
                 break
         except Exception as e:
             error_msg = str(e)
@@ -567,6 +630,15 @@ def main():
                 print("Full traceback:")
                 traceback.print_exc()
                 record_failure(output_dir, display_name, stage, reason, message, attempt)
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="failed",
+                    stage=stage,
+                    reason=reason,
+                    message=message,
+                    attempt=attempt,
+                )
                 break
         
         finally:
@@ -578,11 +650,30 @@ def main():
 
     if not success:
         print(f"\nFailed to analyze {display_name}")
+        if not _terminal_status_path(output_dir, display_name).exists():
+            record_terminal_status(
+                output_dir,
+                display_name,
+                status="failed",
+                stage="save",
+                reason="analysis_failed",
+                message="Failed to analyze model",
+                attempt=args.max_retries + 1,
+            )
         return 1
     
     print(f"\n{'=' * 80}")
     print(f"Successfully completed: {display_name}")
     print(f"{'=' * 80}")
+    record_terminal_status(
+        output_dir,
+        display_name,
+        status="success",
+        stage="save",
+        reason="completed",
+        message="Successfully completed",
+        attempt=attempt,
+    )
     return 0
 
 
