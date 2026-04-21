@@ -58,6 +58,7 @@ python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/exam
 Legacy three-column CSVs (`model_id,base_model_relation,source_model`) are still accepted, but curated tables are now the preferred input.
 
 Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
+Phase-2 ESD runs use `data/curated/model_zoo_phase2.csv`, run a preflight eligibility step before dispatch, and keep output-root accounting under `analysis_runs/phase2/<run_name>/`.
 
 ## 📁 Repository Structure
 

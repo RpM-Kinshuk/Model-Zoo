@@ -22,6 +22,8 @@ python analyze_results.py --results_dir ../analysis_runs/phase2/example_run --ve
 
 Canonical phase-2 outputs belong under `../analysis_runs/phase2/`.
 
+Phase-2 runs now use a preflight eligibility step before GPU dispatch. The explicit loader paths are `standard_causal`, `seq2seq`, `multimodal`, `adapter_requires_base`, `gptq`, and `awq`; `gguf` is rejected in this blocker pass. Run summaries are derived from per-model success artifacts plus terminal/failure records, not dispatcher logs alone.
+
 ## Documentation
 
 - **[Quick Start Guide](docs/QUICKSTART.md)** - Get started in 5 minutes
