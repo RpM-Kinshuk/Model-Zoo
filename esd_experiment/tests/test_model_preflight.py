@@ -21,11 +21,21 @@ resolve_effective_loader = model_preflight.resolve_effective_loader
 
 
 def test_resolve_effective_loader_prefers_seq2seq_for_t5_configs():
-    assert resolve_effective_loader({'model_type': 't5'}) == 'seq2seq'
+    assert resolve_effective_loader({
+        'loader_scenario': 'standard_transformers',
+        'primary_type_bucket': 'text',
+        'config_model_type': 't5',
+        'config_architectures': ['T5ForConditionalGeneration'],
+    }) == 'seq2seq'
 
 
 def test_resolve_effective_loader_prefers_multimodal_for_image_text_configs():
-    assert resolve_effective_loader({'architectures': ['SomeImageTextModel']}) == 'multimodal'
+    assert resolve_effective_loader({
+        'loader_scenario': 'standard_transformers',
+        'primary_type_bucket': 'multimodal',
+        'config_model_type': 'vision-encoder-decoder',
+        'config_architectures': ['SomeImageTextModel'],
+    }) == 'multimodal'
 
 
 def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
@@ -37,7 +47,8 @@ def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
 
     assert isinstance(decision, PreflightDecision)
     assert decision.eligible is False
-    assert decision.reason == 'adapter_config_missing'
+    assert decision.reason == 'missing_required_artifact'
+    assert decision.effective_loader == 'adapter_requires_base'
 
 
 def test_classify_row_preflight_marks_gptq_backend_missing():
@@ -48,7 +59,8 @@ def test_classify_row_preflight_marks_gptq_backend_missing():
     })
 
     assert decision.eligible is False
-    assert decision.reason == 'gptq_backend_missing'
+    assert decision.reason == 'unsupported_backend'
+    assert decision.effective_loader == 'gptq'
 
 
 def test_classify_row_preflight_allows_standard_transformers_text_model():
@@ -59,3 +71,4 @@ def test_classify_row_preflight_allows_standard_transformers_text_model():
 
     assert decision.eligible is True
     assert decision.reason == 'eligible'
+    assert decision.effective_loader == 'standard_causal'

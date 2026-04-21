@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping, Optional, Set
 class PreflightDecision:
     eligible: bool
     reason: str
-    effective_loader: str = "standard_transformers"
+    effective_loader: str = "standard_causal"
 
 
 def _text(value: Any) -> str:
@@ -40,11 +40,20 @@ def _file_set(value: Any) -> Set[str]:
 
 def resolve_effective_loader(row: Mapping[str, Any]) -> str:
     model_type = _text(row.get("model_type"))
+    config_model_type = _text(row.get("config_model_type"))
     architectures = _text(row.get("architectures"))
-    config_text = _text(row.get("config"))
+    config_architectures = _text(row.get("config_architectures"))
     loader_scenario = _text(row.get("loader_scenario"))
+    base_model_relation = _text(row.get("base_model_relation"))
 
-    if model_type.startswith("t5") or "seq2seq" in loader_scenario:
+    if base_model_relation in {"adapter", "lora", "peft"}:
+        return "adapter_requires_base"
+
+    if any(
+        value.startswith("t5")
+        for value in (model_type, config_model_type)
+        if value
+    ) or "seq2seq" in loader_scenario:
         return "seq2seq"
 
     multimodal_markers = (
@@ -56,14 +65,14 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
         "image_text",
     )
     if any(marker in architectures for marker in multimodal_markers) or any(
-        marker in config_text for marker in multimodal_markers
+        marker in config_architectures for marker in multimodal_markers
     ):
         return "multimodal"
 
     if any(marker in loader_scenario for marker in multimodal_markers):
         return "multimodal"
 
-    return "standard_transformers"
+    return "standard_causal"
 
 
 def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
@@ -84,17 +93,22 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
     ):
         return PreflightDecision(
             eligible=False,
-            reason="adapter_config_missing",
-            effective_loader=effective_loader,
+            reason="missing_required_artifact",
+            effective_loader="adapter_requires_base",
         )
 
-    if effective_loader == "standard_transformers" and loader_scenario == "quantized_transformers_native":
+    if loader_scenario == "quantized_transformers_native" or effective_loader == "gptq":
         if not backend_status or backend_status in {"missing", "absent", "none"}:
             return PreflightDecision(
                 eligible=False,
-                reason="gptq_backend_missing",
-                effective_loader=effective_loader,
+                reason="unsupported_backend",
+                effective_loader="gptq",
             )
+        return PreflightDecision(
+            eligible=True,
+            reason="eligible",
+            effective_loader="gptq",
+        )
 
     return PreflightDecision(
         eligible=True,
