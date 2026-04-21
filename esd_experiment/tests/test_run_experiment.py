@@ -276,6 +276,33 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     assert outcomes.failed_models == {"org/model-c"}
 
 
+def test_collect_run_outcomes_prefers_success_over_stale_failure_history(tmp_path: Path):
+    stats_dir = tmp_path / "stats"
+    metrics_dir = tmp_path / "metrics"
+    terminal_dir = tmp_path / "logs" / "terminal_status"
+    logs_dir = tmp_path / "logs"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    terminal_dir.mkdir(parents=True, exist_ok=True)
+
+    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
+    (metrics_dir / "org--model-a.h5").write_text("ok")
+    (logs_dir / "failed_models.txt").write_text(
+        "org/model-a\tload\tunsupported_backend\tstale failure\n"
+        "org/model-b\tload\tunsupported_backend\tfresh failure\n"
+    )
+    (terminal_dir / "org--model-b.json").write_text(
+        "{\"model_id\": \"org/model-b\", \"status\": \"failed\", \"reason\": \"unsupported_backend\"}\n"
+    )
+
+    outcomes = collect_run_outcomes(tmp_path)
+
+    assert outcomes.success_count == 1
+    assert outcomes.failure_count == 1
+    assert outcomes.completed_models == {"org/model-a"}
+    assert outcomes.failed_models == {"org/model-b"}
+
+
 def test_worker_honors_revision_override_when_model_id_contains_revision():
     with _worker_module_context():
         module_path = PROJECT_ROOT / "src" / "worker.py"

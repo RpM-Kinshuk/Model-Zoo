@@ -125,12 +125,13 @@ def _legacy_failed_models(output_dir: Path) -> set[str]:
 
 def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
     completed_models = frozenset(_completed_models_from_artifacts(output_dir))
-    failed_models = frozenset(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
+    failed_models = set(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
+    failed_models -= set(completed_models)
     return RunOutcomes(
         success_count=len(completed_models),
         failure_count=len(failed_models),
         completed_models=completed_models,
-        failed_models=failed_models,
+        failed_models=frozenset(failed_models),
     )
 
 
