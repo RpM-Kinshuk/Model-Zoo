@@ -55,6 +55,22 @@ def _has_file_named(value: Any, filename: str) -> bool:
     return any(_text(str(item).rsplit("/", 1)[-1]) == target for item in candidates)
 
 
+def _has_adapter_artifact(row: Mapping[str, Any]) -> bool:
+    if _text(row.get("adapter_config")):
+        return True
+
+    for source in (
+        row.get("files"),
+        row.get("file_names"),
+        row.get("repo_file_names"),
+        row.get("repo_files"),
+    ):
+        if "adapter_config" in _file_set(source) or _has_file_named(source, "adapter_config.json"):
+            return True
+
+    return False
+
+
 def resolve_effective_loader(row: Mapping[str, Any]) -> str:
     model_type = _text(row.get("model_type"))
     config_model_type = _text(row.get("config_model_type"))
@@ -96,14 +112,9 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
     effective_loader = resolve_effective_loader(row)
     base_model_relation = _text(row.get("base_model_relation"))
     loader_scenario = _text(row.get("loader_scenario"))
-    adapter_config = _text(row.get("adapter_config"))
-    files = _file_set(row.get("files") or row.get("file_names") or row.get("repo_file_names"))
-    repo_files = row.get("repo_files")
     backend_status = _text(row.get("backend_status"))
 
-    if base_model_relation in {"adapter", "lora", "peft"} and not (
-        adapter_config or "adapter_config" in files or _has_file_named(repo_files, "adapter_config.json")
-    ):
+    if base_model_relation in {"adapter", "lora", "peft"} and not _has_adapter_artifact(row):
         return PreflightDecision(
             eligible=False,
             reason="missing_required_artifact",

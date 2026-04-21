@@ -43,7 +43,7 @@ def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
         'model_id': 'org/adapter-model',
         'base_model_relation': 'adapter',
         'adapter_config': '',
-        'repo_files': [
+        'files': [
             'README.md',
             'adapter_model.safetensors',
         ],
@@ -52,6 +52,23 @@ def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
     assert isinstance(decision, PreflightDecision)
     assert decision.eligible is False
     assert decision.reason == 'missing_required_artifact'
+    assert decision.effective_loader == 'adapter_requires_base'
+
+
+def test_classify_row_preflight_accepts_adapter_config_json_from_files_field():
+    decision = classify_row_preflight({
+        'model_id': 'org/adapter-model',
+        'base_model_relation': 'adapter',
+        'adapter_config': '',
+        'files': [
+            'README.md',
+            'nested/adapter_config.json',
+        ],
+    })
+
+    assert isinstance(decision, PreflightDecision)
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
     assert decision.effective_loader == 'adapter_requires_base'
 
 
