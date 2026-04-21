@@ -13,27 +13,147 @@ Usage:
     python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
 import argparse
+import importlib.util
 import itertools
 import json
 import os
 import pandas as pd
 import sys
 from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
+from typing import FrozenSet, Optional, Tuple
 
 # Add shells directory to path for gputracker
 SCRIPT_DIR = Path(__file__).parent
 EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
 from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
+from model_preflight import classify_row_preflight
 
 
 def _normalize_text(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def _available_backends() -> set[str]:
+    backends = set()
+    if importlib.util.find_spec("gptqmodel") is not None:
+        backends.add("gptq")
+    if importlib.util.find_spec("autoawq") is not None:
+        backends.add("awq")
+    if importlib.util.find_spec("llama_cpp") is not None:
+        backends.add("gguf")
+    return backends
+
+
+@dataclass(frozen=True)
+class RunOutcomes:
+    success_count: int
+    failure_count: int
+    completed_models: FrozenSet[str]
+    failed_models: FrozenSet[str]
+
+
+def _completed_models_from_artifacts(output_dir: Path) -> set[str]:
+    completed = set()
+
+    stats_dir = output_dir / "stats"
+    metrics_dir = output_dir / "metrics"
+
+    if stats_dir.exists():
+        for csv_file in stats_dir.glob("*.csv"):
+            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
+            if not metrics_file.exists():
+                continue
+            model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+            completed.add(model_id)
+
+    return completed
+
+
+def _decode_model_id_from_terminal_file(path: Path) -> str:
+    return path.stem.replace("--", "/").replace("__", "@")
+
+
+def _terminal_failed_models(output_dir: Path) -> set[str]:
+    failed_models = set()
+    terminal_dir = output_dir / "logs" / "terminal_status"
+    if not terminal_dir.exists():
+        return failed_models
+
+    success_statuses = {"success", "succeeded", "completed", "done"}
+
+    for status_file in terminal_dir.glob("*.json"):
+        try:
+            payload = json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        records = payload if isinstance(payload, list) else [payload]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            status = _normalize_text(record.get("status") or record.get("state") or record.get("outcome"))
+            if status in success_statuses or not status:
+                continue
+            model_id = _normalize_text(record.get("model_id")) or _decode_model_id_from_terminal_file(status_file)
+            failed_models.add(model_id)
+
+    return failed_models
+
+
+def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
+    completed_models = frozenset(_completed_models_from_artifacts(output_dir))
+    failed_models = frozenset(_terminal_failed_models(output_dir))
+    return RunOutcomes(
+        success_count=len(completed_models),
+        failure_count=len(failed_models),
+        completed_models=completed_models,
+        failed_models=failed_models,
+    )
+
+
+def _row_backend_status(row: pd.Series, available_backends: set[str]) -> str:
+    backend_status = _normalize_text(row.get("backend_status"))
+    if backend_status:
+        return backend_status
+
+    loader_scenario = _normalize_text(row.get("loader_scenario"))
+    if loader_scenario == "quantized_transformers_native":
+        return "available" if available_backends.intersection({"gptq", "awq"}) else "missing"
+    return ""
+
+
+def apply_preflight(model_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if model_df.empty:
+        empty = model_df.iloc[0:0].copy()
+        for column in ("preflight_eligible", "preflight_reason", "preflight_effective_loader"):
+            empty[column] = []
+        return empty, empty.copy()
+
+    available_backends = _available_backends()
+    runnable_rows = []
+    blocked_rows = []
+
+    for _, row in model_df.iterrows():
+        row_dict = row.to_dict()
+        row_dict["backend_status"] = _row_backend_status(row, available_backends)
+        decision = classify_row_preflight(row_dict)
+        annotated_row = dict(row_dict)
+        annotated_row["preflight_eligible"] = decision.eligible
+        annotated_row["preflight_reason"] = decision.reason
+        annotated_row["preflight_effective_loader"] = decision.effective_loader
+        if decision.eligible:
+            runnable_rows.append(annotated_row)
+        else:
+            blocked_rows.append(annotated_row)
+
+    return pd.DataFrame(runnable_rows), pd.DataFrame(blocked_rows)
 
 
 def parse_args():
@@ -326,9 +446,21 @@ def main():
         overwrite=args.overwrite,
         skip_failed=args.skip_failed
     )
+
+    model_df, blocked_df = apply_preflight(model_df)
+    if len(blocked_df) > 0:
+        logger.info(f"Blocked by preflight: {len(blocked_df)} models")
+        logger.info(
+            "Preflight reasons: "
+            + ", ".join(sorted(set(blocked_df["preflight_reason"].astype(str).tolist())))
+        )
     
     if len(model_df) == 0:
-        logger.info("No models to process (all completed or skipped)")
+        logger.info("No models to process (all completed, skipped, or blocked by preflight)")
+        outcomes = collect_run_outcomes(output_dir)
+        logger.info(f"Successfully analyzed: {outcomes.success_count} models")
+        logger.info(f"Failed: {outcomes.failure_count} models")
+        logger.info(f"Results saved to: {output_dir}")
         return
     
     logger.info(f"Will process {len(model_df)} models")
@@ -359,15 +491,9 @@ def main():
     logger.info("=" * 80)
     
     # Print summary
-    completed = get_completed_models(output_dir, skip_failed=False)
-    failed_file = output_dir / "failed_models.txt"
-    num_failed = 0
-    if failed_file.exists():
-        with open(failed_file, "r") as f:
-            num_failed = sum(1 for line in f if line.strip())
-    
-    logger.info(f"Successfully analyzed: {len(completed)} models")
-    logger.info(f"Failed: {num_failed} models")
+    outcomes = collect_run_outcomes(output_dir)
+    logger.info(f"Successfully analyzed: {outcomes.success_count} models")
+    logger.info(f"Failed: {outcomes.failure_count} models")
     logger.info(f"Results saved to: {output_dir}")
 
 

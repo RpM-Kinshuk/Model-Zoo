@@ -23,6 +23,8 @@ SPEC.loader.exec_module(run_experiment)
 generate_commands = run_experiment.generate_commands
 get_completed_models = run_experiment.get_completed_models
 load_model_list = run_experiment.load_model_list
+apply_preflight = run_experiment.apply_preflight
+collect_run_outcomes = run_experiment.collect_run_outcomes
 
 
 @contextmanager
@@ -218,6 +220,59 @@ def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Pat
     completed = get_completed_models(tmp_path, skip_failed=True)
 
     assert completed == set()
+
+
+def test_apply_preflight_separates_runnable_and_blocked_rows():
+    model_df = pd.DataFrame(
+        [
+            {
+                "model_id": "org/text-model",
+                "base_model_relation": "",
+                "loader_scenario": "standard_transformers",
+                "adapter_config": "",
+            },
+            {
+                "model_id": "org/adapter-model",
+                "base_model_relation": "adapter",
+                "loader_scenario": "adapter_requires_base",
+                "adapter_config": "",
+                "files": ["README.md"],
+            },
+        ]
+    )
+
+    runnable_df, blocked_df = apply_preflight(model_df)
+
+    assert list(runnable_df["model_id"]) == ["org/text-model"]
+    assert list(blocked_df["model_id"]) == ["org/adapter-model"]
+    assert blocked_df.iloc[0]["preflight_reason"] == "missing_required_artifact"
+    assert blocked_df.iloc[0]["preflight_effective_loader"] == "adapter_requires_base"
+
+
+def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp_path: Path):
+    stats_dir = tmp_path / "stats"
+    metrics_dir = tmp_path / "metrics"
+    terminal_dir = tmp_path / "logs" / "terminal_status"
+    stats_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    terminal_dir.mkdir(parents=True, exist_ok=True)
+
+    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
+    (metrics_dir / "org--model-a.h5").write_text("ok")
+    (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
+    (terminal_dir / "org--model-b.json").write_text(
+        "{\"model_id\": \"org/model-b\", \"status\": \"success\"}\n"
+    )
+    (terminal_dir / "org--model-c.json").write_text(
+        "{\"model_id\": \"org/model-c\", \"status\": \"failed\", \"reason\": \"unsupported_backend\"}\n"
+    )
+
+    outcomes = collect_run_outcomes(tmp_path)
+
+    assert outcomes.success_count == 1
+    assert outcomes.failure_count == 1
+    assert outcomes.completed_models == {"org/model-a"}
+    assert outcomes.failed_models == {"org/model-c"}
 
 
 def test_worker_honors_revision_override_when_model_id_contains_revision():
