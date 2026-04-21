@@ -56,7 +56,7 @@ def parse_args():
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
-    parser.add_argument("--max_retries", type=int, default=2, help="Max retry attempts")
+    parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
     
     return parser.parse_args()
 
