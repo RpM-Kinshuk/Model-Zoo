@@ -107,9 +107,25 @@ def _terminal_failed_models(output_dir: Path) -> set[str]:
     return failed_models
 
 
+def _legacy_failed_models(output_dir: Path) -> set[str]:
+    failed_models = set()
+    failed_file = output_dir / "logs" / "failed_models.txt"
+    if not failed_file.exists():
+        return failed_models
+
+    for line in failed_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        model_id = line.strip().split("\t", 1)[0].strip()
+        if model_id:
+            failed_models.add(model_id)
+
+    return failed_models
+
+
 def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
     completed_models = frozenset(_completed_models_from_artifacts(output_dir))
-    failed_models = frozenset(_terminal_failed_models(output_dir))
+    failed_models = frozenset(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
     return RunOutcomes(
         success_count=len(completed_models),
         failure_count=len(failed_models),

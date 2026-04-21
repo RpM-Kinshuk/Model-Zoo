@@ -253,6 +253,7 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"
     terminal_dir = tmp_path / "logs" / "terminal_status"
+    logs_dir = tmp_path / "logs"
     stats_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     terminal_dir.mkdir(parents=True, exist_ok=True)
@@ -263,8 +264,8 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     (terminal_dir / "org--model-b.json").write_text(
         "{\"model_id\": \"org/model-b\", \"status\": \"success\"}\n"
     )
-    (terminal_dir / "org--model-c.json").write_text(
-        "{\"model_id\": \"org/model-c\", \"status\": \"failed\", \"reason\": \"unsupported_backend\"}\n"
+    (logs_dir / "failed_models.txt").write_text(
+        "org/model-c\tload\tunsupported_backend\tlegacy failure\n"
     )
 
     outcomes = collect_run_outcomes(tmp_path)
