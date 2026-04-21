@@ -38,6 +38,23 @@ def _file_set(value: Any) -> Set[str]:
     }
 
 
+def _has_file_named(value: Any, filename: str) -> bool:
+    target = _text(filename)
+    if not target:
+        return False
+    if value is None:
+        return False
+    if isinstance(value, str):
+        candidates = [part for part in value.replace(";", ",").split(",")]
+    elif isinstance(value, Mapping):
+        candidates = list(value.values())
+    elif isinstance(value, Iterable):
+        candidates = list(value)
+    else:
+        candidates = [value]
+    return any(_text(str(item).rsplit("/", 1)[-1]) == target for item in candidates)
+
+
 def resolve_effective_loader(row: Mapping[str, Any]) -> str:
     model_type = _text(row.get("model_type"))
     config_model_type = _text(row.get("config_model_type"))
@@ -80,16 +97,12 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
     base_model_relation = _text(row.get("base_model_relation"))
     loader_scenario = _text(row.get("loader_scenario"))
     adapter_config = _text(row.get("adapter_config"))
-    files = _file_set(
-        row.get("files")
-        or row.get("repo_files")
-        or row.get("file_names")
-        or row.get("repo_file_names")
-    )
+    files = _file_set(row.get("files") or row.get("file_names") or row.get("repo_file_names"))
+    repo_files = row.get("repo_files")
     backend_status = _text(row.get("backend_status"))
 
     if base_model_relation in {"adapter", "lora", "peft"} and not (
-        adapter_config or "adapter_config" in files
+        adapter_config or "adapter_config" in files or _has_file_named(repo_files, "adapter_config.json")
     ):
         return PreflightDecision(
             eligible=False,

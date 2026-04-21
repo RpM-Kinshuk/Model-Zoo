@@ -43,6 +43,10 @@ def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
         'model_id': 'org/adapter-model',
         'base_model_relation': 'adapter',
         'adapter_config': '',
+        'repo_files': [
+            'README.md',
+            'adapter_model.safetensors',
+        ],
     })
 
     assert isinstance(decision, PreflightDecision)
