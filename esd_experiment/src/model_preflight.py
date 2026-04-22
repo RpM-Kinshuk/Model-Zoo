@@ -67,7 +67,44 @@ def _has_adapter_artifact(row: Mapping[str, Any]) -> bool:
     ):
         if "adapter_config" in _file_set(source) or _has_file_named(source, "adapter_config.json"):
             return True
+        if source is not None:
+            if isinstance(source, str):
+                candidates = [part for part in source.replace(";", ",").split(",")]
+            elif isinstance(source, Mapping):
+                candidates = list(source.values())
+            elif isinstance(source, Iterable):
+                candidates = list(source)
+            else:
+                candidates = [source]
+            for item in candidates:
+                name = _text(str(item).rsplit("/", 1)[-1])
+                if name.startswith("adapter") and name.endswith(".safetensors"):
+                    return True
 
+    return False
+
+
+def _has_gguf_artifact(row: Mapping[str, Any]) -> bool:
+    for source in (
+        row.get("files"),
+        row.get("file_names"),
+        row.get("repo_file_names"),
+        row.get("repo_files"),
+    ):
+        if source is None:
+            continue
+        if isinstance(source, str):
+            candidates = [part for part in source.replace(";", ",").split(",")]
+        elif isinstance(source, Mapping):
+            candidates = list(source.values())
+        elif isinstance(source, Iterable):
+            candidates = list(source)
+        else:
+            candidates = [source]
+        for item in candidates:
+            name = _text(str(item).rsplit("/", 1)[-1])
+            if name.endswith(".gguf"):
+                return True
     return False
 
 
@@ -93,8 +130,14 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
     if base_model_relation in {"adapter", "lora", "peft"}:
         return "adapter_requires_base"
 
-    if "gguf" in _blob(model_id, loader_scenario, tags):
+    if loader_scenario == "gguf" or _has_gguf_artifact(row):
         return "gguf"
+
+    if loader_scenario == "quantized_transformers_native":
+        if "awq" in tags or "awq" in model_id:
+            return "awq"
+        if "gptq" in tags or "gptq" in model_id:
+            return "gptq"
 
     if (
         "forsequenceclassification" in architectures
@@ -148,9 +191,15 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
         )
 
     if effective_loader == "gguf":
+        if not backend_status or backend_status in {"missing", "absent", "none"}:
+            return PreflightDecision(
+                eligible=False,
+                reason="unsupported_backend",
+                effective_loader="gguf",
+            )
         return PreflightDecision(
-            eligible=False,
-            reason="unsupported_loader_scenario",
+            eligible=True,
+            reason="eligible",
             effective_loader="gguf",
         )
 

@@ -92,8 +92,10 @@ finally:
 
 LoaderFailure = model_loader.LoaderFailure
 classify_loader_scenario_support = model_loader.classify_loader_scenario_support
+hf_from_pretrained = model_loader.hf_from_pretrained
 load_model = model_loader.load_model
 resolve_adapter_effective_loader = model_loader.resolve_adapter_effective_loader
+resolve_effective_loader_for_repo = model_loader.resolve_effective_loader_for_repo
 
 
 def test_classify_loader_scenario_support_rejects_quantized_alt_format():
@@ -104,12 +106,8 @@ def test_classify_loader_scenario_support_rejects_quantized_alt_format():
     assert failure.reason == "unsupported_loader_scenario"
 
 
-def test_classify_loader_scenario_support_rejects_gguf():
-    failure = classify_loader_scenario_support("gguf")
-
-    assert isinstance(failure, LoaderFailure)
-    assert failure.stage == "load"
-    assert failure.reason == "unsupported_loader_scenario"
+def test_classify_loader_scenario_support_accepts_gguf():
+    assert classify_loader_scenario_support("gguf") is None
 
 
 def test_classify_loader_scenario_support_accepts_standard_transformers():
@@ -118,10 +116,28 @@ def test_classify_loader_scenario_support_accepts_standard_transformers():
 
 @pytest.mark.parametrize(
     "scenario",
-    ["quantized_transformers_native", "multimodal_transformers"],
+    ["quantized_transformers_native", "multimodal_transformers", "gguf"],
 )
 def test_classify_loader_scenario_support_accepts_current_policy_allowlist(scenario):
     assert classify_loader_scenario_support(scenario) is None
+
+
+def test_resolve_effective_loader_for_repo_prefers_auto_config_t5_seq2seq():
+    config = Mock(model_type="t5", architectures=["T5ForConditionalGeneration"])
+    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
+        assert resolve_effective_loader_for_repo("org/t5-model", loader_scenario="standard_transformers") == "seq2seq"
+
+
+def test_resolve_effective_loader_for_repo_prefers_auto_config_sequence_classification():
+    config = Mock(model_type="t5", architectures=["T5ForSequenceClassification"])
+    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
+        assert resolve_effective_loader_for_repo("org/t5-cls", loader_scenario="standard_transformers") == "sequence_classification"
+
+
+def test_resolve_effective_loader_for_repo_keeps_explicit_multimodal_hint():
+    config = Mock(model_type="t5", architectures=["T5ForConditionalGeneration"])
+    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
+        assert resolve_effective_loader_for_repo("org/multi", loader_scenario="multimodal_transformers") == "multimodal"
 
 
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
@@ -247,6 +263,87 @@ def test_load_model_raises_structured_failure_for_adapter_gptq_backend(mock_reso
     assert exc.value.reason == "unsupported_backend"
     assert "gptq" in exc.value.message.lower()
     assert mock_resolve_adapter_effective_loader.called
+
+
+@patch("model_loader_under_test.PeftModel.from_pretrained")
+@patch("model_loader_under_test.hf_from_pretrained")
+@patch("model_loader_under_test.is_adapter_model", return_value=True)
+@patch("model_loader_under_test.resolve_base_model", return_value="base/model")
+def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
+    mock_resolve_base_model,
+    mock_is_adapter,
+    mock_from_pretrained,
+    mock_peft_from_pretrained,
+):
+    base_model = Mock()
+    merged_model = Mock()
+    peft_model = Mock()
+    peft_model.merge_and_unload.return_value = merged_model
+    mock_from_pretrained.return_value = base_model
+    mock_peft_from_pretrained.return_value = peft_model
+    with patch(
+        "model_loader_under_test.PeftConfig.from_pretrained",
+        return_value=Mock(task_type="SEQ_2_SEQ_LM", base_model_name_or_path="base/model"),
+    ):
+        model, is_adapter = load_model(
+            "org/adapter",
+            base_model_relation="adapter",
+            loader_scenario="adapter_requires_base",
+        )
+
+    assert model is merged_model
+    assert is_adapter is True
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
+    assert mock_resolve_base_model.called
+    assert mock_is_adapter.called
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+@patch("model_loader_under_test.resolve_gguf_filename", return_value="model.Q4_K_M.gguf", create=True)
+def test_load_model_uses_gguf_file_for_gguf_loader(mock_resolve_gguf_filename, mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/model-gguf",
+        loader_scenario="gguf",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
+    assert mock_from_pretrained.call_args.kwargs["gguf_file"] == "model.Q4_K_M.gguf"
+    assert mock_resolve_gguf_filename.called
+
+
+def test_resolve_gguf_filename_wraps_repo_inspection_failure():
+    with patch(
+        "model_loader_under_test.HfApi.list_repo_files",
+        side_effect=RuntimeError("boom"),
+    ):
+        with pytest.raises(LoaderFailure) as exc:
+            model_loader.resolve_gguf_filename("org/model-gguf")
+
+    assert exc.value.reason == "repo_inaccessible"
+
+
+def test_hf_from_pretrained_retries_without_low_cpu_mem_usage_on_meta_tensor_error():
+    class _FakeAutoModel:
+        calls = []
+
+        @classmethod
+        def from_pretrained(cls, repo_id, **kwargs):
+            cls.calls.append(kwargs.copy())
+            if kwargs.get("low_cpu_mem_usage", False):
+                raise RuntimeError("Cannot copy out of meta tensor; no data!")
+            return "ok"
+
+    result = hf_from_pretrained(_FakeAutoModel, "org/model")
+
+    assert result == "ok"
+    assert len(_FakeAutoModel.calls) == 2
+    assert _FakeAutoModel.calls[0]["low_cpu_mem_usage"] is True
+    assert _FakeAutoModel.calls[1]["low_cpu_mem_usage"] is False
 
 
 @patch("model_loader_under_test.hf_from_pretrained")

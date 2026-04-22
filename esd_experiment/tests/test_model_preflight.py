@@ -62,7 +62,7 @@ def test_resolve_effective_loader_does_not_force_seq2seq_from_text2text_tag_alon
     }) == 'multimodal'
 
 
-def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
+def test_classify_row_preflight_allows_adapter_rows_without_curated_adapter_config():
     decision = classify_row_preflight({
         'model_id': 'org/adapter-model',
         'base_model_relation': 'adapter',
@@ -74,8 +74,8 @@ def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
     })
 
     assert isinstance(decision, PreflightDecision)
-    assert decision.eligible is False
-    assert decision.reason == 'missing_required_artifact'
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
     assert decision.effective_loader == 'adapter_requires_base'
 
 
@@ -108,16 +108,27 @@ def test_classify_row_preflight_marks_gptq_backend_missing():
     assert decision.effective_loader == 'gptq'
 
 
-def test_classify_row_preflight_blocks_gguf_like_quantized_row():
+def test_classify_row_preflight_allows_gguf_row_when_backend_available():
     decision = classify_row_preflight({
         'model_id': 'org/model-GGUF',
-        'loader_scenario': 'quantized_transformers_native',
-        'tags': "['gguf', 'text-generation']",
+        'loader_scenario': 'gguf',
         'backend_status': 'available',
     })
 
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
+    assert decision.effective_loader == 'gguf'
+
+
+def test_classify_row_preflight_blocks_gguf_row_when_backend_missing():
+    decision = classify_row_preflight({
+        'model_id': 'org/model-GGUF',
+        'loader_scenario': 'gguf',
+        'backend_status': 'missing',
+    })
+
     assert decision.eligible is False
-    assert decision.reason == 'unsupported_loader_scenario'
+    assert decision.reason == 'unsupported_backend'
     assert decision.effective_loader == 'gguf'
 
 

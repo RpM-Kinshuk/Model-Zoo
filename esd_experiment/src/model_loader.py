@@ -8,7 +8,7 @@ import torch
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoConfig
 try:
     from transformers import AutoModelForSeq2SeqLM
@@ -57,15 +57,27 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
     token = get_hf_token()
     kwargs.setdefault("trust_remote_code", True)
     kwargs.setdefault("low_cpu_mem_usage", True)
-    
-    if token:
-        try:
-            return AutoModelCls.from_pretrained(repo_id, token=token, **kwargs)
-        except TypeError:
-            # Fallback for older transformers versions
-            return AutoModelCls.from_pretrained(repo_id, use_auth_token=token, **kwargs)
-    else:
-        return AutoModelCls.from_pretrained(repo_id, **kwargs)
+
+    def _call(load_kwargs):
+        if token:
+            try:
+                return AutoModelCls.from_pretrained(repo_id, token=token, **load_kwargs)
+            except TypeError:
+                # Fallback for older transformers versions
+                return AutoModelCls.from_pretrained(repo_id, use_auth_token=token, **load_kwargs)
+        return AutoModelCls.from_pretrained(repo_id, **load_kwargs)
+
+    try:
+        return _call(kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        if kwargs.get("low_cpu_mem_usage") and any(
+            marker in message for marker in ("meta tensor", "meta tensors")
+        ):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["low_cpu_mem_usage"] = False
+            return _call(retry_kwargs)
+        raise
 
 
 def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional[LoaderFailure]:
@@ -77,13 +89,14 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
         "multimodal_transformers",
         "seq2seq",
         "sequence_classification",
+        "gguf",
     }:
         return None
-    if scenario in {"quantized_alt_format", "gguf"}:
+    if scenario in {"quantized_alt_format"}:
         return LoaderFailure(
             "load",
             "unsupported_loader_scenario",
-            "GGUF-style repos are not supported by the current loader",
+            "Quantized alternate-format repos are not supported by the current loader",
         )
     return LoaderFailure(
         "load",
@@ -121,6 +134,7 @@ def resolve_effective_loader_for_repo(
     loader_scenario: Optional[str] = None,
     base_model_relation: Optional[str] = None,
     source_model: Optional[str] = None,
+    revision: Optional[str] = None,
 ) -> str:
     scenario = (loader_scenario or "").strip().lower()
     relation = (base_model_relation or "").strip().lower()
@@ -130,6 +144,8 @@ def resolve_effective_loader_for_repo(
 
     if relation in {"adapter", "lora", "peft"}:
         return resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=scenario)
+    if scenario == "gguf":
+        return "gguf"
     if scenario == "seq2seq" or "seq2seq" in repo_hint:
         return "seq2seq"
     if scenario == "sequence_classification" or "text-classification" in repo_hint:
@@ -139,8 +155,39 @@ def resolve_effective_loader_for_repo(
     if scenario == "quantized_transformers_native":
         if any(marker in repo_hint for marker in ("gptq", "awq")):
             return "gptq" if "gptq" in repo_hint else "awq"
-    if scenario == "gguf":
-        return "gguf"
+        return "standard_causal"
+
+    config = None
+    try:
+        config = AutoConfig.from_pretrained(
+            repo_id,
+            token=get_hf_token(),
+            revision=revision,
+            trust_remote_code=True,
+        )
+    except Exception:
+        config = None
+
+    if config is not None:
+        model_type = str(getattr(config, "model_type", "") or "").strip().lower()
+        architectures = [
+            str(arch).strip().lower()
+            for arch in getattr(config, "architectures", []) or []
+            if str(arch).strip()
+        ]
+        if any("forsequenceclassification" in arch for arch in architectures):
+            return "sequence_classification"
+        if model_type.startswith("t5") or any(
+            marker in arch for arch in architectures for marker in ("conditionalgeneration", "seq2seq")
+        ):
+            return "seq2seq"
+        if any(
+            marker in model_type for marker in ("llava", "vision", "multi_modality", "multimodal")
+        ) or any(
+            marker in arch for arch in architectures for marker in ("image", "vision", "llava")
+        ):
+            return "multimodal"
+
     return "standard_causal"
 
 
@@ -164,6 +211,32 @@ def resolve_adapter_effective_loader(
     if "multimodal" in candidates:
         return "multimodal"
     return "standard_causal"
+
+
+def _resolve_adapter_task_loader(
+    adapter_repo: str,
+    source_model: Optional[str] = None,
+    loader_scenario: Optional[str] = None,
+    revision: Optional[str] = None,
+) -> str:
+    token = get_hf_token()
+    try:
+        cfg = PeftConfig.from_pretrained(adapter_repo, token=token, revision=revision)
+        task_type = str(getattr(cfg, "task_type", "") or "").strip().upper()
+        if task_type == "SEQ_2_SEQ_LM":
+            return "seq2seq"
+        if task_type in {"SEQ_CLS", "SEQUENCE_CLASSIFICATION"}:
+            return "sequence_classification"
+        base_name = getattr(cfg, "base_model_name_or_path", None)
+        if base_name:
+            return resolve_effective_loader_for_repo(
+                str(base_name),
+                loader_scenario=loader_scenario,
+                revision=revision,
+            )
+    except Exception:
+        pass
+    return resolve_adapter_effective_loader(source_model or adapter_repo, loader_scenario=loader_scenario)
 
 
 def _select_auto_model_cls(effective_loader: str):
@@ -192,6 +265,34 @@ def _select_auto_model_cls(effective_loader: str):
             )
         return AutoModelForImageTextToText
     return AutoModelForCausalLM
+
+
+def resolve_gguf_filename(repo_id: str, revision: Optional[str] = None) -> str:
+    api = HfApi()
+    try:
+        files = api.list_repo_files(
+            repo_id=repo_id,
+            repo_type="model",
+            revision=revision,
+            token=get_hf_token(),
+        )
+    except Exception as exc:
+        raise LoaderFailure(
+            "load",
+            "repo_inaccessible",
+            f"Could not inspect GGUF repo files for {repo_id}: {exc}",
+        ) from exc
+    candidates = sorted(
+        path for path in files if str(path).strip().lower().endswith(".gguf")
+    )
+    if not candidates:
+        raise LoaderFailure(
+            "load",
+            "missing_required_artifact",
+            f"GGUF repo {repo_id} does not expose a .gguf file",
+        )
+    root_level = [path for path in candidates if "/" not in str(path).strip("/")]
+    return (root_level or candidates)[0]
 
 
 def _fallback_loader_from_error(current_loader: str, error: Exception) -> Optional[str]:
@@ -316,9 +417,16 @@ def load_and_merge_adapter(
         except RuntimeError as exc:
             raise LoaderFailure("load", "adapter_base_unresolved", str(exc)) from exc
     
+    effective_loader = _resolve_adapter_task_loader(
+        adapter_repo,
+        source_model=base_repo,
+        revision=revision,
+    )
+    auto_model_cls = _select_auto_model_cls(effective_loader)
+
     print(f"Loading base model: {base_repo}")
     base = hf_from_pretrained(
-        AutoModelForCausalLM,
+        auto_model_cls,
         base_repo,
         device_map=device_map,
         torch_dtype=torch_dtype,
@@ -372,7 +480,12 @@ def load_model(
 
     # Check if this is an adapter
     if is_adapter_model(repo_id, base_model_relation):
-        effective_loader = resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=loader_scenario)
+        effective_loader = _resolve_adapter_task_loader(
+            repo_id,
+            source_model=source_model,
+            loader_scenario=loader_scenario,
+            revision=revision,
+        )
         if effective_loader in {"gptq", "awq", "gguf"}:
             raise LoaderFailure(
                 "load",
@@ -395,15 +508,23 @@ def load_model(
             loader_scenario=loader_scenario,
             base_model_relation=base_model_relation,
             source_model=source_model,
+            revision=revision,
         )
         auto_model_cls = _select_auto_model_cls(effective_loader)
+        load_kwargs: dict[str, Any] = {
+            "device_map": device_map,
+            "torch_dtype": torch_dtype,
+            "revision": revision,
+        }
+        if effective_loader == "gguf":
+            load_kwargs["gguf_file"] = resolve_gguf_filename(repo_id, revision=revision)
+            load_kwargs["dtype"] = torch_dtype
+            load_kwargs.pop("torch_dtype", None)
         try:
             model = hf_from_pretrained(
                 auto_model_cls,
                 repo_id,
-                device_map=device_map,
-                torch_dtype=torch_dtype,
-                revision=revision,
+                **load_kwargs,
             )
         except Exception as exc:
             fallback_loader = _fallback_loader_from_error(effective_loader, exc)

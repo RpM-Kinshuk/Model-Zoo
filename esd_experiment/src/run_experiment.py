@@ -46,7 +46,7 @@ def _available_backends() -> set[str]:
         backends.add("gptq")
     if importlib.util.find_spec("autoawq") is not None:
         backends.add("awq")
-    if importlib.util.find_spec("llama_cpp") is not None:
+    if importlib.util.find_spec("gguf") is not None:
         backends.add("gguf")
     return backends
 
@@ -141,7 +141,28 @@ def _row_backend_status(row: pd.Series, available_backends: set[str]) -> str:
         return backend_status
 
     loader_scenario = _normalize_text(row.get("loader_scenario"))
+    tags_blob = " ".join(
+        _normalize_text(value)
+        for value in (row.get("tags"), row.get("Type"), row.get("model_id"))
+        if _normalize_text(value)
+    ).lower()
+    file_blob = " ".join(
+        _normalize_text(value)
+        for value in (
+            row.get("files"),
+            row.get("file_names"),
+            row.get("repo_file_names"),
+            row.get("repo_files"),
+        )
+        if _normalize_text(value)
+    ).lower()
+    if loader_scenario == "gguf" or ".gguf" in file_blob:
+        return "available" if "gguf" in available_backends else "missing"
     if loader_scenario == "quantized_transformers_native":
+        if "awq" in tags_blob:
+            return "available" if "awq" in available_backends else "missing"
+        if "gptq" in tags_blob:
+            return "available" if "gptq" in available_backends else "missing"
         return "available" if available_backends.intersection({"gptq", "awq"}) else "missing"
     return ""
 
