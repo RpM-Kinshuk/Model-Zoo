@@ -38,6 +38,30 @@ def test_resolve_effective_loader_prefers_multimodal_for_image_text_configs():
     }) == 'multimodal'
 
 
+def test_resolve_effective_loader_prefers_sequence_classification_for_classifier_architecture():
+    assert resolve_effective_loader({
+        'loader_scenario': 'standard_transformers',
+        'pipeline_tag': 'text-classification',
+        'Architecture': 'T5ForSequenceClassification',
+    }) == 'sequence_classification'
+
+
+def test_resolve_effective_loader_prefers_seq2seq_for_conditional_generation_architecture():
+    assert resolve_effective_loader({
+        'loader_scenario': 'multimodal_transformers',
+        'Architecture': 'T5ForConditionalGeneration',
+    }) == 'seq2seq'
+
+
+def test_resolve_effective_loader_does_not_force_seq2seq_from_text2text_tag_alone():
+    assert resolve_effective_loader({
+        'loader_scenario': 'multimodal_transformers',
+        'pipeline_tag': 'image-text-to-text',
+        'tags': "['qwen2', 'text2text-generation', 'multimodal']",
+        'Architecture': '',
+    }) == 'multimodal'
+
+
 def test_classify_row_preflight_marks_missing_adapter_config_ineligible():
     decision = classify_row_preflight({
         'model_id': 'org/adapter-model',
@@ -82,6 +106,31 @@ def test_classify_row_preflight_marks_gptq_backend_missing():
     assert decision.eligible is False
     assert decision.reason == 'unsupported_backend'
     assert decision.effective_loader == 'gptq'
+
+
+def test_classify_row_preflight_blocks_gguf_like_quantized_row():
+    decision = classify_row_preflight({
+        'model_id': 'org/model-GGUF',
+        'loader_scenario': 'quantized_transformers_native',
+        'tags': "['gguf', 'text-generation']",
+        'backend_status': 'available',
+    })
+
+    assert decision.eligible is False
+    assert decision.reason == 'unsupported_loader_scenario'
+    assert decision.effective_loader == 'gguf'
+
+
+def test_classify_row_preflight_blocks_repo_marked_unavailable():
+    decision = classify_row_preflight({
+        'model_id': 'org/missing-model',
+        'loader_scenario': 'standard_transformers',
+        'Available on the hub': False,
+    })
+
+    assert decision.eligible is False
+    assert decision.reason == 'repo_inaccessible'
+    assert decision.effective_loader == 'standard_causal'
 
 
 def test_classify_row_preflight_allows_standard_transformers_text_model():

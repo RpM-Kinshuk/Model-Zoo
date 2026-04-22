@@ -36,6 +36,11 @@ fake_transformers.AutoModelForSeq2SeqLM = type(
     (),
     {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
 )
+fake_transformers.AutoModelForSequenceClassification = type(
+    "AutoModelForSequenceClassification",
+    (),
+    {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
+)
 fake_transformers.AutoModelForImageTextToText = type(
     "AutoModelForImageTextToText",
     (),
@@ -181,6 +186,21 @@ def test_load_model_uses_seq2seq_auto_class(mock_from_pretrained):
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
 
 
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_uses_sequence_classification_auto_class(mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/classifier-model",
+        loader_scenario="sequence_classification",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSequenceClassification
+
+
 @patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."))
 def test_load_model_raises_structured_failure_for_missing_quantized_dependency(mock_from_pretrained):
     with pytest.raises(LoaderFailure) as exc:
@@ -227,6 +247,54 @@ def test_load_model_raises_structured_failure_for_adapter_gptq_backend(mock_reso
     assert exc.value.reason == "unsupported_backend"
     assert "gptq" in exc.value.message.lower()
     assert mock_resolve_adapter_effective_loader.called
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_retries_seq2seq_after_multimodal_t5_misroute(mock_from_pretrained):
+    mock_model = Mock()
+
+    def _side_effect(auto_model_cls, *args, **kwargs):
+        if auto_model_cls is model_loader.AutoModelForImageTextToText:
+            raise RuntimeError(
+                "Unrecognized configuration class <class 'transformers.models.t5.configuration_t5.T5Config'> "
+                "for this kind of AutoModel: AutoModelForImageTextToText."
+            )
+        return mock_model
+
+    mock_from_pretrained.side_effect = _side_effect
+
+    model, is_adapter = load_model(
+        "org/misrouted-t5-model",
+        loader_scenario="multimodal_transformers",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_retries_causal_after_multimodal_qwen2_misroute(mock_from_pretrained):
+    mock_model = Mock()
+
+    def _side_effect(auto_model_cls, *args, **kwargs):
+        if auto_model_cls is model_loader.AutoModelForImageTextToText:
+            raise RuntimeError(
+                "Unrecognized configuration class <class 'transformers.models.qwen2.configuration_qwen2.Qwen2Config'> "
+                "for this kind of AutoModel: AutoModelForImageTextToText."
+            )
+        return mock_model
+
+    mock_from_pretrained.side_effect = _side_effect
+
+    model, is_adapter = load_model(
+        "org/misrouted-qwen2-model",
+        loader_scenario="multimodal_transformers",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
 
 
 @patch("model_loader_under_test.PeftModel.from_pretrained")

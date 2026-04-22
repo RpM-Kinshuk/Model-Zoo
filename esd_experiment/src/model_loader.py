@@ -15,6 +15,10 @@ try:
 except ImportError:  # pragma: no cover - depends on transformers version
     AutoModelForSeq2SeqLM = None
 try:
+    from transformers import AutoModelForSequenceClassification
+except ImportError:  # pragma: no cover - depends on transformers version
+    AutoModelForSequenceClassification = None
+try:
     from transformers import AutoModelForImageTextToText
 except ImportError:  # pragma: no cover - depends on transformers version
     AutoModelForImageTextToText = None
@@ -72,6 +76,7 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
         "quantized_transformers_native",
         "multimodal_transformers",
         "seq2seq",
+        "sequence_classification",
     }:
         return None
     if scenario in {"quantized_alt_format", "gguf"}:
@@ -127,6 +132,8 @@ def resolve_effective_loader_for_repo(
         return resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=scenario)
     if scenario == "seq2seq" or "seq2seq" in repo_hint:
         return "seq2seq"
+    if scenario == "sequence_classification" or "text-classification" in repo_hint:
+        return "sequence_classification"
     if scenario == "multimodal_transformers":
         return "multimodal"
     if scenario == "quantized_transformers_native":
@@ -152,9 +159,51 @@ def resolve_adapter_effective_loader(
         return "gguf"
     if "seq2seq" in candidates:
         return "seq2seq"
+    if "sequence_classification" in candidates:
+        return "sequence_classification"
     if "multimodal" in candidates:
         return "multimodal"
     return "standard_causal"
+
+
+def _select_auto_model_cls(effective_loader: str):
+    if effective_loader == "seq2seq":
+        if AutoModelForSeq2SeqLM is None:
+            raise LoaderFailure(
+                "load",
+                "unsupported_loader_scenario",
+                "Seq2seq loading requires transformers with AutoModelForSeq2SeqLM support",
+            )
+        return AutoModelForSeq2SeqLM
+    if effective_loader == "sequence_classification":
+        if AutoModelForSequenceClassification is None:
+            raise LoaderFailure(
+                "load",
+                "unsupported_loader_scenario",
+                "Sequence-classification loading requires transformers with AutoModelForSequenceClassification support",
+            )
+        return AutoModelForSequenceClassification
+    if effective_loader == "multimodal":
+        if AutoModelForImageTextToText is None:
+            raise LoaderFailure(
+                "load",
+                "unsupported_loader_scenario",
+                "Multimodal loading requires transformers with AutoModelForImageTextToText support",
+            )
+        return AutoModelForImageTextToText
+    return AutoModelForCausalLM
+
+
+def _fallback_loader_from_error(current_loader: str, error: Exception) -> Optional[str]:
+    message = str(error).lower()
+    if "unrecognized configuration class" not in message:
+        return None
+    if current_loader == "multimodal":
+        if "t5config" in message:
+            return "seq2seq"
+        if any(marker in message for marker in ("qwen2config", "llamaconfig", "gemmaconfig", "phiconfig", "mistralconfig")):
+            return "standard_causal"
+    return None
 
 
 def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
@@ -347,23 +396,7 @@ def load_model(
             base_model_relation=base_model_relation,
             source_model=source_model,
         )
-        auto_model_cls = AutoModelForCausalLM
-        if effective_loader == "seq2seq":
-            if AutoModelForSeq2SeqLM is None:
-                raise LoaderFailure(
-                    "load",
-                    "unsupported_loader_scenario",
-                    "Seq2seq loading requires transformers with AutoModelForSeq2SeqLM support",
-                )
-            auto_model_cls = AutoModelForSeq2SeqLM
-        elif effective_loader == "multimodal":
-            if AutoModelForImageTextToText is None:
-                raise LoaderFailure(
-                    "load",
-                    "unsupported_loader_scenario",
-                    "Multimodal loading requires transformers with AutoModelForImageTextToText support",
-                )
-            auto_model_cls = AutoModelForImageTextToText
+        auto_model_cls = _select_auto_model_cls(effective_loader)
         try:
             model = hf_from_pretrained(
                 auto_model_cls,
@@ -373,11 +406,21 @@ def load_model(
                 revision=revision,
             )
         except Exception as exc:
-            if (loader_scenario or "").strip().lower() == "quantized_transformers_native":
-                dependency_failure = classify_quantized_dependency_failure(exc)
-                if dependency_failure is not None:
-                    raise dependency_failure from exc
-            raise
+            fallback_loader = _fallback_loader_from_error(effective_loader, exc)
+            if fallback_loader is not None and fallback_loader != effective_loader:
+                model = hf_from_pretrained(
+                    _select_auto_model_cls(fallback_loader),
+                    repo_id,
+                    device_map=device_map,
+                    torch_dtype=torch_dtype,
+                    revision=revision,
+                )
+            else:
+                if (loader_scenario or "").strip().lower() == "quantized_transformers_native":
+                    dependency_failure = classify_quantized_dependency_failure(exc)
+                    if dependency_failure is not None:
+                        raise dependency_failure from exc
+                raise
         model.eval()
         return model, False
 

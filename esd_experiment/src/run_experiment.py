@@ -302,7 +302,9 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         base_relation = _normalize_text(row["base_model_relation"])
         source_model = _normalize_text(row["source_model"])
         revision_norm = _normalize_text(row.get("revision_norm", ""))
-        loader_scenario = _normalize_text(row.get("loader_scenario", ""))
+        loader_scenario = _normalize_text(
+            row.get("preflight_effective_loader", "") or row.get("loader_scenario", "")
+        )
         primary_type_bucket = _normalize_text(row.get("primary_type_bucket", ""))
         
         # Build command

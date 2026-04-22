@@ -71,22 +71,42 @@ def _has_adapter_artifact(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def _blob(*values: Any) -> str:
+    return " ".join(_text(value) for value in values if _text(value))
+
+
 def resolve_effective_loader(row: Mapping[str, Any]) -> str:
     model_type = _text(row.get("model_type"))
     config_model_type = _text(row.get("config_model_type"))
-    architectures = _text(row.get("architectures"))
-    config_architectures = _text(row.get("config_architectures"))
+    architectures = _blob(
+        row.get("architectures"),
+        row.get("config_architectures"),
+        row.get("Architecture"),
+        row.get("Architecture_lb"),
+    )
+    pipeline_tag = _blob(row.get("pipeline_tag"), row.get("pipeline_tag_lb"))
+    tags = _blob(row.get("tags"), row.get("tags_lb"), row.get("Type"), row.get("Type_lb"))
     loader_scenario = _text(row.get("loader_scenario"))
     base_model_relation = _text(row.get("base_model_relation"))
+    model_id = _text(row.get("model_id"))
 
     if base_model_relation in {"adapter", "lora", "peft"}:
         return "adapter_requires_base"
+
+    if "gguf" in _blob(model_id, loader_scenario, tags):
+        return "gguf"
+
+    if (
+        "forsequenceclassification" in architectures
+        or pipeline_tag == "text-classification"
+    ):
+        return "sequence_classification"
 
     if any(
         value.startswith("t5")
         for value in (model_type, config_model_type)
         if value
-    ) or "seq2seq" in loader_scenario:
+    ) or "t5forconditionalgeneration" in architectures or "seq2seq" in loader_scenario or "text2text-generation" in pipeline_tag:
         return "seq2seq"
 
     multimodal_markers = (
@@ -97,9 +117,7 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
         "visiontext",
         "image_text",
     )
-    if any(marker in architectures for marker in multimodal_markers) or any(
-        marker in config_architectures for marker in multimodal_markers
-    ):
+    if any(marker in architectures for marker in multimodal_markers):
         return "multimodal"
 
     if any(marker in loader_scenario for marker in multimodal_markers):
@@ -113,6 +131,14 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
     base_model_relation = _text(row.get("base_model_relation"))
     loader_scenario = _text(row.get("loader_scenario"))
     backend_status = _text(row.get("backend_status"))
+    available_on_hub = _text(row.get("Available on the hub"))
+
+    if available_on_hub in {"false", "0", "no"}:
+        return PreflightDecision(
+            eligible=False,
+            reason="repo_inaccessible",
+            effective_loader=effective_loader,
+        )
 
     if base_model_relation in {"adapter", "lora", "peft"} and not _has_adapter_artifact(row):
         return PreflightDecision(
@@ -121,17 +147,24 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader="adapter_requires_base",
         )
 
-    if loader_scenario == "quantized_transformers_native" or effective_loader == "gptq":
+    if effective_loader == "gguf":
+        return PreflightDecision(
+            eligible=False,
+            reason="unsupported_loader_scenario",
+            effective_loader="gguf",
+        )
+
+    if loader_scenario == "quantized_transformers_native" or effective_loader in {"gptq", "awq"}:
         if not backend_status or backend_status in {"missing", "absent", "none"}:
             return PreflightDecision(
                 eligible=False,
                 reason="unsupported_backend",
-                effective_loader="gptq",
+                effective_loader=effective_loader if effective_loader in {"gptq", "awq"} else "gptq",
             )
         return PreflightDecision(
             eligible=True,
             reason="eligible",
-            effective_loader="gptq",
+            effective_loader=effective_loader if effective_loader in {"gptq", "awq"} else "gptq",
         )
 
     return PreflightDecision(

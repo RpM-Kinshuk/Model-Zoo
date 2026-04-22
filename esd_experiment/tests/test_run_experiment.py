@@ -188,6 +188,36 @@ def test_generate_commands_passes_curated_loader_fields(tmp_path: Path):
     assert "--primary_type_bucket 'adapter'" in commands[0]
 
 
+def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_path: Path):
+    df = pd.DataFrame(
+        [
+            {
+                "model_id": "org/model-a",
+                "revision_norm": "",
+                "source_model": "",
+                "base_model_relation": "",
+                "loader_scenario": "multimodal_transformers",
+                "preflight_effective_loader": "seq2seq",
+                "primary_type_bucket": "multimodal",
+            }
+        ]
+    )
+    args = SimpleNamespace(
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        use_svd=False,
+        parallel_esd=True,
+        overwrite=False,
+    )
+
+    commands = generate_commands(df, tmp_path, args)
+
+    assert "--loader_scenario 'seq2seq'" in commands[0]
+    assert "--loader_scenario 'multimodal_transformers'" not in commands[0]
+
+
 def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"
