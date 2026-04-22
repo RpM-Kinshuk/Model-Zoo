@@ -84,9 +84,13 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
     scenario = (loader_scenario or "").strip().lower()
     if not scenario or scenario in {
         "standard_transformers",
+        "standard_causal",
         "adapter_requires_base",
         "quantized_transformers_native",
+        "gptq",
+        "awq",
         "multimodal_transformers",
+        "multimodal",
         "seq2seq",
         "sequence_classification",
         "gguf",
@@ -155,6 +159,8 @@ def resolve_effective_loader_for_repo(
 
     if relation in {"adapter", "lora", "peft"}:
         return resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=scenario)
+    if scenario in {"standard_causal", "gptq", "awq", "multimodal", "seq2seq", "sequence_classification"}:
+        return scenario
     if scenario == "gguf":
         return "gguf"
     if scenario == "seq2seq" or "seq2seq" in repo_hint:
@@ -242,10 +248,12 @@ def _resolve_adapter_task_loader(
             return "sequence_classification"
         base_name = getattr(cfg, "base_model_name_or_path", None)
         if base_name:
+            _, embedded_revision = parse_model_string(str(base_name))
+            base_revision = _normalize_optional_revision(getattr(cfg, "revision", None)) or embedded_revision
             return resolve_effective_loader_for_repo(
-                str(base_name),
+                str(base_name).split("@", 1)[0],
                 loader_scenario=loader_scenario,
-                revision=revision,
+                revision=base_revision,
             )
     except Exception:
         pass
@@ -333,6 +341,13 @@ def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
         return False
 
 
+def _normalize_optional_revision(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def is_adapter_model(repo_id: str, base_model_relation: Optional[str] = None) -> bool:
     """
     Determine if a model is a PEFT adapter.
@@ -365,7 +380,11 @@ def is_adapter_model(repo_id: str, base_model_relation: Optional[str] = None) ->
     return False
 
 
-def resolve_base_model(adapter_repo: str, source_model: Optional[str] = None) -> str:
+def resolve_base_model_reference(
+    adapter_repo: str,
+    source_model: Optional[str] = None,
+    adapter_revision: Optional[str] = None,
+) -> Tuple[str, Optional[str]]:
     """
     Resolve base model for an adapter.
     
@@ -374,27 +393,34 @@ def resolve_base_model(adapter_repo: str, source_model: Optional[str] = None) ->
         source_model: Optional explicitly specified base model
     
     Returns:
-        Base model repository ID
+        Tuple of (base model repository ID, base revision)
     """
     # Use explicit source_model if provided
     if source_model and isinstance(source_model, str) and source_model.strip():
-        return source_model.strip()
+        return parse_model_string(source_model.strip())
     
     # Try to infer from PeftConfig
     token = get_hf_token()
     try:
-        cfg = PeftConfig.from_pretrained(adapter_repo, token=token)
+        cfg = PeftConfig.from_pretrained(adapter_repo, token=token, revision=adapter_revision)
         if hasattr(cfg, "base_model_name_or_path") and cfg.base_model_name_or_path:
-            return cfg.base_model_name_or_path
+            base_repo, embedded_revision = parse_model_string(str(cfg.base_model_name_or_path))
+            base_revision = _normalize_optional_revision(getattr(cfg, "revision", None))
+            return base_repo, base_revision or embedded_revision
     except Exception as e:
         warnings.warn(f"Could not load PeftConfig for {adapter_repo}: {e}")
     
     # Try to infer from AutoConfig
     try:
-        cfg = AutoConfig.from_pretrained(adapter_repo, token=token, trust_remote_code=True)
+        cfg = AutoConfig.from_pretrained(
+            adapter_repo,
+            token=token,
+            revision=adapter_revision,
+            trust_remote_code=True,
+        )
         for key in ["base_model_name_or_path", "base_model", "model_name", "parent_model_name_or_path"]:
             if hasattr(cfg, key) and getattr(cfg, key):
-                return getattr(cfg, key)
+                return parse_model_string(str(getattr(cfg, key)))
     except Exception as e:
         warnings.warn(f"Could not load AutoConfig for {adapter_repo}: {e}")
     
@@ -402,6 +428,11 @@ def resolve_base_model(adapter_repo: str, source_model: Optional[str] = None) ->
         f"Could not resolve base model for adapter {adapter_repo}. "
         f"Please provide source_model explicitly in the model list."
     )
+
+
+def resolve_base_model(adapter_repo: str, source_model: Optional[str] = None) -> str:
+    base_repo, _ = resolve_base_model_reference(adapter_repo, source_model=source_model)
+    return base_repo
 
 
 def load_and_merge_adapter(
@@ -424,11 +455,18 @@ def load_and_merge_adapter(
         Merged model with adapter weights incorporated
     """
     # Resolve base model
+    base_revision = revision
     if base_repo is None:
         try:
-            base_repo = resolve_base_model(adapter_repo)
+            base_repo, base_revision = resolve_base_model_reference(
+                adapter_repo,
+                adapter_revision=revision,
+            )
         except RuntimeError as exc:
             raise LoaderFailure("load", "adapter_base_unresolved", str(exc)) from exc
+    else:
+        base_repo, parsed_revision = parse_model_string(base_repo)
+        base_revision = parsed_revision or revision
     
     effective_loader = _resolve_adapter_task_loader(
         adapter_repo,
@@ -443,7 +481,7 @@ def load_and_merge_adapter(
         base_repo,
         device_map=device_map,
         torch_dtype=torch_dtype,
-        revision=revision,
+        revision=base_revision,
     )
     base.eval()
     
@@ -550,7 +588,10 @@ def load_model(
                     revision=revision,
                 )
             else:
-                if (loader_scenario or "").strip().lower() == "quantized_transformers_native":
+                if (
+                    (loader_scenario or "").strip().lower() == "quantized_transformers_native"
+                    or effective_loader in {"gptq", "awq"}
+                ):
                     dependency_failure = classify_quantized_dependency_failure(exc)
                     if dependency_failure is not None:
                         raise dependency_failure from exc

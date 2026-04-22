@@ -135,15 +135,26 @@ def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
     )
 
 
-def _row_backend_status(row: pd.Series, available_backends: set[str]) -> str:
+def _row_backend_status(
+    row: pd.Series,
+    available_backends: set[str],
+    effective_loader: str = "",
+) -> str:
     backend_status = _normalize_text(row.get("backend_status"))
     if backend_status:
         return backend_status
 
     loader_scenario = _normalize_text(row.get("loader_scenario"))
+    resolved_loader = _normalize_text(effective_loader)
     tags_blob = " ".join(
         _normalize_text(value)
-        for value in (row.get("tags"), row.get("Type"), row.get("model_id"))
+        for value in (
+            row.get("tags"),
+            row.get("tags_lb"),
+            row.get("Type"),
+            row.get("Type_lb"),
+            row.get("model_id"),
+        )
         if _normalize_text(value)
     ).lower()
     file_blob = " ".join(
@@ -156,8 +167,10 @@ def _row_backend_status(row: pd.Series, available_backends: set[str]) -> str:
         )
         if _normalize_text(value)
     ).lower()
-    if loader_scenario == "gguf" or ".gguf" in file_blob:
+    if resolved_loader == "gguf" or loader_scenario == "gguf" or ".gguf" in file_blob:
         return "available" if "gguf" in available_backends else "missing"
+    if resolved_loader in {"awq", "gptq"}:
+        return "available" if resolved_loader in available_backends else "missing"
     if loader_scenario == "quantized_transformers_native":
         if "awq" in tags_blob:
             return "available" if "awq" in available_backends else "missing"
@@ -180,7 +193,12 @@ def apply_preflight(model_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
 
     for _, row in model_df.iterrows():
         row_dict = row.to_dict()
-        row_dict["backend_status"] = _row_backend_status(row, available_backends)
+        initial_decision = classify_row_preflight(row_dict)
+        row_dict["backend_status"] = _row_backend_status(
+            row,
+            available_backends,
+            effective_loader=initial_decision.effective_loader,
+        )
         decision = classify_row_preflight(row_dict)
         annotated_row = dict(row_dict)
         annotated_row["preflight_eligible"] = decision.eligible

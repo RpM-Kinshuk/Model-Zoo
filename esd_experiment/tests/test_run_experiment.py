@@ -298,6 +298,27 @@ def test_apply_preflight_does_not_block_generic_quantized_native_rows_without_ba
     assert runnable_df.iloc[0]["preflight_effective_loader"] == "standard_causal"
 
 
+def test_apply_preflight_uses_loader_resolution_metadata_for_backend_status():
+    model_df = pd.DataFrame(
+        [
+            {
+                "model_id": "org/quantized-model",
+                "base_model_relation": "",
+                "loader_scenario": "quantized_transformers_native",
+                "tags": "",
+                "tags_lb": "awq",
+            },
+        ]
+    )
+
+    runnable_df, blocked_df = apply_preflight(model_df)
+
+    assert runnable_df.empty
+    assert list(blocked_df["model_id"]) == ["org/quantized-model"]
+    assert blocked_df.iloc[0]["preflight_reason"] == "unsupported_backend"
+    assert blocked_df.iloc[0]["preflight_effective_loader"] == "awq"
+
+
 def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"

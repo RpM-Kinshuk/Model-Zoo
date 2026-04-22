@@ -96,6 +96,34 @@ def test_classify_row_preflight_accepts_adapter_config_json_from_files_field():
     assert decision.effective_loader == 'adapter_requires_base'
 
 
+def test_classify_row_preflight_accepts_adapter_bin_artifact():
+    decision = classify_row_preflight({
+        'model_id': 'org/adapter-model',
+        'base_model_relation': 'adapter',
+        'adapter_config': '',
+        'files': [
+            'README.md',
+            'adapter_model.bin',
+        ],
+    })
+
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
+    assert decision.effective_loader == 'adapter_requires_base'
+
+
+def test_classify_row_preflight_keeps_ambiguous_adapter_rows_eligible_without_file_metadata():
+    decision = classify_row_preflight({
+        'model_id': 'org/adapter-model',
+        'base_model_relation': 'adapter',
+        'adapter_config': '',
+    })
+
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
+    assert decision.effective_loader == 'adapter_requires_base'
+
+
 def test_classify_row_preflight_marks_gptq_backend_missing():
     decision = classify_row_preflight({
         'model_id': 'org/quantized-model',

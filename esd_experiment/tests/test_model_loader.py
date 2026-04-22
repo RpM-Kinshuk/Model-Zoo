@@ -116,7 +116,7 @@ def test_classify_loader_scenario_support_accepts_standard_transformers():
 
 @pytest.mark.parametrize(
     "scenario",
-    ["quantized_transformers_native", "multimodal_transformers", "gguf"],
+    ["quantized_transformers_native", "multimodal_transformers", "gguf", "standard_causal", "multimodal", "gptq", "awq"],
 )
 def test_classify_loader_scenario_support_accepts_current_policy_allowlist(scenario):
     assert classify_loader_scenario_support(scenario) is None
@@ -149,7 +149,10 @@ def test_resolve_effective_loader_for_repo_keeps_explicit_multimodal_hint():
 
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 def test_load_model_raises_structured_failure_for_unresolved_adapter(mock_is_adapter):
-    with patch("model_loader_under_test.resolve_base_model", side_effect=RuntimeError("missing base")):
+    with patch(
+        "model_loader_under_test.resolve_base_model_reference",
+        side_effect=RuntimeError("missing base"),
+    ):
         with pytest.raises(LoaderFailure) as exc:
             load_model(
                 "org/adapter",
@@ -187,6 +190,36 @@ def test_load_model_uses_multimodal_auto_class(mock_from_pretrained):
     model, is_adapter = load_model(
         "org/multimodal-model",
         loader_scenario="multimodal_transformers",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForImageTextToText
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_accepts_standard_causal_alias(mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/standard-model",
+        loader_scenario="standard_causal",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
+
+
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_accepts_multimodal_alias(mock_from_pretrained):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+
+    model, is_adapter = load_model(
+        "org/multimodal-model",
+        loader_scenario="multimodal",
     )
 
     assert model is mock_model
@@ -272,12 +305,28 @@ def test_load_model_raises_structured_failure_for_adapter_gptq_backend(mock_reso
     assert mock_resolve_adapter_effective_loader.called
 
 
+@patch(
+    "model_loader_under_test.hf_from_pretrained",
+    side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."),
+)
+def test_load_model_classifies_quantized_dependency_failure_for_awq_alias(mock_from_pretrained):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/awq-model",
+            loader_scenario="awq",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_dependency_missing"
+    assert mock_from_pretrained.called
+
+
 @patch("model_loader_under_test.PeftModel.from_pretrained")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
-@patch("model_loader_under_test.resolve_base_model", return_value="base/model")
+@patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/model", None))
 def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
-    mock_resolve_base_model,
+    mock_resolve_base_model_reference,
     mock_is_adapter,
     mock_from_pretrained,
     mock_peft_from_pretrained,
@@ -301,7 +350,7 @@ def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
     assert model is merged_model
     assert is_adapter is True
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
-    assert mock_resolve_base_model.called
+    assert mock_resolve_base_model_reference.called
     assert mock_is_adapter.called
 
 
@@ -404,9 +453,9 @@ def test_load_model_retries_causal_after_multimodal_qwen2_misroute(mock_from_pre
 @patch("model_loader_under_test.PeftModel.from_pretrained")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
-@patch("model_loader_under_test.resolve_base_model", return_value="base/model")
-def test_load_model_forwards_revision_to_adapter_and_base_loads(
-    mock_resolve_base_model,
+@patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/model", "base-rev"))
+def test_load_model_uses_base_revision_from_adapter_metadata(
+    mock_resolve_base_model_reference,
     mock_is_adapter,
     mock_from_pretrained,
     mock_peft_from_pretrained,
@@ -427,7 +476,7 @@ def test_load_model_forwards_revision_to_adapter_and_base_loads(
 
     assert model is merged_model
     assert is_adapter is True
-    assert mock_from_pretrained.call_args.kwargs["revision"] == "rev-a"
+    assert mock_from_pretrained.call_args.kwargs["revision"] == "base-rev"
     assert mock_peft_from_pretrained.call_args.kwargs["revision"] == "rev-a"
-    assert mock_resolve_base_model.called
+    assert mock_resolve_base_model_reference.called
     assert mock_is_adapter.called

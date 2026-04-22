@@ -78,9 +78,23 @@ def _has_adapter_artifact(row: Mapping[str, Any]) -> bool:
                 candidates = [source]
             for item in candidates:
                 name = _text(str(item).rsplit("/", 1)[-1])
-                if name.startswith("adapter") and name.endswith(".safetensors"):
+                if name.startswith("adapter") and (
+                    name.endswith(".safetensors") or name.endswith(".bin")
+                ):
                     return True
 
+    return False
+
+
+def _has_explicit_repo_file_metadata(row: Mapping[str, Any]) -> bool:
+    for source in (
+        row.get("files"),
+        row.get("file_names"),
+        row.get("repo_file_names"),
+        row.get("repo_files"),
+    ):
+        if _file_set(source):
+            return True
     return False
 
 
@@ -183,7 +197,11 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader=effective_loader,
         )
 
-    if base_model_relation in {"adapter", "lora", "peft"} and not _has_adapter_artifact(row):
+    if (
+        base_model_relation in {"adapter", "lora", "peft"}
+        and _has_explicit_repo_file_metadata(row)
+        and not _has_adapter_artifact(row)
+    ):
         return PreflightDecision(
             eligible=False,
             reason="missing_required_artifact",
