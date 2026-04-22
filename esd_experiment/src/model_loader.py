@@ -129,6 +129,17 @@ def classify_quantized_dependency_failure(error: Exception) -> Optional[LoaderFa
     return None
 
 
+def _quant_method_from_config(config: Any) -> str:
+    quantization_config = getattr(config, "quantization_config", None)
+    if quantization_config is None:
+        return ""
+    if isinstance(quantization_config, dict):
+        method = quantization_config.get("quant_method")
+    else:
+        method = getattr(quantization_config, "quant_method", None)
+    return str(method or "").strip().lower()
+
+
 def resolve_effective_loader_for_repo(
     repo_id: str,
     loader_scenario: Optional[str] = None,
@@ -155,7 +166,6 @@ def resolve_effective_loader_for_repo(
     if scenario == "quantized_transformers_native":
         if any(marker in repo_hint for marker in ("gptq", "awq")):
             return "gptq" if "gptq" in repo_hint else "awq"
-        return "standard_causal"
 
     config = None
     try:
@@ -170,11 +180,14 @@ def resolve_effective_loader_for_repo(
 
     if config is not None:
         model_type = str(getattr(config, "model_type", "") or "").strip().lower()
+        quant_method = _quant_method_from_config(config)
         architectures = [
             str(arch).strip().lower()
             for arch in getattr(config, "architectures", []) or []
             if str(arch).strip()
         ]
+        if quant_method in {"gptq", "awq"}:
+            return quant_method
         if any("forsequenceclassification" in arch for arch in architectures):
             return "sequence_classification"
         if model_type.startswith("t5") or any(

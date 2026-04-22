@@ -279,6 +279,25 @@ def test_apply_preflight_separates_runnable_and_blocked_rows():
     assert blocked_df.iloc[0]["preflight_effective_loader"] == "adapter_requires_base"
 
 
+def test_apply_preflight_does_not_block_generic_quantized_native_rows_without_backend_hint():
+    model_df = pd.DataFrame(
+        [
+            {
+                "model_id": "org/quantized-model",
+                "base_model_relation": "",
+                "loader_scenario": "quantized_transformers_native",
+                "tags": "",
+            },
+        ]
+    )
+
+    runnable_df, blocked_df = apply_preflight(model_df)
+
+    assert list(runnable_df["model_id"]) == ["org/quantized-model"]
+    assert blocked_df.empty
+    assert runnable_df.iloc[0]["preflight_effective_loader"] == "standard_causal"
+
+
 def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"

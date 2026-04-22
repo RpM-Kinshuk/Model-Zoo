@@ -134,6 +134,13 @@ def test_resolve_effective_loader_for_repo_prefers_auto_config_sequence_classifi
         assert resolve_effective_loader_for_repo("org/t5-cls", loader_scenario="standard_transformers") == "sequence_classification"
 
 
+def test_resolve_effective_loader_for_repo_reads_quantization_config():
+    config = Mock(model_type="llama", architectures=["LlamaForCausalLM"])
+    config.quantization_config = {"quant_method": "gptq"}
+    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
+        assert resolve_effective_loader_for_repo("org/quantized-model", loader_scenario="standard_transformers") == "gptq"
+
+
 def test_resolve_effective_loader_for_repo_keeps_explicit_multimodal_hint():
     config = Mock(model_type="t5", architectures=["T5ForConditionalGeneration"])
     with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):

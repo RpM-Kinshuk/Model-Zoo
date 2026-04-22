@@ -15,6 +15,8 @@ python esd_experiment/run_experiment.py \
 
 Use a short run name in place of `example_run`.
 
+The runner reads `loader_scenario` first, but it also consumes optional curated fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when they are present. Quantized-native rows are only blocked early when they resolve to an explicit `gptq` or `awq` backend requirement.
+
 ## What To Check After The Run
 
 - successful models should have both:

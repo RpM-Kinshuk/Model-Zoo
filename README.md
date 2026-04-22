@@ -59,6 +59,7 @@ Legacy three-column CSVs (`model_id,base_model_relation,source_model`) are still
 
 Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
 Phase-2 ESD runs use `data/curated/model_zoo_phase2.csv`, run a preflight eligibility step before dispatch, and keep output-root accounting under `analysis_runs/phase2/<run_name>/`.
+Preflight also consumes optional curated routing/probe fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when they are present.
 
 ## 📁 Repository Structure
 
@@ -124,6 +125,7 @@ Model-Zoo/
 - **PEFT/LoRA adapter support**: Automatically detects and merges adapters with base models
 - **Multimodal support**: Routes Llava-style image-text-to-text repos through the appropriate auto model class
 - **Quantized-native support**: Supports common HF-native quantized repos when the required backend is available, and records structured incompatibility failures otherwise
+- **Config-aware routing**: Uses loader hints first, then config/task metadata such as `quantization_config`, `pipeline_tag`, and architectures to choose the most appropriate loader path
 - **Revision support**: Analyze specific model versions (e.g., `model@revision`)
 - **Retry logic**: Handles transient HuggingFace Hub errors
 - **Memory management**: Automatic cleanup and cache clearing

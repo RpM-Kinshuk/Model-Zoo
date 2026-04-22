@@ -100,12 +100,25 @@ def test_classify_row_preflight_marks_gptq_backend_missing():
     decision = classify_row_preflight({
         'model_id': 'org/quantized-model',
         'loader_scenario': 'quantized_transformers_native',
+        'tags': "['gptq']",
         'backend_status': '',
     })
 
     assert decision.eligible is False
     assert decision.reason == 'unsupported_backend'
     assert decision.effective_loader == 'gptq'
+
+
+def test_classify_row_preflight_allows_generic_quantized_native_without_backend_hint():
+    decision = classify_row_preflight({
+        'model_id': 'org/quantized-model',
+        'loader_scenario': 'quantized_transformers_native',
+        'backend_status': '',
+    })
+
+    assert decision.eligible is True
+    assert decision.reason == 'eligible'
+    assert decision.effective_loader == 'standard_causal'
 
 
 def test_classify_row_preflight_allows_gguf_row_when_backend_available():

@@ -163,7 +163,7 @@ def _row_backend_status(row: pd.Series, available_backends: set[str]) -> str:
             return "available" if "awq" in available_backends else "missing"
         if "gptq" in tags_blob:
             return "available" if "gptq" in available_backends else "missing"
-        return "available" if available_backends.intersection({"gptq", "awq"}) else "missing"
+        return ""
     return ""
 
 
@@ -209,7 +209,7 @@ def parse_args():
             org/model@revision,,
 
         Curated table (preferred):
-            model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket
+            model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket,files,pipeline_tag,Architecture,Available on the hub
             meta-llama/Llama-2-7b-hf,main,source,,,base_source
             some/adapter-model,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
             org/model,commit-sha,,,,quantized
@@ -221,6 +221,13 @@ def parse_args():
             - source_model: base model for adapters (optional, inferred when possible)
             - loader_scenario: curated loader hint such as standard_transformers or adapter_requires_base (optional)
             - primary_type_bucket: curated type bucket for logging / analysis (optional)
+            - files / repo_files / file_names: optional artifact hints used by preflight for adapters and gguf
+            - pipeline_tag / Architecture / model_type fields: optional routing hints for seq2seq, classification, or multimodal models
+            - Available on the hub: optional curated availability gate
+
+        Notes:
+            - Preflight may replace loader_scenario with a more specific effective loader before dispatch.
+            - Quantized-native rows are only backend-gated when they resolve to an explicit gptq or awq path.
         """
     )
     
@@ -262,6 +269,8 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         - revision_norm (optional): Curated revision override
         - loader_scenario (optional): Curated loader dispatch hint
         - primary_type_bucket (optional): Curated type bucket
+        - optional routing/probe fields such as files, repo_files, pipeline_tag, Architecture,
+          model_type/config_model_type, and Available on the hub
     
     Returns:
         DataFrame with model information

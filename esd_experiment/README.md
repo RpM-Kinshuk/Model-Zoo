@@ -22,7 +22,7 @@ python analyze_results.py --results_dir ../analysis_runs/phase2/example_run --ve
 
 Canonical phase-2 outputs belong under `../analysis_runs/phase2/`.
 
-Phase-2 runs now use a preflight eligibility step before GPU dispatch. The explicit loader paths are `standard_causal`, `seq2seq`, `multimodal`, `adapter_requires_base`, `gptq`, and `awq`; `gguf` is rejected in this blocker pass. Run summaries are derived from per-model success artifacts plus terminal/failure records, not dispatcher logs alone.
+Phase-2 runs now use a preflight eligibility step before GPU dispatch. The explicit loader paths are `standard_causal`, `seq2seq`, `multimodal`, `adapter_requires_base`, `gptq`, `awq`, and `gguf`. Loader hints remain primary, but preflight and loading also use optional curated fields such as `files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when present. Run summaries are derived from per-model success artifacts plus terminal/failure records, not dispatcher logs alone.
 
 ## Documentation
 
@@ -90,13 +90,14 @@ some/lora-adapter,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,ad
 - `source_model` (optional): Base model for adapters
 - `loader_scenario` (optional): curated loader hint such as `standard_transformers` or `adapter_requires_base`
 - `primary_type_bucket` (optional): curated type bucket for logging / downstream analysis
+- optional routing/probe fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub`
 
 Legacy three-column CSVs (`model_id,base_model_relation,source_model`) remain supported.
 
 ### Loader Notes
 
 - `multimodal_transformers` routes through `AutoModelForImageTextToText`.
-- `quantized_transformers_native` works for common HF-native quantized repos, but some backends such as AWQ/GPTQ may still depend on optional packages and a compatible torch/runtime stack.
+- `quantized_transformers_native` only gets backend-gated once the row resolves to an explicit `gptq` or `awq` path; otherwise it stays on the standard causal path until the loader has stronger evidence.
 - When a quantized backend is missing or incompatible, the worker records a structured load failure instead of leaving partial outputs behind.
 
 ## Output

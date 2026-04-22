@@ -203,17 +203,17 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader="gguf",
         )
 
-    if loader_scenario == "quantized_transformers_native" or effective_loader in {"gptq", "awq"}:
+    if effective_loader in {"gptq", "awq"}:
         if not backend_status or backend_status in {"missing", "absent", "none"}:
             return PreflightDecision(
                 eligible=False,
                 reason="unsupported_backend",
-                effective_loader=effective_loader if effective_loader in {"gptq", "awq"} else "gptq",
+                effective_loader=effective_loader,
             )
         return PreflightDecision(
             eligible=True,
             reason="eligible",
-            effective_loader=effective_loader if effective_loader in {"gptq", "awq"} else "gptq",
+            effective_loader=effective_loader,
         )
 
     return PreflightDecision(
