@@ -80,6 +80,21 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
         raise
 
 
+def ensure_optimum_gptq_backend_compat() -> None:
+    """Patch Optimum's legacy EXLLAMA_V1 reference for current GPTQModel builds."""
+    try:
+        import optimum.gptq.quantizer as optimum_gptq_quantizer
+    except Exception:
+        return
+    backend_enum = getattr(optimum_gptq_quantizer, "BACKEND", None)
+    if backend_enum is None:
+        return
+    if hasattr(backend_enum, "EXLLAMA_V1"):
+        return
+    if hasattr(backend_enum, "EXLLAMA_V2"):
+        setattr(backend_enum, "EXLLAMA_V1", backend_enum.EXLLAMA_V2)
+
+
 def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional[LoaderFailure]:
     scenario = (loader_scenario or "").strip().lower()
     if not scenario or scenario in {
@@ -232,6 +247,43 @@ def resolve_adapter_effective_loader(
     return "standard_causal"
 
 
+def resolve_dense_upstream_base_reference(
+    repo_id: str,
+    revision: Optional[str] = None,
+) -> Optional[Tuple[str, Optional[str]]]:
+    api = HfApi()
+    try:
+        info = api.model_info(
+            repo_id=repo_id,
+            revision=revision,
+            token=get_hf_token(),
+        )
+    except Exception:
+        return None
+
+    tags = getattr(info, "tags", None) or []
+    for tag in tags:
+        text = str(tag or "").strip()
+        if not text.startswith("base_model:") or text.startswith("base_model:quantized:"):
+            continue
+        return parse_model_string(text[len("base_model:"):])
+
+    card_data = getattr(info, "cardData", None)
+    if isinstance(card_data, dict):
+        base_model = card_data.get("base_model")
+    else:
+        base_model = getattr(card_data, "base_model", None)
+    if base_model:
+        candidates = base_model if isinstance(base_model, (list, tuple)) else [base_model]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text or text.lower().startswith("quantized:"):
+                continue
+            return parse_model_string(text)
+
+    return None
+
+
 def _resolve_adapter_task_loader(
     adapter_repo: str,
     source_model: Optional[str] = None,
@@ -246,6 +298,13 @@ def _resolve_adapter_task_loader(
             return "seq2seq"
         if task_type in {"SEQ_CLS", "SEQUENCE_CLASSIFICATION"}:
             return "sequence_classification"
+        if source_model:
+            source_repo, source_revision = parse_model_string(str(source_model))
+            return resolve_effective_loader_for_repo(
+                source_repo,
+                loader_scenario=loader_scenario,
+                revision=source_revision or revision,
+            )
         base_name = getattr(cfg, "base_model_name_or_path", None)
         if base_name:
             _, embedded_revision = parse_model_string(str(base_name))
@@ -473,9 +532,32 @@ def load_and_merge_adapter(
         source_model=base_repo,
         revision=revision,
     )
+    if effective_loader in {"gptq", "awq", "gguf"}:
+        dense_base_reference = resolve_dense_upstream_base_reference(
+            base_repo,
+            revision=base_revision,
+        )
+        if dense_base_reference is not None:
+            dense_base_repo, dense_base_revision = dense_base_reference
+            if dense_base_repo != base_repo or dense_base_revision != base_revision:
+                base_repo = dense_base_repo
+                base_revision = dense_base_revision
+                effective_loader = _resolve_adapter_task_loader(
+                    adapter_repo,
+                    source_model=base_repo,
+                    revision=revision,
+                )
     auto_model_cls = _select_auto_model_cls(effective_loader)
 
     print(f"Loading base model: {base_repo}")
+    if effective_loader in {"awq", "gguf"}:
+        raise LoaderFailure(
+            "load",
+            "unsupported_backend",
+            f"Adapter loading does not support {effective_loader} base loaders",
+        )
+    if effective_loader == "gptq":
+        ensure_optimum_gptq_backend_compat()
     base = hf_from_pretrained(
         auto_model_cls,
         base_repo,
@@ -484,6 +566,16 @@ def load_and_merge_adapter(
         revision=base_revision,
     )
     base.eval()
+    if effective_loader == "gptq":
+        try:
+            base = base.dequantize()
+            base.eval()
+        except NotImplementedError as exc:
+            raise LoaderFailure(
+                "load",
+                "adapter_merge_unsupported",
+                "GPTQ base models cannot currently be merged with adapters because GPTQ dequantization is not implemented in the active Transformers/GPTQModel stack",
+            ) from exc
     
     print(f"Loading adapter: {adapter_repo}")
     token = get_hf_token()
@@ -496,7 +588,17 @@ def load_and_merge_adapter(
     )
     
     print("Merging adapter weights into base model...")
-    merged = peft_model.merge_and_unload() # type: ignore
+    try:
+        merged = peft_model.merge_and_unload() # type: ignore
+    except ValueError as exc:
+        message = str(exc)
+        if "cannot merge lora layers when the model is gptq quantized" in message.lower():
+            raise LoaderFailure(
+                "load",
+                "adapter_merge_unsupported",
+                "GPTQ base models cannot currently be merged with adapters because PEFT refuses merge on quantized GPTQ bases",
+            ) from exc
+        raise
     merged.eval()
     
     return merged
@@ -537,12 +639,6 @@ def load_model(
             loader_scenario=loader_scenario,
             revision=revision,
         )
-        if effective_loader in {"gptq", "awq", "gguf"}:
-            raise LoaderFailure(
-                "load",
-                "unsupported_backend",
-                f"Adapter loading does not support {effective_loader} base loaders",
-            )
         print(f"[ADAPTER] Loading adapter model: {repo_id}")
         model = load_and_merge_adapter(
             adapter_repo=repo_id,
@@ -562,6 +658,8 @@ def load_model(
             revision=revision,
         )
         auto_model_cls = _select_auto_model_cls(effective_loader)
+        if effective_loader == "gptq":
+            ensure_optimum_gptq_backend_compat()
         load_kwargs: dict[str, Any] = {
             "device_map": device_map,
             "torch_dtype": torch_dtype,
