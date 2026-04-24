@@ -115,6 +115,8 @@ class GPUDispatcher:
     def get_free_gpus(self, num_needed):
         """Blocking call to get free GPUs"""
         counter = {}
+        last_wait_log = 0
+        logger = logging.getLogger(__name__)
 
         while not self.shutdown_event.is_set():
             if self.drain_event.is_set(): return None # Signal to stop dispatching new jobs
@@ -131,8 +133,10 @@ class GPUDispatcher:
 
                 # Logic to find free GPUs
                 candidates = []
+                memory_snapshot = {}
                 for i in allowed_gpus:
                     if i >= len(stats.gpus): continue
+                    memory_snapshot[i] = stats.gpus[i]['memory.used']
                     
                     if stats.gpus[i]['memory.used'] < threshold and i not in current_occupied:
                         counter[i] = counter.get(i, 0) + 1
@@ -146,7 +150,21 @@ class GPUDispatcher:
                     selected = candidates[:num_needed]
                     with self.lock:
                         self.occupied_gpus.update(selected)
+                    logger.info(
+                        f"Acquired GPUs {selected} for next job "
+                        f"(need={num_needed}, threshold={threshold}MB)"
+                    )
                     return selected
+
+                now = time.time()
+                if now - last_wait_log >= 60:
+                    logger.info(
+                        "Waiting for free GPUs "
+                        f"(need={num_needed}, allowed={allowed_gpus}, "
+                        f"threshold={threshold}MB, occupied={current_occupied}, "
+                        f"memory_used_mb={memory_snapshot})"
+                    )
+                    last_wait_log = now
 
                 time.sleep(5)
             
@@ -272,4 +290,3 @@ def get_logger(path, fname):
     sys.stdout.flush()
 
     return logger
-

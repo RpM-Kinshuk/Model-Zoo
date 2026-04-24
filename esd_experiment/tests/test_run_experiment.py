@@ -98,15 +98,38 @@ def test_available_backends_includes_compressed_tensors(monkeypatch):
             return object()
         return None
 
-    def fake_import_module(name):
-        if name in {"gptqmodel", "compressed_tensors"}:
-            return object()
-        raise ImportError(name)
+    def fake_run(cmd, stdout, stderr, env, timeout, check):
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
-    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
 
     assert run_experiment._available_backends() == {"gptq", "compressed_tensors"}
+
+
+def test_available_backends_uses_cuda_hidden_subprocess_not_parent_import(monkeypatch):
+    calls = []
+
+    def fake_find_spec(name):
+        if name == "gptqmodel":
+            return object()
+        return None
+
+    def fake_run(cmd, stdout, stderr, env, timeout, check):
+        calls.append((cmd, env.copy(), timeout, check))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(
+        run_experiment.importlib,
+        "import_module",
+        Mock(side_effect=AssertionError("parent process must not import GPU backends")),
+    )
+    monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
+
+    assert run_experiment._available_backends() == {"gptq"}
+    assert calls
+    assert all(env.get("CUDA_VISIBLE_DEVICES") == "" for _, env, _, _ in calls)
 
 
 def test_available_backends_skips_broken_compressed_tensors_without_retry_path(monkeypatch):
@@ -115,48 +138,41 @@ def test_available_backends_skips_broken_compressed_tensors_without_retry_path(m
             return object()
         return None
 
-    def fake_import_module(name):
-        if name == "compressed_tensors":
-            raise AssertionError("duplicate template name")
-        raise ImportError(name)
+    def fake_run(cmd, stdout, stderr, env, timeout, check):
+        return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
-    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
 
     assert run_experiment._available_backends() == set()
 
 
 def test_available_backends_retries_compressed_tensors_after_gptq_side_effect(monkeypatch):
-    import_attempts = []
-    first_gptq_attempt = True
-    gptq_ready = False
+    probe_sequences = []
 
     def fake_find_spec(name):
         if name in {"gptqmodel", "compressed_tensors"}:
             return object()
         return None
 
-    def fake_import_module(name):
-        nonlocal first_gptq_attempt, gptq_ready
-        import_attempts.append(name)
-        if name == "gptqmodel" and first_gptq_attempt:
-            first_gptq_attempt = False
-            raise ImportError("initial gptq import failed")
-        if name == "gptqmodel":
-            gptq_ready = True
-        if name == "compressed_tensors" and not gptq_ready:
-            raise AssertionError("duplicate template name")
-        return object()
+    def fake_run(cmd, stdout, stderr, env, timeout, check):
+        code = cmd[-1]
+        sequence = tuple(
+            name for name in ("gptqmodel", "compressed_tensors") if name in code
+        )
+        probe_sequences.append(sequence)
+        return SimpleNamespace(
+            returncode=0 if sequence == ("gptqmodel", "compressed_tensors") else 1
+        )
 
     monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
-    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
 
     assert run_experiment._available_backends() == {"gptq", "compressed_tensors"}
-    assert import_attempts == [
-        "gptqmodel",
-        "compressed_tensors",
-        "gptqmodel",
-        "compressed_tensors",
+    assert probe_sequences == [
+        ("gptqmodel",),
+        ("compressed_tensors",),
+        ("gptqmodel", "compressed_tensors"),
     ]
 
 

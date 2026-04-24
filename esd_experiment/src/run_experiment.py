@@ -19,6 +19,7 @@ import itertools
 import json
 import os
 import pandas as pd
+import subprocess
 import sys
 from pathlib import Path
 from dataclasses import dataclass
@@ -35,45 +36,58 @@ from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
 from model_preflight import classify_row_preflight
 
 
+BACKEND_PROBE_TIMEOUT_SECONDS = 30
+
+
 def _normalize_text(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
+def _backend_import_probe(module_names: tuple[str, ...]) -> bool:
+    """Check backend imports in a GPU-hidden child process."""
+    code = "import importlib\n" + "\n".join(
+        f"importlib.import_module({module_name!r})" for module_name in module_names
+    )
+    env = os.environ.copy()
+    # Optional quantization packages can initialize CUDA on import. Keep the
+    # parent runner GPU-clean so the dispatcher can see truly free devices.
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=BACKEND_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _available_backends() -> set[str]:
     backends = set()
     if importlib.util.find_spec("gptqmodel") is not None:
-        try:
-            importlib.import_module("gptqmodel")
+        if _backend_import_probe(("gptqmodel",)):
             backends.add("gptq")
-        except Exception:
-            pass
     if importlib.util.find_spec("autoawq") is not None:
-        try:
-            importlib.import_module("autoawq")
+        if _backend_import_probe(("autoawq",)):
             backends.add("awq")
-        except Exception:
-            pass
     if importlib.util.find_spec("gguf") is not None:
-        try:
-            importlib.import_module("gguf")
+        if _backend_import_probe(("gguf",)):
             backends.add("gguf")
-        except Exception:
-            pass
     if importlib.util.find_spec("compressed_tensors") is not None:
-        try:
-            importlib.import_module("compressed_tensors")
+        if _backend_import_probe(("compressed_tensors",)):
             backends.add("compressed_tensors")
-        except Exception:
-            if importlib.util.find_spec("gptqmodel") is not None:
-                try:
-                    importlib.import_module("gptqmodel")
-                    backends.add("gptq")
-                    importlib.import_module("compressed_tensors")
-                    backends.add("compressed_tensors")
-                except Exception:
-                    pass
+        elif (
+            importlib.util.find_spec("gptqmodel") is not None
+            and _backend_import_probe(("gptqmodel", "compressed_tensors"))
+        ):
+            backends.add("gptq")
+            backends.add("compressed_tensors")
     return backends
 
 
