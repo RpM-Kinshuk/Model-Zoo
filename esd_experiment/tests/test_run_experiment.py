@@ -92,6 +92,132 @@ def _worker_module_context():
                 sys.modules[name] = module
 
 
+def test_available_backends_includes_compressed_tensors(monkeypatch):
+    def fake_find_spec(name):
+        if name in {"gptqmodel", "compressed_tensors"}:
+            return object()
+        return None
+
+    def fake_import_module(name):
+        if name in {"gptqmodel", "compressed_tensors"}:
+            return object()
+        raise ImportError(name)
+
+    monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+
+    assert run_experiment._available_backends() == {"gptq", "compressed_tensors"}
+
+
+def test_available_backends_skips_broken_compressed_tensors_without_retry_path(monkeypatch):
+    def fake_find_spec(name):
+        if name == "compressed_tensors":
+            return object()
+        return None
+
+    def fake_import_module(name):
+        if name == "compressed_tensors":
+            raise AssertionError("duplicate template name")
+        raise ImportError(name)
+
+    monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+
+    assert run_experiment._available_backends() == set()
+
+
+def test_available_backends_retries_compressed_tensors_after_gptq_side_effect(monkeypatch):
+    import_attempts = []
+    first_gptq_attempt = True
+    gptq_ready = False
+
+    def fake_find_spec(name):
+        if name in {"gptqmodel", "compressed_tensors"}:
+            return object()
+        return None
+
+    def fake_import_module(name):
+        nonlocal first_gptq_attempt, gptq_ready
+        import_attempts.append(name)
+        if name == "gptqmodel" and first_gptq_attempt:
+            first_gptq_attempt = False
+            raise ImportError("initial gptq import failed")
+        if name == "gptqmodel":
+            gptq_ready = True
+        if name == "compressed_tensors" and not gptq_ready:
+            raise AssertionError("duplicate template name")
+        return object()
+
+    monkeypatch.setattr(run_experiment.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(run_experiment.importlib, "import_module", fake_import_module)
+
+    assert run_experiment._available_backends() == {"gptq", "compressed_tensors"}
+    assert import_attempts == [
+        "gptqmodel",
+        "compressed_tensors",
+        "gptqmodel",
+        "compressed_tensors",
+    ]
+
+
+def test_row_backend_status_marks_compressed_tensors_from_tags():
+    row = pd.Series(
+        {
+            "model_id": "org/compressed-model",
+            "tags": "['compressed-tensors']",
+            "loader_scenario": "quantized_transformers_native",
+        }
+    )
+
+    status = run_experiment._row_backend_status(
+        row,
+        {"compressed_tensors"},
+        effective_loader="compressed_tensors",
+    )
+
+    assert status == "available"
+
+
+def test_row_backend_status_overrides_stale_available_status_when_backend_missing():
+    row = pd.Series(
+        {
+            "model_id": "org/compressed-model",
+            "tags": "['compressed-tensors']",
+            "loader_scenario": "quantized_transformers_native",
+            "backend_status": "available",
+        }
+    )
+
+    status = run_experiment._row_backend_status(
+        row,
+        set(),
+        effective_loader="compressed_tensors",
+    )
+
+    assert status == "missing"
+
+
+def test_row_backend_status_checks_adapter_source_backend_before_stale_status():
+    row = pd.Series(
+        {
+            "model_id": "org/adapter",
+            "source_model": "TheBloke/Mistral-7B-Instruct-v0.2-GPTQ",
+            "base_model": "",
+            "base_model_name_or_path": "",
+            "loader_scenario": "adapter_requires_base",
+            "backend_status": "available",
+        }
+    )
+
+    status = run_experiment._row_backend_status(
+        row,
+        set(),
+        effective_loader="adapter_requires_base",
+    )
+
+    assert status == "missing"
+
+
 def test_load_model_list_preserves_curated_columns_and_normalizes_values(tmp_path: Path):
     csv_path = tmp_path / "curated.csv"
     pd.DataFrame(

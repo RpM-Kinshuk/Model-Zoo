@@ -2,6 +2,7 @@
 Robust model loader with PEFT adapter support.
 Heavily inspired by calculate_adapters.py and run_metric.py patterns.
 """
+import importlib
 import os
 import re
 import torch
@@ -9,7 +10,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 try:
     from transformers import AutoModelForSeq2SeqLM
 except ImportError:  # pragma: no cover - depends on transformers version
@@ -95,6 +96,20 @@ def ensure_optimum_gptq_backend_compat() -> None:
         setattr(backend_enum, "EXLLAMA_V1", backend_enum.EXLLAMA_V2)
 
 
+def ensure_compressed_tensors_backend_compat() -> None:
+    """Import compressed_tensors, retrying after GPTQModel's torch setup side effects."""
+    try:
+        importlib.import_module("compressed_tensors")
+        return
+    except Exception as direct_exc:
+        try:
+            importlib.import_module("gptqmodel")
+            importlib.import_module("compressed_tensors")
+            return
+        except Exception:
+            raise direct_exc
+
+
 def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional[LoaderFailure]:
     scenario = (loader_scenario or "").strip().lower()
     if not scenario or scenario in {
@@ -102,6 +117,7 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
         "standard_causal",
         "adapter_requires_base",
         "quantized_transformers_native",
+        "compressed_tensors",
         "gptq",
         "awq",
         "multimodal_transformers",
@@ -127,10 +143,23 @@ def classify_loader_scenario_support(loader_scenario: Optional[str]) -> Optional
 def classify_quantized_dependency_failure(error: Exception) -> Optional[LoaderFailure]:
     message = str(error)
     lowered = message.lower()
+    if (
+        "meta tensors" in lowered
+        or "meta tensor" in lowered
+        or "incompatible torch version" in lowered
+        or "duplicate template name" in lowered
+    ):
+        return LoaderFailure(
+            "load",
+            "quantized_backend_incompatible",
+            f"Quantized-native backend is incompatible with the current runtime: {message}",
+        )
     package_hints = {
         "gptqmodel": "gptqmodel",
         "autoawq": "autoawq",
         "bitsandbytes": "bitsandbytes",
+        "compressed_tensors": "compressed-tensors",
+        "compressed-tensors": "compressed-tensors",
     }
     for marker, package in package_hints.items():
         if marker in lowered:
@@ -139,13 +168,21 @@ def classify_quantized_dependency_failure(error: Exception) -> Optional[LoaderFa
                 "quantized_dependency_missing",
                 f"Quantized-native loading requires the optional dependency `{package}`: {message}",
             )
-    if "meta tensors" in lowered or "incompatible torch version" in lowered:
-        return LoaderFailure(
-            "load",
-            "quantized_backend_incompatible",
-            f"Quantized-native backend is incompatible with the current runtime: {message}",
-        )
     return None
+
+
+def _raise_quantized_loader_failure_if_known(
+    error: Exception,
+    loader_scenario: Optional[str],
+    effective_loader: str,
+) -> None:
+    if (
+        (loader_scenario or "").strip().lower() == "quantized_transformers_native"
+        or effective_loader in {"gptq", "awq", "compressed_tensors"}
+    ):
+        dependency_failure = classify_quantized_dependency_failure(error)
+        if dependency_failure is not None:
+            raise dependency_failure from error
 
 
 def _quant_method_from_config(config: Any) -> str:
@@ -174,7 +211,15 @@ def resolve_effective_loader_for_repo(
 
     if relation in {"adapter", "lora", "peft"}:
         return resolve_adapter_effective_loader(source_model or repo_id, loader_scenario=scenario)
-    if scenario in {"standard_causal", "gptq", "awq", "multimodal", "seq2seq", "sequence_classification"}:
+    if scenario in {
+        "standard_causal",
+        "compressed_tensors",
+        "gptq",
+        "awq",
+        "multimodal",
+        "seq2seq",
+        "sequence_classification",
+    }:
         return scenario
     if scenario == "gguf":
         return "gguf"
@@ -207,8 +252,8 @@ def resolve_effective_loader_for_repo(
             for arch in getattr(config, "architectures", []) or []
             if str(arch).strip()
         ]
-        if quant_method in {"gptq", "awq"}:
-            return quant_method
+        if quant_method in {"gptq", "awq", "compressed-tensors"}:
+            return quant_method.replace("-", "_")
         if any("forsequenceclassification" in arch for arch in architectures):
             return "sequence_classification"
         if model_type.startswith("t5") or any(
@@ -236,6 +281,8 @@ def resolve_adapter_effective_loader(
         return "gptq"
     if "awq" in candidates:
         return "awq"
+    if "compressed-tensors" in candidates or "compressed_tensors" in candidates:
+        return "compressed_tensors"
     if "gguf" in candidates:
         return "gguf"
     if "seq2seq" in candidates:
@@ -387,6 +434,15 @@ def _fallback_loader_from_error(current_loader: str, error: Exception) -> Option
     return None
 
 
+def _fallback_auto_model_cls(current_loader: str, error: Exception):
+    if current_loader != "standard_causal":
+        return None
+    message = str(error).lower()
+    if "unrecognized configuration class" not in message:
+        return None
+    return AutoModel
+
+
 def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
     """Check if HuggingFace repo has files with given prefix."""
     api = HfApi()
@@ -500,6 +556,8 @@ def load_and_merge_adapter(
     device_map: str = "cpu",
     torch_dtype = torch.float16,
     revision: Optional[str] = None,
+    loader_scenario: Optional[str] = None,
+    effective_loader: Optional[str] = None,
 ) -> torch.nn.Module:
     """
     Load base model and merge PEFT adapter weights.
@@ -527,12 +585,13 @@ def load_and_merge_adapter(
         base_repo, parsed_revision = parse_model_string(base_repo)
         base_revision = parsed_revision or revision
     
-    effective_loader = _resolve_adapter_task_loader(
+    effective_loader = effective_loader or _resolve_adapter_task_loader(
         adapter_repo,
         source_model=base_repo,
+        loader_scenario=loader_scenario,
         revision=revision,
     )
-    if effective_loader in {"gptq", "awq", "gguf"}:
+    if effective_loader in {"gptq", "awq", "gguf", "compressed_tensors"}:
         dense_base_reference = resolve_dense_upstream_base_reference(
             base_repo,
             revision=base_revision,
@@ -545,6 +604,7 @@ def load_and_merge_adapter(
                 effective_loader = _resolve_adapter_task_loader(
                     adapter_repo,
                     source_model=base_repo,
+                    loader_scenario=loader_scenario,
                     revision=revision,
                 )
     auto_model_cls = _select_auto_model_cls(effective_loader)
@@ -558,13 +618,22 @@ def load_and_merge_adapter(
         )
     if effective_loader == "gptq":
         ensure_optimum_gptq_backend_compat()
-    base = hf_from_pretrained(
-        auto_model_cls,
-        base_repo,
-        device_map=device_map,
-        torch_dtype=torch_dtype,
-        revision=base_revision,
-    )
+    try:
+        if effective_loader == "compressed_tensors":
+            ensure_compressed_tensors_backend_compat()
+        base = hf_from_pretrained(
+            auto_model_cls,
+            base_repo,
+            device_map=device_map,
+            torch_dtype=torch_dtype,
+            revision=base_revision,
+        )
+    except Exception as exc:
+        if effective_loader in {"gptq", "awq", "compressed_tensors"}:
+            dependency_failure = classify_quantized_dependency_failure(exc)
+            if dependency_failure is not None:
+                raise dependency_failure from exc
+        raise
     base.eval()
     if effective_loader == "gptq":
         try:
@@ -579,13 +648,23 @@ def load_and_merge_adapter(
     
     print(f"Loading adapter: {adapter_repo}")
     token = get_hf_token()
-    peft_model = PeftModel.from_pretrained(
-        base,
-        adapter_repo,
-        is_trainable=False,
-        token=token,
-        revision=revision,
-    )
+    try:
+        peft_model = PeftModel.from_pretrained(
+            base,
+            adapter_repo,
+            is_trainable=False,
+            token=token,
+            revision=revision,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "size mismatch for base_model." in message:
+            raise LoaderFailure(
+                "load",
+                "adapter_base_checkpoint_mismatch",
+                "Adapter weights do not match the resolved base model checkpoint",
+            ) from exc
+        raise
     
     print("Merging adapter weights into base model...")
     try:
@@ -646,6 +725,8 @@ def load_model(
             device_map=device_map,
             torch_dtype=torch_dtype,
             revision=revision,
+            loader_scenario=loader_scenario,
+            effective_loader=effective_loader,
         )
         return model, True
     else:
@@ -670,6 +751,8 @@ def load_model(
             load_kwargs["dtype"] = torch_dtype
             load_kwargs.pop("torch_dtype", None)
         try:
+            if effective_loader == "compressed_tensors":
+                ensure_compressed_tensors_backend_compat()
             model = hf_from_pretrained(
                 auto_model_cls,
                 repo_id,
@@ -686,14 +769,28 @@ def load_model(
                     revision=revision,
                 )
             else:
-                if (
-                    (loader_scenario or "").strip().lower() == "quantized_transformers_native"
-                    or effective_loader in {"gptq", "awq"}
-                ):
-                    dependency_failure = classify_quantized_dependency_failure(exc)
-                    if dependency_failure is not None:
-                        raise dependency_failure from exc
-                raise
+                fallback_cls = _fallback_auto_model_cls(effective_loader, exc)
+                if fallback_cls is not None:
+                    try:
+                        model = hf_from_pretrained(
+                            fallback_cls,
+                            repo_id,
+                            **load_kwargs,
+                        )
+                    except Exception as fallback_exc:
+                        _raise_quantized_loader_failure_if_known(
+                            fallback_exc,
+                            loader_scenario=loader_scenario,
+                            effective_loader=effective_loader,
+                        )
+                        raise
+                else:
+                    _raise_quantized_loader_failure_if_known(
+                        exc,
+                        loader_scenario=loader_scenario,
+                        effective_loader=effective_loader,
+                    )
+                    raise
         model.eval()
         return model, False
 

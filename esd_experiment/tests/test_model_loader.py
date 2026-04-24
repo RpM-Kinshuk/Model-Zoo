@@ -41,6 +41,11 @@ fake_transformers.AutoModelForSequenceClassification = type(
     (),
     {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
 )
+fake_transformers.AutoModel = type(
+    "AutoModel",
+    (),
+    {"from_pretrained": classmethod(lambda cls, *args, **kwargs: None)},
+)
 fake_transformers.AutoModelForImageTextToText = type(
     "AutoModelForImageTextToText",
     (),
@@ -117,7 +122,16 @@ def test_classify_loader_scenario_support_accepts_standard_transformers():
 
 @pytest.mark.parametrize(
     "scenario",
-    ["quantized_transformers_native", "multimodal_transformers", "gguf", "standard_causal", "multimodal", "gptq", "awq"],
+    [
+        "quantized_transformers_native",
+        "multimodal_transformers",
+        "gguf",
+        "standard_causal",
+        "multimodal",
+        "gptq",
+        "awq",
+        "compressed_tensors",
+    ],
 )
 def test_classify_loader_scenario_support_accepts_current_policy_allowlist(scenario):
     assert classify_loader_scenario_support(scenario) is None
@@ -140,6 +154,21 @@ def test_resolve_effective_loader_for_repo_reads_quantization_config():
     config.quantization_config = {"quant_method": "gptq"}
     with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
         assert resolve_effective_loader_for_repo("org/quantized-model", loader_scenario="standard_transformers") == "gptq"
+
+
+def test_resolve_effective_loader_for_repo_detects_compressed_tensors_quant_method(monkeypatch):
+    config = Mock(model_type="llama", architectures=["LlamaForCausalLM"])
+    config.quantization_config = Mock(quant_method="compressed-tensors")
+
+    monkeypatch.setattr(model_loader.AutoConfig, "from_pretrained", Mock(return_value=config))
+
+    assert (
+        resolve_effective_loader_for_repo(
+            "org/compressed-model",
+            loader_scenario="standard_transformers",
+        )
+        == "compressed_tensors"
+    )
 
 
 def test_resolve_effective_loader_for_repo_keeps_explicit_multimodal_hint():
@@ -258,6 +287,38 @@ def test_load_model_uses_sequence_classification_auto_class(mock_from_pretrained
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSequenceClassification
 
 
+def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkeypatch):
+    fallback_model = Mock()
+    auto_model_cls = type("AutoModel", (), {})
+    calls = []
+
+    def fake_from_pretrained(auto_cls, repo_id, **kwargs):
+        calls.append((auto_cls, repo_id, kwargs))
+        if auto_cls is model_loader.AutoModelForCausalLM:
+            raise RuntimeError(
+                "Unrecognized configuration class <class 'transformers.SomeConfig'> "
+                "for this kind of AutoModel: AutoModelForCausalLM."
+            )
+        if auto_cls is auto_model_cls:
+            return fallback_model
+        raise AssertionError(f"Unexpected auto class {auto_cls}")
+
+    monkeypatch.setattr(model_loader, "AutoModel", auto_model_cls, raising=False)
+    monkeypatch.setattr(model_loader, "hf_from_pretrained", fake_from_pretrained)
+
+    model, is_adapter = load_model(
+        "org/non-head-model",
+        loader_scenario="standard_transformers",
+    )
+
+    assert model is fallback_model
+    assert is_adapter is False
+    assert [call[0] for call in calls] == [
+        model_loader.AutoModelForCausalLM,
+        auto_model_cls,
+    ]
+
+
 @patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."))
 def test_load_model_raises_structured_failure_for_missing_quantized_dependency(mock_from_pretrained):
     with pytest.raises(LoaderFailure) as exc:
@@ -284,9 +345,45 @@ def test_load_model_raises_structured_failure_for_incompatible_quantized_backend
     assert "incompatible" in exc.value.message
 
 
+@patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Cannot copy out of meta tensor; no data!"))
+def test_load_model_classifies_singular_meta_tensor_quantized_backend_failure(mock_from_pretrained):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/quantized-model",
+            loader_scenario="quantized_transformers_native",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_backend_incompatible"
+    assert mock_from_pretrained.called
+
+
+@patch(
+    "model_loader_under_test.hf_from_pretrained",
+    side_effect=[
+        RuntimeError(
+            "Unrecognized configuration class <class 'transformers.SomeConfig'> "
+            "for this kind of AutoModel: AutoModelForCausalLM."
+        ),
+        RuntimeError("compressed_tensors duplicate template name"),
+    ],
+)
+def test_load_model_classifies_quantized_fallback_automodel_backend_failure(mock_from_pretrained):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/quantized-model",
+            loader_scenario="quantized_transformers_native",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_backend_incompatible"
+    assert mock_from_pretrained.call_count == 2
+
+
 def test_resolve_adapter_effective_loader_is_backend_sensitive():
     assert resolve_adapter_effective_loader("gptq") == "gptq"
     assert resolve_adapter_effective_loader("awq") == "awq"
+    assert resolve_adapter_effective_loader("compressed-tensors") == "compressed_tensors"
     assert resolve_adapter_effective_loader("standard_causal") == "standard_causal"
 
 
@@ -337,6 +434,39 @@ def test_load_model_allows_adapter_gptq_base(
     assert model is mock_load_and_merge_adapter.return_value
     assert mock_resolve_adapter_task_loader.called
     assert mock_load_and_merge_adapter.called
+    assert mock_load_and_merge_adapter.call_args.kwargs["effective_loader"] == "gptq"
+    assert mock_load_and_merge_adapter.call_args.kwargs["loader_scenario"] == "adapter_requires_base"
+
+
+@patch("model_loader_under_test.importlib.import_module")
+@patch("model_loader_under_test.hf_from_pretrained")
+def test_load_model_prepares_compressed_tensors_backend_after_gptq_side_effect(
+    mock_from_pretrained,
+    mock_import_module,
+):
+    mock_model = Mock()
+    mock_from_pretrained.return_value = mock_model
+    imported = set()
+
+    def fake_import_module(name):
+        if name == "compressed_tensors" and "gptqmodel" not in imported:
+            imported.add(name)
+            raise AssertionError("duplicate template name")
+        imported.add(name)
+        return Mock()
+
+    mock_import_module.side_effect = fake_import_module
+
+    model, is_adapter = load_model(
+        "org/compressed-model",
+        loader_scenario="compressed_tensors",
+    )
+
+    assert model is mock_model
+    assert is_adapter is False
+    assert mock_import_module.call_args_list[0].args == ("compressed_tensors",)
+    assert mock_import_module.call_args_list[1].args == ("gptqmodel",)
+    assert mock_import_module.call_args_list[2].args == ("compressed_tensors",)
 
 
 @patch("model_loader_under_test.PeftModel.from_pretrained")
@@ -373,7 +503,7 @@ def test_load_model_remaps_gptq_adapter_base_to_dense_upstream_base(
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
     assert mock_from_pretrained.call_args.args[1] == "mistralai/Mistral-7B-Instruct-v0.2"
     assert mock_resolve_dense_upstream_base_reference.called
-    assert mock_resolve_adapter_task_loader.call_count == 3
+    assert mock_resolve_adapter_task_loader.call_count == 2
     assert mock_is_adapter.called
 
 
@@ -393,6 +523,24 @@ def test_load_model_classifies_quantized_dependency_failure_for_awq_alias(mock_f
     assert mock_from_pretrained.called
 
 
+@patch(
+    "model_loader_under_test.hf_from_pretrained",
+    side_effect=RuntimeError("No module named 'compressed_tensors'"),
+)
+def test_load_model_classifies_quantized_dependency_failure_for_compressed_tensors(
+    mock_from_pretrained,
+):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/compressed-model",
+            loader_scenario="compressed_tensors",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_dependency_missing"
+    assert "compressed-tensors" in exc.value.message
+
+
 @patch("model_loader_under_test.ensure_optimum_gptq_backend_compat")
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_applies_gptq_backend_compat_shim(
@@ -410,6 +558,34 @@ def test_load_model_applies_gptq_backend_compat_shim(
     assert model is mock_model
     assert is_adapter is False
     assert mock_ensure_optimum_gptq_backend_compat.called
+
+
+@patch(
+    "model_loader_under_test.hf_from_pretrained",
+    side_effect=RuntimeError("No module named 'compressed_tensors'"),
+)
+@patch("model_loader_under_test.is_adapter_model", return_value=True)
+@patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/compressed-model", None))
+@patch("model_loader_under_test._resolve_adapter_task_loader", return_value="compressed_tensors")
+def test_load_model_classifies_adapter_compressed_tensors_dependency_failure(
+    mock_resolve_adapter_task_loader,
+    mock_resolve_base_model_reference,
+    mock_is_adapter,
+    mock_from_pretrained,
+):
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/adapter",
+            base_model_relation="adapter",
+            source_model="base/compressed-model",
+            loader_scenario="adapter_requires_base",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "quantized_dependency_missing"
+    assert "compressed-tensors" in exc.value.message
+    assert mock_resolve_adapter_task_loader.called
+    assert mock_is_adapter.called
 
 
 @patch("model_loader_under_test.PeftModel.from_pretrained")
@@ -601,5 +777,40 @@ def test_load_model_uses_base_revision_from_adapter_metadata(
     assert is_adapter is True
     assert mock_from_pretrained.call_args.kwargs["revision"] == "base-rev"
     assert mock_peft_from_pretrained.call_args.kwargs["revision"] == "rev-a"
+    assert mock_resolve_base_model_reference.called
+    assert mock_is_adapter.called
+
+
+@patch(
+    "model_loader_under_test.PeftModel.from_pretrained",
+    side_effect=RuntimeError(
+        "Error(s) in loading state_dict for PeftModelForCausalLM:\n"
+        "\tsize mismatch for base_model.model.model.embed_tokens.weight: copying a param with shape "
+        "torch.Size([32002, 4096]) from checkpoint, the shape in current model is torch.Size([32000, 4096])."
+    ),
+)
+@patch("model_loader_under_test.hf_from_pretrained")
+@patch("model_loader_under_test.is_adapter_model", return_value=True)
+@patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/model", "base-rev"))
+def test_load_model_classifies_adapter_checkpoint_mismatch(
+    mock_resolve_base_model_reference,
+    mock_is_adapter,
+    mock_from_pretrained,
+    mock_peft_from_pretrained,
+):
+    base_model = Mock()
+    mock_from_pretrained.return_value = base_model
+
+    with pytest.raises(LoaderFailure) as exc:
+        load_model(
+            "org/adapter",
+            base_model_relation="adapter",
+            revision="rev-a",
+            loader_scenario="adapter_requires_base",
+        )
+
+    assert exc.value.stage == "load"
+    assert exc.value.reason == "adapter_base_checkpoint_mismatch"
+    assert mock_peft_from_pretrained.called
     assert mock_resolve_base_model_reference.called
     assert mock_is_adapter.called

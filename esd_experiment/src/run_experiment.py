@@ -13,6 +13,7 @@ Usage:
     python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
 import argparse
+import importlib
 import importlib.util
 import itertools
 import json
@@ -43,11 +44,36 @@ def _normalize_text(value) -> str:
 def _available_backends() -> set[str]:
     backends = set()
     if importlib.util.find_spec("gptqmodel") is not None:
-        backends.add("gptq")
+        try:
+            importlib.import_module("gptqmodel")
+            backends.add("gptq")
+        except Exception:
+            pass
     if importlib.util.find_spec("autoawq") is not None:
-        backends.add("awq")
+        try:
+            importlib.import_module("autoawq")
+            backends.add("awq")
+        except Exception:
+            pass
     if importlib.util.find_spec("gguf") is not None:
-        backends.add("gguf")
+        try:
+            importlib.import_module("gguf")
+            backends.add("gguf")
+        except Exception:
+            pass
+    if importlib.util.find_spec("compressed_tensors") is not None:
+        try:
+            importlib.import_module("compressed_tensors")
+            backends.add("compressed_tensors")
+        except Exception:
+            if importlib.util.find_spec("gptqmodel") is not None:
+                try:
+                    importlib.import_module("gptqmodel")
+                    backends.add("gptq")
+                    importlib.import_module("compressed_tensors")
+                    backends.add("compressed_tensors")
+                except Exception:
+                    pass
     return backends
 
 
@@ -141,8 +167,6 @@ def _row_backend_status(
     effective_loader: str = "",
 ) -> str:
     backend_status = _normalize_text(row.get("backend_status"))
-    if backend_status:
-        return backend_status
 
     loader_scenario = _normalize_text(row.get("loader_scenario"))
     resolved_loader = _normalize_text(effective_loader)
@@ -154,6 +178,10 @@ def _row_backend_status(
             row.get("Type"),
             row.get("Type_lb"),
             row.get("model_id"),
+            row.get("source_model"),
+            row.get("base_model"),
+            row.get("base_model_name_or_path"),
+            row.get("parent_model"),
         )
         if _normalize_text(value)
     ).lower()
@@ -167,15 +195,22 @@ def _row_backend_status(
         )
         if _normalize_text(value)
     ).lower()
+    required_backend = ""
     if resolved_loader == "gguf" or loader_scenario == "gguf" or ".gguf" in file_blob:
-        return "available" if "gguf" in available_backends else "missing"
-    if resolved_loader in {"awq", "gptq"}:
-        return "available" if resolved_loader in available_backends else "missing"
+        required_backend = "gguf"
+    elif resolved_loader == "compressed_tensors" or "compressed-tensors" in tags_blob or "compressed_tensors" in tags_blob:
+        required_backend = "compressed_tensors"
+    elif resolved_loader in {"awq", "gptq"}:
+        required_backend = resolved_loader
+    elif "awq" in tags_blob:
+        required_backend = "awq"
+    elif "gptq" in tags_blob:
+        required_backend = "gptq"
+    if required_backend:
+        return "available" if required_backend in available_backends else "missing"
+    if backend_status:
+        return backend_status
     if loader_scenario == "quantized_transformers_native":
-        if "awq" in tags_blob:
-            return "available" if "awq" in available_backends else "missing"
-        if "gptq" in tags_blob:
-            return "available" if "gptq" in available_backends else "missing"
         return ""
     return ""
 

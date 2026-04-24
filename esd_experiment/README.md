@@ -22,7 +22,13 @@ python analyze_results.py --results_dir ../analysis_runs/phase2/example_run --ve
 
 Canonical phase-2 outputs belong under `../analysis_runs/phase2/`.
 
-Phase-2 runs now use a preflight eligibility step before GPU dispatch. The explicit loader paths are `standard_causal`, `seq2seq`, `multimodal`, `adapter_requires_base`, `gptq`, `awq`, and `gguf`. Loader hints remain primary, but preflight and loading also use optional curated fields such as `files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when present. Run summaries are derived from per-model success artifacts plus terminal/failure records, not dispatcher logs alone.
+Phase-2 runs now use a preflight eligibility step before GPU dispatch. The explicit loader paths in the main lane are `standard_causal`, `seq2seq`, `sequence_classification`, `multimodal`, `adapter_requires_base`, `gptq`, `gguf`, and `compressed_tensors`. Loader hints remain primary, but preflight and loading also use optional curated fields such as `files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when present. Run summaries are derived from per-model success artifacts plus terminal/failure records, not dispatcher logs alone.
+
+Main support matrix:
+- supported in the main env: standard HF text checkpoints, PEFT adapters, GPTQ, bitsandbytes, GGUF
+- conditionally supported: `compressed_tensors` when the backend imports cleanly in the active runtime
+- not in the main lane: `awq`
+- explicitly unsupported: `exl2` / `quantized_alt_format`
 
 ## Documentation
 
@@ -54,6 +60,8 @@ esd_experiment/
 ✅ **PEFT Adapter Support** - Robust loading and merging of LoRA/PEFT adapters  
 ✅ **Multimodal Support** - Llava-style image-text-to-text models load through the multimodal auto class  
 ✅ **Quantized-Native Support** - Common HF-native 4-bit repos work when the required quant backend is available  
+✅ **GGUF Support** - Main-env support for the Transformers `gguf_file=...` path  
+✅ **Compressed-Tensors Path** - Loader path is wired, but actual runtime support depends on the backend importing cleanly in the active environment  
 ✅ **Resume Capability** - Skip already-analyzed models automatically  
 ✅ **Parallel Processing** - Dispatch multiple models across GPUs  
 ✅ **Error Handling** - Retry logic and failure tracking  
@@ -97,7 +105,9 @@ Legacy three-column CSVs (`model_id,base_model_relation,source_model`) remain su
 ### Loader Notes
 
 - `multimodal_transformers` routes through `AutoModelForImageTextToText`.
+- the loader prefers task-head auto classes first and can fall back to plain `AutoModel` when a checkpoint is still Transformers-loadable and ESD only needs analyzable weights
 - `quantized_transformers_native` only gets backend-gated once the row resolves to an explicit `gptq` or `awq` path; otherwise it stays on the standard causal path until the loader has stronger evidence.
+- `gguf` requires the `gguf` package, and `compressed_tensors` requires the `compressed_tensors` package to install **and** import cleanly in the active runtime.
 - When a quantized backend is missing or incompatible, the worker records a structured load failure instead of leaving partial outputs behind.
 
 ## Output

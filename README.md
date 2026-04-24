@@ -125,10 +125,19 @@ Model-Zoo/
 - **PEFT/LoRA adapter support**: Automatically detects and merges adapters with base models
 - **Multimodal support**: Routes Llava-style image-text-to-text repos through the appropriate auto model class
 - **Quantized-native support**: Supports common HF-native quantized repos when the required backend is available, and records structured incompatibility failures otherwise
+- **GGUF and conditional compressed-tensors support**: The loader supports the Transformers `gguf_file=...` path; `compressed-tensors` checkpoints are attempted only when the backend imports cleanly in the active runtime
 - **Config-aware routing**: Uses loader hints first, then config/task metadata such as `quantization_config`, `pipeline_tag`, and architectures to choose the most appropriate loader path
+- **Spectral-only fallback**: If a task-head auto class rejects an otherwise valid Transformers checkpoint, the loader can fall back to `AutoModel` so ESD can still analyze the base weights
 - **Revision support**: Analyze specific model versions (e.g., `model@revision`)
 - **Retry logic**: Handles transient HuggingFace Hub errors
 - **Memory management**: Automatic cleanup and cache clearing
+
+Main-env support matrix:
+
+- supported: `standard_causal`, `seq2seq`, `sequence_classification`, `multimodal`, `adapter_requires_base`, `gptq`, `gguf`
+- conditionally supported: `compressed_tensors` when the backend imports cleanly in the active environment
+- not in the main lane: `awq`
+- explicitly unsupported: `exl2` / `quantized_alt_format`
 
 ### 4. Production-Ready Workflow
 - **Resume capability**: Automatically skips already-analyzed models

@@ -136,22 +136,35 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
         row.get("Architecture_lb"),
     )
     pipeline_tag = _blob(row.get("pipeline_tag"), row.get("pipeline_tag_lb"))
-    tags = _blob(row.get("tags"), row.get("tags_lb"), row.get("Type"), row.get("Type_lb"))
+    tags = _blob(
+        row.get("tags"),
+        row.get("tags_lb"),
+        row.get("Type"),
+        row.get("Type_lb"),
+        row.get("quant_method"),
+    )
     loader_scenario = _text(row.get("loader_scenario"))
     base_model_relation = _text(row.get("base_model_relation"))
     model_id = _text(row.get("model_id"))
+    loader_hints = _blob(model_id, tags, loader_scenario)
 
     if base_model_relation in {"adapter", "lora", "peft"}:
         return "adapter_requires_base"
 
-    if loader_scenario == "gguf" or _has_gguf_artifact(row):
+    if "exl2" in loader_hints:
+        return "quantized_alt_format"
+
+    if loader_scenario == "gguf" or _has_gguf_artifact(row) or "gguf" in loader_hints:
         return "gguf"
 
-    if loader_scenario == "quantized_transformers_native":
-        if "awq" in tags or "awq" in model_id:
-            return "awq"
-        if "gptq" in tags or "gptq" in model_id:
-            return "gptq"
+    if "awq" in loader_hints:
+        return "awq"
+
+    if "gptq" in loader_hints:
+        return "gptq"
+
+    if "compressed-tensors" in loader_hints or "compressed_tensors" in loader_hints:
+        return "compressed_tensors"
 
     if (
         "forsequenceclassification" in architectures
@@ -186,7 +199,6 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
 def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
     effective_loader = resolve_effective_loader(row)
     base_model_relation = _text(row.get("base_model_relation"))
-    loader_scenario = _text(row.get("loader_scenario"))
     backend_status = _text(row.get("backend_status"))
     available_on_hub = _text(row.get("Available on the hub"))
 
@@ -208,6 +220,13 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader="adapter_requires_base",
         )
 
+    if effective_loader == "quantized_alt_format":
+        return PreflightDecision(
+            eligible=False,
+            reason="unsupported_loader_scenario",
+            effective_loader="quantized_alt_format",
+        )
+
     if effective_loader == "gguf":
         if not backend_status or backend_status in {"missing", "absent", "none"}:
             return PreflightDecision(
@@ -221,7 +240,7 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader="gguf",
         )
 
-    if effective_loader in {"gptq", "awq"}:
+    if effective_loader in {"gptq", "awq", "compressed_tensors"}:
         if not backend_status or backend_status in {"missing", "absent", "none"}:
             return PreflightDecision(
                 eligible=False,
