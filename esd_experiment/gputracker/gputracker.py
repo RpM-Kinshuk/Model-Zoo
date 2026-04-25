@@ -45,7 +45,8 @@ class GPUDispatcher:
         self.config = {
             "available_gpus": AVAILABLE_GPUS,
             "max_checks": MAX_NCHECK,
-            "memory_threshold_mb": GPU_MEMORY_THRESHOLD
+            "memory_threshold_mb": GPU_MEMORY_THRESHOLD,
+            "max_concurrent_jobs": None,
         }
         self.load_config()
     
@@ -55,10 +56,17 @@ class GPUDispatcher:
             if os.path.exists(self.config_path):
                 with open(self.config_path, 'r') as f:
                     new_config = json.load(f)
-                
+
+                merged_config = dict(self.config)
+                merged_config.update(new_config)
+                merged_config["available_gpus"] = [int(x) for x in merged_config["available_gpus"]]
+                if merged_config.get("max_concurrent_jobs") is not None:
+                    merged_config["max_concurrent_jobs"] = int(merged_config["max_concurrent_jobs"])
+                    if merged_config["max_concurrent_jobs"] < 1:
+                        raise ValueError("max_concurrent_jobs must be >= 1")
+
                 with self.lock:
-                    self.config.update(new_config)
-                    self.config["available_gpus"] = [int(x) for x in self.config["available_gpus"]]
+                    self.config = merged_config
                 
                 logging.info(f"✅ Configuration Reloaded: GPUs {self.config['available_gpus']}")
             else:
@@ -159,17 +167,45 @@ class GPUDispatcher:
 # --- Thread Classes ---
 
 class DispatchThread(threading.Thread):
-    def __init__(self, name, bash_command_list, logger, dispatcher, num_gpus_needed=1, config_path="gpu_config.json"):
+    def __init__(self, name, bash_command_list, logger, dispatcher, num_gpus_needed=1, config_path="gpu_config.json", max_concurrent_jobs=None):
         threading.Thread.__init__(self)
         self.name = name
         self.bash_command_list = bash_command_list
         self.logger = logger
         self.dispatcher = dispatcher
         self.num_gpus_needed = num_gpus_needed
+        self.max_concurrent_jobs = max_concurrent_jobs
+
+    def _current_max_concurrent_jobs(self):
+        if hasattr(self.dispatcher, "config"):
+            lock = getattr(self.dispatcher, "lock", None)
+            if lock is None:
+                config = self.dispatcher.config
+            else:
+                with lock:
+                    config = dict(self.dispatcher.config)
+            if "max_concurrent_jobs" in config:
+                return config["max_concurrent_jobs"]
+        return self.max_concurrent_jobs
+
+    def _has_job_slot(self, threads):
+        max_concurrent_jobs = self._current_max_concurrent_jobs()
+        if max_concurrent_jobs is None:
+            return True
+        return sum(1 for thread in threads if thread.is_alive()) < max_concurrent_jobs
+
+    def _wait_for_job_slot(self, threads):
+        while not self._has_job_slot(threads):
+            if self.dispatcher.shutdown_event.is_set() or self.dispatcher.drain_event.is_set():
+                return False
+            time.sleep(5)
+        return True
 
     def run(self):
         self.logger.info(f"Starting PID: {os.getpid()}: {self.name}")
         self.logger.info("Controls: SIGHUP=Reload Config, SIGUSR1=Drain/Graceful Exit, SIGINT=Kill")
+        if self.max_concurrent_jobs is not None:
+            self.logger.info(f"Max concurrent jobs: {self.max_concurrent_jobs}")
         
         threads = []
         for i, bash_command in enumerate(self.bash_command_list):
@@ -179,6 +215,9 @@ class DispatchThread(threading.Thread):
             # Check for Drain Mode
             if self.dispatcher.drain_event.is_set():
                 self.logger.warning("Drain mode active. Skipping remaining jobs.")
+                break
+
+            if not self._wait_for_job_slot(threads):
                 break
 
             time.sleep(0.3)

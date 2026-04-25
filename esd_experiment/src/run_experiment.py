@@ -305,6 +305,7 @@ def parse_args():
     # GPU configuration
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
     parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
+    parser.add_argument("--max_concurrent_jobs", type=int, default=None, help="Maximum number of model analysis jobs to run at once (default: GPU-limited)")
     parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
     parser.add_argument("--max_check", type=int, default=5, help="Number of checks to confirm GPU is free (default: 5)")
     
@@ -510,7 +511,8 @@ def create_runtime_config(args, config_path):
     config = {
         "available_gpus": args.gpus,
         "max_checks": args.max_check,
-        "memory_threshold_mb": args.gpu_memory_threshold
+        "memory_threshold_mb": args.gpu_memory_threshold,
+        "max_concurrent_jobs": args.max_concurrent_jobs,
     }
     try:
         with open(config_path, 'w') as f:
@@ -547,6 +549,7 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"GPUs: {args.gpus}")
     logger.info(f"GPUs per job: {args.num_gpus_per_job}")
+    logger.info(f"Max concurrent jobs: {args.max_concurrent_jobs if args.max_concurrent_jobs is not None else 'GPU-limited'}")
     logger.info(f"Fix fingers: {args.fix_fingers}")
     logger.info("=" * 80)
     
@@ -595,6 +598,7 @@ def main():
         dispatcher=dispatcher,
         config_path=config_path,
         num_gpus_needed=args.num_gpus_per_job,
+        max_concurrent_jobs=args.max_concurrent_jobs,
     )
     
     # Start and wait for completion

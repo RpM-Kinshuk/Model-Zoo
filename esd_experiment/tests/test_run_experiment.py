@@ -8,6 +8,7 @@ from types import ModuleType
 from unittest.mock import Mock
 
 import pandas as pd
+import pytest
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -105,6 +106,61 @@ def test_available_backends_includes_compressed_tensors(monkeypatch):
     monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
 
     assert run_experiment._available_backends() == {"gptq", "compressed_tensors"}
+
+
+def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiment.py",
+            "--model_list",
+            "models.csv",
+            "--output_dir",
+            "results",
+            "--max_concurrent_jobs",
+            "3",
+        ],
+    )
+
+    args = run_experiment.parse_args()
+
+    assert args.max_concurrent_jobs == 3
+
+
+def test_parse_args_rejects_non_positive_max_concurrent_jobs(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiment.py",
+            "--model_list",
+            "models.csv",
+            "--output_dir",
+            "results",
+            "--max_concurrent_jobs",
+            "0",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        run_experiment.parse_args()
+
+
+def test_create_runtime_config_includes_max_concurrent_jobs(tmp_path):
+    config_path = tmp_path / "gpu_config.json"
+    args = SimpleNamespace(
+        gpus=[0, 1, 2, 3],
+        max_check=5,
+        gpu_memory_threshold=500,
+        max_concurrent_jobs=3,
+    )
+
+    run_experiment.create_runtime_config(args, config_path)
+
+    assert config_path.read_text()
+    config = run_experiment.json.loads(config_path.read_text())
+    assert config["max_concurrent_jobs"] == 3
 
 
 def test_available_backends_uses_cuda_hidden_subprocess_not_parent_import(monkeypatch):
