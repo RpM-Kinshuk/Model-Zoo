@@ -316,6 +316,7 @@ def parse_args():
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter near-zero eigenvalues (default: True)")
     parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: True)")
     parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD computation across multiple GPUs (experimental)")
+    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
     
     # Experiment control
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
@@ -419,6 +420,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         if args.filter_zeros: cmd_parts.append("--filter_zeros")
         if args.use_svd: cmd_parts.append("--use_svd")
         if args.parallel_esd: cmd_parts.append("--parallel_esd")
+        if args.save_eigs: cmd_parts.append("--save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
         if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
         if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")

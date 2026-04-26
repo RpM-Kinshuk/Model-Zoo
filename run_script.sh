@@ -71,8 +71,10 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --num_gpus_per_job 1 \
   --fix_fingers DKS \
   --filter_zeros \
+  --save_eigs \
   --gpu_memory_threshold 500 \
-  --max_check 1
+  --max_check 1 \
+  --max_concurrent_jobs 4
 PY_EXIT_CODE=$?
 # set -e
 
