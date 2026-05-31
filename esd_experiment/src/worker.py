@@ -8,6 +8,9 @@ import os
 import argparse
 import warnings
 import traceback
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
@@ -287,11 +290,116 @@ def _terminal_status_path(output_dir: Path, model_id: str) -> Path:
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
         f.write("\n")
     temp_path.replace(path)
+
+
+
+def write_worker_heartbeat(
+    heartbeat_path: Path,
+    model_id: str,
+    state: str,
+    stage: str,
+    pid: Optional[int] = None,
+    stage_entered_at: Optional[str] = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "updated_at": now,
+        "stage_entered_at": stage_entered_at or now,
+        "model_id": model_id,
+        "state": state,
+        "stage": stage,
+        "pid": os.getpid() if pid is None else pid,
+        "origin": "worker",
+    }
+    _write_json_atomic(Path(heartbeat_path), payload)
+
+
+class HeartbeatReporter:
+    def __init__(self, heartbeat_path: Optional[str], model_id: str, interval_seconds: int = 30):
+        self.path = Path(heartbeat_path) if heartbeat_path else None
+        self.model_id = model_id
+        self.interval_seconds = interval_seconds
+        self.state = "starting"
+        self.stage = "start"
+        self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._stopped = False
+
+    def start(self, stage: str = "start", state: str = "running") -> None:
+        if self.path is None:
+            return
+        self.update(stage=stage, state=state)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def update(self, stage: str, state: Optional[str] = None) -> None:
+        if self.path is None or self._stopped:
+            return
+        with self._lock:
+            if stage != self.stage:
+                self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+            self.stage = stage
+            if state is not None:
+                self.state = state
+            current_state = self.state
+            current_stage = self.stage
+            current_stage_entered_at = self.stage_entered_at
+        write_worker_heartbeat(
+            self.path,
+            self.model_id,
+            current_state,
+            current_stage,
+            stage_entered_at=current_stage_entered_at,
+        )
+
+    def stop(self, state: str = "stopped", stage: Optional[str] = None) -> None:
+        if self.path is None or self._stopped:
+            return
+        with self._lock:
+            self._stopped = True
+            self.state = state
+            if stage is not None and stage != self.stage:
+                self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+                self.stage = stage
+            elif stage is not None:
+                self.stage = stage
+            current_state = self.state
+            current_stage = self.stage
+            current_stage_entered_at = self.stage_entered_at
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        write_worker_heartbeat(
+            self.path,
+            self.model_id,
+            current_state,
+            current_stage,
+            stage_entered_at=current_stage_entered_at,
+        )
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            with self._lock:
+                current_state = self.state
+                current_stage = self.stage
+                current_stage_entered_at = self.stage_entered_at
+            try:
+                write_worker_heartbeat(
+                    self.path,
+                    self.model_id,
+                    current_state,
+                    current_stage,
+                    stage_entered_at=current_stage_entered_at,
+                )
+            except Exception:
+                pass
 
 
 def record_terminal_status(
@@ -427,6 +535,8 @@ def main():
     temp_output_file = temp_output_path(output_file)
     metrics_file = output_dir / "metrics" / f"{safe_filename(args.model_id)}.h5"
     temp_metrics_file = temp_output_path(metrics_file)
+    heartbeat = HeartbeatReporter(os.environ.get("WORKER_HEARTBEAT_FILE"), display_name)
+    heartbeat.start(stage="prepare")
     
     # Check if already done
     try:
@@ -451,6 +561,7 @@ def main():
                     message="Results already exist",
                     attempt=0,
                 )
+                heartbeat.stop(state="success", stage="skip")
                 return 0
             if output_file.exists() or metrics_file.exists():
                 print("Incomplete existing outputs detected; clearing stale artifacts before regeneration")
@@ -464,6 +575,7 @@ def main():
         stage, reason, message = classify_runtime_error("save", exc)
         record_failure(output_dir, display_name, stage, reason, message, attempt=0)
         record_terminal_status(output_dir, display_name, "failed", stage, reason, message, attempt=0)
+        heartbeat.stop(state="failed", stage=stage)
         return 1
     
     print("=" * 80)
@@ -487,6 +599,7 @@ def main():
     
     for attempt in range(1, args.max_retries + 2):
         current_stage = "load"
+        heartbeat.update(stage=current_stage)
         try:
             print(f"\nAttempt {attempt}/{args.max_retries + 1}")
             
@@ -512,6 +625,7 @@ def main():
                 raise LoaderFailure(stage, reason, message) from exc
             
             current_stage = "analyze"
+            heartbeat.update(stage=current_stage)
             print(f"Model loaded successfully (adapter: {is_adapter})")
             print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
             
@@ -533,7 +647,7 @@ def main():
                     fix_fingers=fix_fingers_value,
                     filter_zeros=args.filter_zeros,
                     use_svd=args.use_svd,
-                    save_eigs=args.save_eigs,
+                    save_eigs=getattr(args, "save_eigs", False),
                     parallel=args.parallel_esd,
                 )
             except Exception as exc:
@@ -550,6 +664,7 @@ def main():
             
             # Save results
             current_stage = "save"
+            heartbeat.update(stage=current_stage)
             cleanup_temp_path(temp_output_file)
             cleanup_temp_path(temp_metrics_file)
             try:
@@ -593,6 +708,7 @@ def main():
                 message="Interrupted by user",
                 attempt=attempt,
             )
+            heartbeat.stop(state="failed", stage="interrupted")
             return 1
             
         except LoaderFailure as e:
@@ -617,6 +733,7 @@ def main():
                     message=error_msg,
                     attempt=attempt,
                 )
+                heartbeat.stop(state="failed", stage=e.stage)
                 break
         except Exception as e:
             error_msg = str(e)
@@ -641,6 +758,7 @@ def main():
                     message=message,
                     attempt=attempt,
                 )
+                heartbeat.stop(state="failed", stage=stage)
                 break
         
         finally:
@@ -662,6 +780,7 @@ def main():
                 message="Failed to analyze model",
                 attempt=args.max_retries + 1,
             )
+        heartbeat.stop(state="failed")
         return 1
     
     print(f"\n{'=' * 80}")
@@ -676,6 +795,7 @@ def main():
         message="Successfully completed",
         attempt=attempt,
     )
+    heartbeat.stop(state="success", stage="save")
     return 0
 
 

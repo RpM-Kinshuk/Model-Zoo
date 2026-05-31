@@ -163,6 +163,27 @@ def test_create_runtime_config_includes_max_concurrent_jobs(tmp_path):
     assert config["max_concurrent_jobs"] == 3
 
 
+
+def test_create_runtime_config_includes_stale_worker_controls(tmp_path):
+    config_path = tmp_path / "gpu_config.json"
+    args = SimpleNamespace(
+        gpus=[0, 1],
+        max_check=5,
+        gpu_memory_threshold=500,
+        max_concurrent_jobs=2,
+        stale_process_action="terminate",
+        heartbeat_timeout_seconds=123,
+        termination_grace_seconds=7,
+    )
+
+    run_experiment.create_runtime_config(args, config_path)
+
+    config = run_experiment.json.loads(config_path.read_text())
+    assert config["stale_process_action"] == "terminate"
+    assert config["heartbeat_timeout_seconds"] == 123
+    assert config["termination_grace_seconds"] == 7
+
+
 def test_available_backends_uses_cuda_hidden_subprocess_not_parent_import(monkeypatch):
     calls = []
 
@@ -414,6 +435,40 @@ def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_p
 
     assert "--loader_scenario 'seq2seq'" in commands[0]
     assert "--loader_scenario 'multimodal_transformers'" not in commands[0]
+
+
+
+def test_generate_worker_jobs_adds_supervision_metadata(tmp_path: Path):
+    df = pd.DataFrame(
+        [
+            {
+                "model_id": "org/model-a",
+                "revision_norm": "",
+                "source_model": "",
+                "base_model_relation": "",
+                "loader_scenario": "standard_transformers",
+                "primary_type_bucket": "base",
+            }
+        ]
+    )
+    args = SimpleNamespace(
+        fix_fingers="xmin_mid",
+        evals_thresh=1e-5,
+        bins=100,
+        filter_zeros=True,
+        use_svd=False,
+        parallel_esd=True,
+        overwrite=False,
+    )
+
+    jobs = run_experiment.generate_worker_jobs(df, tmp_path, args)
+
+    assert len(jobs) == 1
+    assert jobs[0].model_id == "org/model-a"
+    assert jobs[0].label == "org/model-a"
+    assert jobs[0].worker_id.startswith("000000-org--model-a")
+    assert jobs[0].terminal_status_path == str(tmp_path / "logs" / "terminal_status" / "org--model-a.json")
+    assert jobs[0].command == generate_commands(df, tmp_path, args)[0]
 
 
 def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):

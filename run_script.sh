@@ -50,7 +50,7 @@ clean_cache() {
 start_cleaner() {
   (
     while true; do
-      sleep 1500  # ~25 minutes
+      sleep 1800  # ~30 minutes
       clean_cache
     done
   ) &
@@ -74,7 +74,10 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --save_eigs \
   --gpu_memory_threshold 500 \
   --max_check 1 \
-  --max_concurrent_jobs 4
+  --max_concurrent_jobs 3 \
+  --stale_process_action log \
+  --heartbeat_timeout_seconds 7200 \
+  --termination_grace_seconds 30
 PY_EXIT_CODE=$?
 # set -e
 

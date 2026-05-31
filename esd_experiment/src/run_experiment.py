@@ -32,8 +32,9 @@ PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
-from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
+from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, WorkerJob
 from model_preflight import classify_row_preflight
+from model_loader import safe_filename
 
 
 BACKEND_PROBE_TIMEOUT_SECONDS = 30
@@ -308,6 +309,9 @@ def parse_args():
     parser.add_argument("--max_concurrent_jobs", type=int, default=None, help="Maximum number of model analysis jobs to run at once (default: GPU-limited)")
     parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
     parser.add_argument("--max_check", type=int, default=5, help="Number of checks to confirm GPU is free (default: 5)")
+    parser.add_argument("--stale_process_action", type=str, default="log", choices=["log", "terminate"], help="Action when a worker heartbeat is stale (default: log)")
+    parser.add_argument("--heartbeat_timeout_seconds", type=int, default=3600, help="Seconds without heartbeat before a worker is stale (default: 3600)")
+    parser.add_argument("--termination_grace_seconds", type=int, default=30, help="Seconds to wait after SIGTERM before SIGKILL for stale workers (default: 30)")
     
     # ESD configuration
     parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
@@ -324,7 +328,14 @@ def parse_args():
     parser.add_argument("--skip_failed", action="store_true", default=True, help="Skip models that previously failed (default: True)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
+        parser.error("--max_concurrent_jobs must be >= 1")
+    if args.heartbeat_timeout_seconds < 0:
+        parser.error("--heartbeat_timeout_seconds must be >= 0")
+    if args.termination_grace_seconds < 1:
+        parser.error("--termination_grace_seconds must be >= 1")
+    return args
 
 
 def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
@@ -420,7 +431,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         if args.filter_zeros: cmd_parts.append("--filter_zeros")
         if args.use_svd: cmd_parts.append("--use_svd")
         if args.parallel_esd: cmd_parts.append("--parallel_esd")
-        if args.save_eigs: cmd_parts.append("--save_eigs")
+        if getattr(args, "save_eigs", False): cmd_parts.append("--save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
         if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
         if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")
@@ -433,6 +444,28 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         commands.append(cmd)
     
     return commands
+
+
+def _worker_file_name(model_id: str) -> str:
+    return safe_filename(model_id)
+
+
+def generate_worker_jobs(model_df: pd.DataFrame, output_dir: Path, args) -> list[WorkerJob]:
+    commands = generate_commands(model_df, output_dir, args)
+    jobs = []
+    for index, (_, row) in enumerate(model_df.iterrows()):
+        model_id = _normalize_text(row["model_id"])
+        file_name = _worker_file_name(model_id)
+        jobs.append(
+            WorkerJob(
+                command=commands[index],
+                worker_id=f"{index:06d}-{file_name}",
+                label=model_id,
+                model_id=model_id,
+                terminal_status_path=str(output_dir / "logs" / "terminal_status" / f"{file_name}.json"),
+            )
+        )
+    return jobs
 
 
 def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
@@ -515,6 +548,9 @@ def create_runtime_config(args, config_path):
         "max_checks": args.max_check,
         "memory_threshold_mb": args.gpu_memory_threshold,
         "max_concurrent_jobs": args.max_concurrent_jobs,
+        "stale_process_action": getattr(args, "stale_process_action", "log"),
+        "heartbeat_timeout_seconds": getattr(args, "heartbeat_timeout_seconds", 3600),
+        "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
     }
     try:
         with open(config_path, 'w') as f:
@@ -552,6 +588,7 @@ def main():
     logger.info(f"GPUs: {args.gpus}")
     logger.info(f"GPUs per job: {args.num_gpus_per_job}")
     logger.info(f"Max concurrent jobs: {args.max_concurrent_jobs if args.max_concurrent_jobs is not None else 'GPU-limited'}")
+    logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s")
     logger.info(f"Fix fingers: {args.fix_fingers}")
     logger.info("=" * 80)
     
@@ -588,19 +625,20 @@ def main():
     
     # Generate commands
     logger.info("Generating commands...")
-    commands = generate_commands(model_df, output_dir, args)
-    logger.info(f"Generated {len(commands)} commands")
+    jobs = generate_worker_jobs(model_df, output_dir, args)
+    logger.info(f"Generated {len(jobs)} commands")
     
     # Create and start dispatch thread
     logger.info("Starting GPU dispatch thread...")
     dispatch_thread = DispatchThread(
         name="ESD Analysis",
-        bash_command_list=commands,
+        bash_command_list=jobs,
         logger=logger,
         dispatcher=dispatcher,
         config_path=config_path,
         num_gpus_needed=args.num_gpus_per_job,
         max_concurrent_jobs=args.max_concurrent_jobs,
+        state_dir=log_dir,
     )
     
     # Start and wait for completion

@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -807,3 +808,45 @@ def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_pa
     assert failure_record["stage"] == "save"
     assert failure_record["reason"] == "save_error"
     assert "rename failed" in failure_record["message"]
+
+
+def test_write_worker_heartbeat_records_generic_state(tmp_path: Path):
+    worker = load_worker_module()
+    heartbeat_path = tmp_path / "worker-heartbeat.json"
+
+    worker.write_worker_heartbeat(
+        heartbeat_path,
+        model_id="org/model",
+        state="running",
+        stage="loading",
+        pid=123,
+    )
+
+    payload = json.loads(heartbeat_path.read_text())
+    assert payload["model_id"] == "org/model"
+    assert payload["state"] == "running"
+    assert payload["stage"] == "loading"
+    assert payload["pid"] == 123
+    assert "updated_at" in payload
+    assert "stage_entered_at" in payload
+
+
+def test_heartbeat_reporter_keeps_stage_entered_at_until_stage_changes(tmp_path: Path):
+    worker = load_worker_module()
+    heartbeat_path = tmp_path / "worker-heartbeat.json"
+    reporter = worker.HeartbeatReporter(str(heartbeat_path), "org/model", interval_seconds=60)
+
+    reporter.start(stage="load")
+    first = json.loads(heartbeat_path.read_text())
+    reporter.update(stage="load")
+    second = json.loads(heartbeat_path.read_text())
+    time.sleep(0.001)
+    reporter.update(stage="analyze")
+    third = json.loads(heartbeat_path.read_text())
+    reporter.stop(state="success", stage="analyze")
+
+    assert first["stage"] == "load"
+    assert second["stage_entered_at"] == first["stage_entered_at"]
+    assert third["stage"] == "analyze"
+    assert third["stage_entered_at"] != first["stage_entered_at"]
+
