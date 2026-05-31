@@ -26,6 +26,9 @@ trap cleanup EXIT INT TERM
 # --- Environment ---
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
+export HF_HOME="/tmp/kinshuk/.cache/huggingface"
+export TRANSFORMERS_CACHE="/tmp/kinshuk/.cache/huggingface"
+export MODEL_ZOO_WORKER_CACHE_ROOT="/tmp/kinshuk/hf_worker_cache"
 
 # --- Paths ---
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -41,10 +44,8 @@ GPUS=(0 1 2)
 clean_cache() {
   echo "[$(date '+%F %T')] Clearing HF cache at: $HF_HOME"
   rm -rf "$HF_HOME" || true
-  rm -rf "/scratch/kinshuk/.cache/huggingface" || true
   # Recreate directories so the running process can continue using the paths
   mkdir -p "$HF_HOME" "$TRANSFORMERS_CACHE" || true
-  mkdir -p "/scratch/kinshuk/.cache/huggingface" || true
 }
 
 start_cleaner() {
@@ -58,7 +59,9 @@ start_cleaner() {
   echo "Started background cache cleaner (PID: $CLEANER_PID)"
 }
 
-start_cleaner
+# Worker caches are per-worker and cleaned by the dispatcher after each worker exits.
+# Do not delete the shared HF cache while workers are active.
+# start_cleaner
 
 echo "Running with GPUs: ${GPUS[*]}"
 
@@ -75,6 +78,7 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --gpu_memory_threshold 500 \
   --max_check 1 \
   --max_concurrent_jobs 3 \
+  --worker_cache_root "$MODEL_ZOO_WORKER_CACHE_ROOT" \
   --stale_process_action log \
   --heartbeat_timeout_seconds 7200 \
   --termination_grace_seconds 30

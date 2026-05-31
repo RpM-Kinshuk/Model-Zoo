@@ -198,6 +198,7 @@ class DispatchThread(threading.Thread):
         max_concurrent_jobs=None,
         state_dir=None,
         run_id=None,
+        cache_root=None,
     ):
         threading.Thread.__init__(self)
         self.name = name
@@ -206,7 +207,11 @@ class DispatchThread(threading.Thread):
         self.dispatcher = dispatcher
         self.num_gpus_needed = num_gpus_needed
         self.max_concurrent_jobs = max_concurrent_jobs
-        self.state_tracker = WorkerStateTracker(state_dir, run_id=run_id, logger=logger) if state_dir else None
+        self.state_tracker = (
+            WorkerStateTracker(state_dir, run_id=run_id, logger=logger, cache_root=cache_root)
+            if state_dir
+            else None
+        )
 
     def _current_max_concurrent_jobs(self):
         if hasattr(self.dispatcher, "config"):
@@ -317,6 +322,15 @@ class ChildThread(threading.Thread):
         self.daemon = True
         self._stale_logged = False
 
+    def _apply_worker_cache_env(self, env: dict, record: Optional[WorkerRecord]) -> None:
+        if record is None or record.cache_path is None:
+            return
+        cache_path = record.cache_path
+        env["HF_HOME"] = str(cache_path)
+        env["HF_HUB_CACHE"] = str(cache_path / "hub")
+        env["TRANSFORMERS_CACHE"] = str(cache_path / "transformers")
+        env["HF_DATASETS_CACHE"] = str(cache_path / "datasets")
+
     def _current_stale_config(self) -> tuple[str, int, int]:
         with self.dispatcher.lock:
             config = dict(self.dispatcher.config)
@@ -388,6 +402,7 @@ class ChildThread(threading.Thread):
             if self.state_tracker:
                 record = self.state_tracker.start_worker(self.job, self.cuda_devices)
                 env["WORKER_HEARTBEAT_FILE"] = str(record.heartbeat_path)
+                self._apply_worker_cache_env(env, record)
                 log_handle = open(record.log_path, "a", encoding="utf-8", buffering=1)
 
             proc = subprocess.Popen(

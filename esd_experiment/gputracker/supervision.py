@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import threading
 import time
@@ -92,6 +93,7 @@ class WorkerRecord:
     state: str = "running"
     reason: str = ""
     terminal_status_mtime_ns: Optional[int] = None
+    cache_path: Optional[Path] = None
 
     def to_state(self) -> dict:
         return {
@@ -107,6 +109,7 @@ class WorkerRecord:
             "heartbeat_path": str(self.heartbeat_path),
             "log_path": str(self.log_path),
             "command": self.job.command,
+            "cache_path": str(self.cache_path) if self.cache_path else "",
         }
 
 
@@ -118,6 +121,8 @@ class WorkerStateTracker:
         runner_pid: Optional[int] = None,
         logger=None,
         refresh_interval_seconds: int = 30,
+        cache_root=None,
+        cleanup_worker_cache: bool = True,
     ):
         self.log_dir = Path(log_dir)
         self.run_id = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
@@ -128,6 +133,8 @@ class WorkerStateTracker:
         self.records: dict[str, WorkerRecord] = {}
         self.lock = threading.Lock()
         self.refresh_interval_seconds = refresh_interval_seconds
+        self.cache_root = Path(cache_root) if cache_root else None
+        self.cleanup_worker_cache = cleanup_worker_cache
         self._stop_event = threading.Event()
         self.active_dir.mkdir(parents=True, exist_ok=True)
         self._write_current_state_locked()
@@ -165,6 +172,11 @@ class WorkerStateTracker:
     def _worker_id_for(self, job: WorkerJob) -> str:
         return safe_worker_name(job.worker_id or job.label or job.model_id or job.command)
 
+    def _cache_path_for(self, worker_id: str) -> Optional[Path]:
+        if self.cache_root is None:
+            return None
+        return self.cache_root / self.run_id / worker_id
+
     def start_worker(self, job: WorkerJob, cuda_devices: list[int], pid: Optional[int] = None, pgid: Optional[int] = None) -> WorkerRecord:
         worker_id = self._worker_id_for(job)
         normalized_job = WorkerJob(
@@ -174,6 +186,9 @@ class WorkerStateTracker:
             model_id=job.model_id,
             terminal_status_path=job.terminal_status_path,
         )
+        cache_path = self._cache_path_for(worker_id)
+        if cache_path is not None:
+            cache_path.mkdir(parents=True, exist_ok=True)
         record = WorkerRecord(
             job=normalized_job,
             cuda_devices=list(cuda_devices),
@@ -183,6 +198,7 @@ class WorkerStateTracker:
             pid=pid,
             pgid=pgid,
             terminal_status_mtime_ns=self._terminal_status_mtime_ns(normalized_job.terminal_status_path),
+            cache_path=cache_path,
         )
         with self.lock:
             self.records[worker_id] = record
@@ -313,5 +329,12 @@ class WorkerStateTracker:
                 pass
             except Exception as exc:
                 self.logger.warning(f"Could not remove active worker file {path}: {exc}")
+        if self.cleanup_worker_cache and record.cache_path is not None:
+            try:
+                shutil.rmtree(record.cache_path)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                self.logger.warning(f"Could not remove worker cache {record.cache_path}: {exc}")
         with self.lock:
             self._write_current_state_locked()

@@ -12,7 +12,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT.parent))
 
-from gputracker.gputracker import DispatchThread, GPUDispatcher, WorkerJob, WorkerStateTracker, heartbeat_is_stale
+from gputracker.gputracker import ChildThread, DispatchThread, GPUDispatcher, WorkerJob, WorkerStateTracker, heartbeat_is_stale
 import gputracker.gputracker as gputracker_module
 import gputracker.supervision as supervision_module
 
@@ -83,6 +83,51 @@ def test_gputracker_reexports_supervision_symbols():
     assert gputracker_module.WorkerJob is supervision_module.WorkerJob
     assert gputracker_module.WorkerStateTracker is supervision_module.WorkerStateTracker
     assert gputracker_module.heartbeat_is_stale is supervision_module.heartbeat_is_stale
+
+
+def test_worker_state_tracker_creates_and_deletes_worker_cache(tmp_path: Path):
+    tracker = WorkerStateTracker(
+        log_dir=tmp_path / "logs",
+        cache_root=tmp_path / "cache",
+        run_id="run-1",
+        runner_pid=42,
+    )
+    job = WorkerJob(
+        command="python worker.py",
+        worker_id="000001-org--model",
+        label="org/model",
+        model_id="org/model",
+        terminal_status_path=str(tmp_path / "logs" / "terminal_status" / "org--model.json"),
+    )
+
+    record = tracker.start_worker(job, cuda_devices=[0], pid=111, pgid=111)
+    assert record.cache_path == tmp_path / "cache" / "run-1" / "000001-org--model"
+    (record.cache_path / "hub").mkdir(parents=True)
+    (record.cache_path / "hub" / "blob").write_text("cached")
+
+    tracker.finish_worker(job.worker_id, returncode=0)
+
+    assert not record.cache_path.exists()
+
+
+def test_child_thread_sets_worker_cache_environment(tmp_path: Path):
+    thread = ChildThread(
+        name="test",
+        counter=1,
+        cuda_devices=[0],
+        job=WorkerJob(command="true"),
+        logger=_Logger(),
+        dispatcher=SimpleNamespace(),
+    )
+    env = {}
+    record = SimpleNamespace(cache_path=tmp_path / "worker-cache")
+
+    thread._apply_worker_cache_env(env, record)
+
+    assert env["HF_HOME"] == str(record.cache_path)
+    assert env["HF_HUB_CACHE"] == str(record.cache_path / "hub")
+    assert env["TRANSFORMERS_CACHE"] == str(record.cache_path / "transformers")
+    assert env["HF_DATASETS_CACHE"] == str(record.cache_path / "datasets")
 
 
 def test_dispatcher_loads_minimal_stale_process_config(tmp_path: Path):

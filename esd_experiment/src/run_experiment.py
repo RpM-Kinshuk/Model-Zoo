@@ -327,6 +327,7 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
     parser.add_argument("--skip_failed", action="store_true", default=True, help="Skip models that previously failed (default: True)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
+    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/tmp/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /tmp/kinshuk/hf_worker_cache)")
     
     args = parser.parse_args()
     if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
@@ -589,6 +590,7 @@ def main():
     logger.info(f"GPUs per job: {args.num_gpus_per_job}")
     logger.info(f"Max concurrent jobs: {args.max_concurrent_jobs if args.max_concurrent_jobs is not None else 'GPU-limited'}")
     logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s")
+    logger.info(f"Worker cache root: {args.worker_cache_root or 'disabled'}")
     logger.info(f"Fix fingers: {args.fix_fingers}")
     logger.info("=" * 80)
     
@@ -639,6 +641,7 @@ def main():
         num_gpus_needed=args.num_gpus_per_job,
         max_concurrent_jobs=args.max_concurrent_jobs,
         state_dir=log_dir,
+        cache_root=args.worker_cache_root or None,
     )
     
     # Start and wait for completion
