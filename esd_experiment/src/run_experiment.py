@@ -327,7 +327,7 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
     parser.add_argument("--skip_failed", action="store_true", default=True, help="Skip models that previously failed (default: True)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
-    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/tmp/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /tmp/kinshuk/hf_worker_cache)")
+    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
     args = parser.parse_args()
     if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
