@@ -523,16 +523,21 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
     """
     if overwrite: return model_df
     
-    completed = get_completed_models(output_dir, skip_failed)
-    if not completed: return model_df
+    completed = get_completed_models(output_dir, skip_failed=False)
+    skipped_models = set(completed)
+    if skip_failed:
+        skipped_models |= _terminal_failed_models(output_dir)
+        skipped_models |= _legacy_failed_models(output_dir)
+    if not skipped_models: return model_df
     
-    # Filter out completed models
-    mask = ~model_df["model_id"].isin(completed)
+    # Filter out completed and optionally previously failed models
+    mask = ~model_df["model_id"].isin(skipped_models)
     filtered_df = model_df[mask].reset_index(drop=True)
     
     skipped = len(model_df) - len(filtered_df)
     if skipped > 0:
-        print(f"Skipping {skipped} already-completed models")
+        skipped_label = "already-completed or failed" if skip_failed else "already-completed"
+        print(f"Skipping {skipped} {skipped_label} models")
     
     return filtered_df
 

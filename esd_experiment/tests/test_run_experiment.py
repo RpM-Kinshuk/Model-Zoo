@@ -505,6 +505,29 @@ def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Pat
     assert completed == set()
 
 
+def test_filter_models_to_run_skips_failed_models_when_requested(tmp_path: Path):
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "failed_models.txt").write_text(
+        "org/model-b\tload\tunsupported_loader_scenario\tunsupported\n"
+    )
+    model_df = pd.DataFrame(
+        [
+            {"model_id": "org/model-a"},
+            {"model_id": "org/model-b"},
+            {"model_id": "org/model-c"},
+        ]
+    )
+
+    filtered_df = run_experiment.filter_models_to_run(
+        model_df,
+        tmp_path,
+        skip_failed=True,
+    )
+
+    assert list(filtered_df["model_id"]) == ["org/model-a", "org/model-c"]
+
+
 def test_apply_preflight_separates_runnable_and_blocked_rows():
     model_df = pd.DataFrame(
         [
