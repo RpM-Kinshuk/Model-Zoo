@@ -128,6 +128,26 @@ def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
     assert args.max_concurrent_jobs == 3
 
 
+def test_parse_args_accepts_stage_timeout_seconds(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_experiment.py",
+            "--model_list",
+            "models.csv",
+            "--output_dir",
+            "results",
+            "--stage_timeout_seconds",
+            "load=10,analyze=20,default=30",
+        ],
+    )
+
+    args = run_experiment.parse_args()
+
+    assert args.stage_timeout_seconds == {"load": 10, "analyze": 20, "default": 30}
+
+
 def test_parse_args_rejects_non_positive_max_concurrent_jobs(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -173,6 +193,7 @@ def test_create_runtime_config_includes_stale_worker_controls(tmp_path):
         max_concurrent_jobs=2,
         stale_process_action="terminate",
         heartbeat_timeout_seconds=123,
+        stage_timeout_seconds={"load": 456, "default": 789},
         termination_grace_seconds=7,
     )
 
@@ -181,6 +202,7 @@ def test_create_runtime_config_includes_stale_worker_controls(tmp_path):
     config = run_experiment.json.loads(config_path.read_text())
     assert config["stale_process_action"] == "terminate"
     assert config["heartbeat_timeout_seconds"] == 123
+    assert config["stage_timeout_seconds"] == {"load": 456, "default": 789}
     assert config["termination_grace_seconds"] == 7
 
 

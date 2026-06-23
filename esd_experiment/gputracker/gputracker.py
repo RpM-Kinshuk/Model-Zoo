@@ -21,6 +21,7 @@ from .supervision import (
     WorkerRecord,
     WorkerStateTracker,
     heartbeat_is_stale,
+    heartbeat_stage_is_stale,
     safe_worker_name,
 )
 
@@ -59,9 +60,38 @@ class GPUDispatcher:
             "max_concurrent_jobs": None,
             "stale_process_action": "log",
             "heartbeat_timeout_seconds": 3600,
+            "stage_timeout_seconds": {
+                "load": 7200,
+                "analyze": 28800,
+                "save": 1800,
+                "default": 14400,
+            },
             "termination_grace_seconds": 60,
         }
         self.load_config()
+
+    def _normalize_stage_timeouts(self, value) -> dict[str, int]:
+        if value is None:
+            return {}
+        if isinstance(value, (int, float, str)):
+            try:
+                return {"default": max(0, int(value))}
+            except (TypeError, ValueError):
+                logging.error("Invalid stage_timeout_seconds %r; disabling stage timeouts", value)
+                return {}
+        if not isinstance(value, dict):
+            logging.error("Invalid stage_timeout_seconds %r; disabling stage timeouts", value)
+            return {}
+        normalized = {}
+        for stage, seconds in value.items():
+            stage_name = str(stage).strip()
+            if not stage_name:
+                continue
+            try:
+                normalized[stage_name] = max(0, int(seconds))
+            except (TypeError, ValueError):
+                logging.error("Invalid timeout for stage %r: %r; ignoring", stage, seconds)
+        return normalized
 
     def _normalize_config(self, raw_config: dict) -> dict:
         merged_config = dict(self.config)
@@ -77,6 +107,7 @@ class GPUDispatcher:
             action = "log"
         merged_config["stale_process_action"] = action
         merged_config["heartbeat_timeout_seconds"] = max(0, int(merged_config.get("heartbeat_timeout_seconds", 3600)))
+        merged_config["stage_timeout_seconds"] = self._normalize_stage_timeouts(merged_config.get("stage_timeout_seconds", {}))
         merged_config["termination_grace_seconds"] = max(1, int(merged_config.get("termination_grace_seconds", 60)))
         return merged_config
 
@@ -331,16 +362,17 @@ class ChildThread(threading.Thread):
         env["TRANSFORMERS_CACHE"] = str(cache_path / "transformers")
         env["HF_DATASETS_CACHE"] = str(cache_path / "datasets")
 
-    def _current_stale_config(self) -> tuple[str, int, int]:
+    def _current_stale_config(self) -> tuple[str, int, dict[str, int], int]:
         with self.dispatcher.lock:
             config = dict(self.dispatcher.config)
         return (
             config.get("stale_process_action", "log"),
             int(config.get("heartbeat_timeout_seconds", 3600)),
+            dict(config.get("stage_timeout_seconds", {})),
             int(config.get("termination_grace_seconds", 60)),
         )
 
-    def _terminate_stale_process(self, proc, grace_seconds: int) -> tuple[Optional[int], str]:
+    def _terminate_stale_process(self, proc, grace_seconds: int, reason: str) -> tuple[Optional[int], str]:
         try:
             pgid = os.getpgid(proc.pid)
         except Exception:
@@ -350,13 +382,32 @@ class ChildThread(threading.Thread):
         else:
             os.killpg(pgid, signal.SIGTERM)
         try:
-            return proc.wait(timeout=grace_seconds), "stale_heartbeat_timeout"
+            return proc.wait(timeout=grace_seconds), reason
         except subprocess.TimeoutExpired:
             if pgid is None:
                 proc.kill()
             else:
                 os.killpg(pgid, signal.SIGKILL)
-            return proc.wait(), "stale_heartbeat_timeout_killed"
+            return proc.wait(), f"{reason}_killed"
+
+    def _stale_worker_reason(
+        self,
+        record: WorkerRecord,
+        heartbeat_timeout_seconds: Optional[int] = None,
+        stage_timeout_seconds: Optional[dict[str, int]] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        if heartbeat_timeout_seconds is None or stage_timeout_seconds is None:
+            _, heartbeat_timeout_seconds, stage_timeout_seconds, _ = self._current_stale_config()
+        if heartbeat_is_stale(
+            record.heartbeat_path,
+            heartbeat_timeout_seconds,
+            started_at_epoch=record.started_at_epoch,
+        ):
+            return "stale_heartbeat_timeout", f"No heartbeat update for {heartbeat_timeout_seconds} seconds"
+        stage_stale = heartbeat_stage_is_stale(record.heartbeat_path, stage_timeout_seconds)
+        if stage_stale is not None:
+            return stage_stale
+        return None, None
 
     def _wait_for_process(self, proc, record: Optional[WorkerRecord]) -> tuple[Optional[int], Optional[str], Optional[str]]:
         while True:
@@ -365,20 +416,20 @@ class ChildThread(threading.Thread):
             except subprocess.TimeoutExpired:
                 if record is None:
                     continue
-                action, timeout_seconds, grace_seconds = self._current_stale_config()
-                if not heartbeat_is_stale(record.heartbeat_path, timeout_seconds, started_at_epoch=record.started_at_epoch):
+                action, timeout_seconds, stage_timeouts, grace_seconds = self._current_stale_config()
+                reason, message = self._stale_worker_reason(record, timeout_seconds, stage_timeouts)
+                if reason is None:
                     continue
-                message = f"No heartbeat update for {timeout_seconds} seconds"
                 if action == "terminate":
                     self.logger.warning(f"Terminating stale worker {record.job.worker_id}: {message}")
                     if self.state_tracker:
-                        self.state_tracker.mark_worker(record.job.worker_id, "terminating", "stale_heartbeat_timeout")
-                    returncode, reason = self._terminate_stale_process(proc, grace_seconds)
-                    return returncode, reason, message
+                        self.state_tracker.mark_worker(record.job.worker_id, "terminating", reason)
+                    returncode, finish_reason = self._terminate_stale_process(proc, grace_seconds, reason)
+                    return returncode, finish_reason, message
                 if not self._stale_logged:
                     self.logger.warning(f"Stale worker observed {record.job.worker_id}: {message}")
                     if self.state_tracker:
-                        self.state_tracker.mark_worker(record.job.worker_id, "stale", "stale_heartbeat_timeout")
+                        self.state_tracker.mark_worker(record.job.worker_id, "stale", reason)
                     self._stale_logged = True
 
     def run(self):

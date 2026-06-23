@@ -312,6 +312,12 @@ def parse_args():
     parser.add_argument("--stale_process_action", type=str, default="log", choices=["log", "terminate"], help="Action when a worker heartbeat is stale (default: log)")
     parser.add_argument("--heartbeat_timeout_seconds", type=int, default=3600, help="Seconds without heartbeat before a worker is stale (default: 3600)")
     parser.add_argument("--termination_grace_seconds", type=int, default=30, help="Seconds to wait after SIGTERM before SIGKILL for stale workers (default: 30)")
+    parser.add_argument(
+        "--stage_timeout_seconds",
+        type=str,
+        default="load=7200,analyze=28800,save=1800,default=14400",
+        help="Comma-separated stage=seconds limits for stale stages; use 0 to disable a stage (default: load=7200,analyze=28800,save=1800,default=14400)",
+    )
     
     # ESD configuration
     parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
@@ -336,7 +342,35 @@ def parse_args():
         parser.error("--heartbeat_timeout_seconds must be >= 0")
     if args.termination_grace_seconds < 1:
         parser.error("--termination_grace_seconds must be >= 1")
+    try:
+        args.stage_timeout_seconds = parse_stage_timeout_seconds(args.stage_timeout_seconds)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
+
+
+def parse_stage_timeout_seconds(value: str) -> dict[str, int]:
+    if value is None or not str(value).strip():
+        return {}
+    stage_timeouts = {}
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError("--stage_timeout_seconds entries must use stage=seconds")
+        stage, seconds = item.split("=", 1)
+        stage = stage.strip()
+        if not stage:
+            raise ValueError("--stage_timeout_seconds stage names cannot be empty")
+        try:
+            timeout_seconds = int(seconds.strip())
+        except ValueError as exc:
+            raise ValueError(f"--stage_timeout_seconds has non-integer timeout for stage {stage!r}") from exc
+        if timeout_seconds < 0:
+            raise ValueError("--stage_timeout_seconds values must be >= 0")
+        stage_timeouts[stage] = timeout_seconds
+    return stage_timeouts
 
 
 def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
@@ -556,6 +590,7 @@ def create_runtime_config(args, config_path):
         "max_concurrent_jobs": args.max_concurrent_jobs,
         "stale_process_action": getattr(args, "stale_process_action", "log"),
         "heartbeat_timeout_seconds": getattr(args, "heartbeat_timeout_seconds", 3600),
+        "stage_timeout_seconds": getattr(args, "stage_timeout_seconds", {}),
         "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
     }
     try:
@@ -594,7 +629,7 @@ def main():
     logger.info(f"GPUs: {args.gpus}")
     logger.info(f"GPUs per job: {args.num_gpus_per_job}")
     logger.info(f"Max concurrent jobs: {args.max_concurrent_jobs if args.max_concurrent_jobs is not None else 'GPU-limited'}")
-    logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s")
+    logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s; stage timeouts: {args.stage_timeout_seconds}")
     logger.info(f"Worker cache root: {args.worker_cache_root or 'disabled'}")
     logger.info(f"Fix fingers: {args.fix_fingers}")
     logger.info("=" * 80)

@@ -2,6 +2,7 @@ import sys
 import threading
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT.parent))
 
-from gputracker.gputracker import ChildThread, DispatchThread, GPUDispatcher, WorkerJob, WorkerStateTracker, heartbeat_is_stale
+from gputracker.gputracker import ChildThread, DispatchThread, GPUDispatcher, WorkerJob, WorkerStateTracker, heartbeat_is_stale, heartbeat_stage_is_stale
 import gputracker.gputracker as gputracker_module
 import gputracker.supervision as supervision_module
 
@@ -83,6 +84,7 @@ def test_gputracker_reexports_supervision_symbols():
     assert gputracker_module.WorkerJob is supervision_module.WorkerJob
     assert gputracker_module.WorkerStateTracker is supervision_module.WorkerStateTracker
     assert gputracker_module.heartbeat_is_stale is supervision_module.heartbeat_is_stale
+    assert gputracker_module.heartbeat_stage_is_stale is supervision_module.heartbeat_stage_is_stale
 
 
 def test_worker_state_tracker_creates_and_deletes_worker_cache(tmp_path: Path):
@@ -141,6 +143,7 @@ def test_dispatcher_loads_minimal_stale_process_config(tmp_path: Path):
                 "max_concurrent_jobs": 2,
                 "stale_process_action": "terminate",
                 "heartbeat_timeout_seconds": 123,
+                "stage_timeout_seconds": {"load": 456, "default": 789},
                 "termination_grace_seconds": 7,
             }
         )
@@ -151,6 +154,7 @@ def test_dispatcher_loads_minimal_stale_process_config(tmp_path: Path):
 
     assert dispatcher.config["stale_process_action"] == "terminate"
     assert dispatcher.config["heartbeat_timeout_seconds"] == 123
+    assert dispatcher.config["stage_timeout_seconds"] == {"load": 456, "default": 789}
     assert dispatcher.config["termination_grace_seconds"] == 7
 
 
@@ -162,6 +166,65 @@ def test_dispatcher_invalid_stale_action_fails_closed_to_log(tmp_path: Path):
     dispatcher = GPUDispatcher(config_path=str(config_path))
 
     assert dispatcher.config["stale_process_action"] == "log"
+
+
+def test_heartbeat_stage_stale_uses_stage_entered_at_not_heartbeat_mtime(tmp_path: Path):
+    heartbeat_path = tmp_path / "worker.heartbeat.json"
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "stage_entered_at": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+                "state": "running",
+                "stage": "load",
+            }
+        )
+    )
+
+    stale = heartbeat_stage_is_stale(
+        heartbeat_path,
+        {"load": 10, "default": 0},
+        now=datetime.now(timezone.utc).timestamp(),
+    )
+
+    assert stale == ("stale_stage_timeout", "Stage 'load' has not advanced for 10 seconds")
+
+
+def test_child_thread_prefers_stage_timeout_when_heartbeat_is_fresh(tmp_path: Path):
+    dispatcher = SimpleNamespace(
+        config={
+            "stale_process_action": "log",
+            "heartbeat_timeout_seconds": 3600,
+            "stage_timeout_seconds": {"load": 10, "default": 0},
+            "termination_grace_seconds": 1,
+        },
+        lock=threading.Lock(),
+    )
+    thread = ChildThread(
+        name="test",
+        counter=1,
+        cuda_devices=[0],
+        job=WorkerJob(command="true", worker_id="worker-1"),
+        logger=_Logger(),
+        dispatcher=dispatcher,
+    )
+    tracker = WorkerStateTracker(log_dir=tmp_path / "logs", run_id="run-1", runner_pid=42)
+    record = tracker.start_worker(thread.job, cuda_devices=[0], pid=111, pgid=111)
+    record.heartbeat_path.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "stage_entered_at": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+                "state": "running",
+                "stage": "load",
+            }
+        )
+    )
+
+    reason, message = thread._stale_worker_reason(record)
+
+    assert reason == "stale_stage_timeout"
+    assert message == "Stage 'load' has not advanced for 10 seconds"
 
 
 def test_worker_state_tracker_writes_current_state_and_deletes_active_files(tmp_path: Path):

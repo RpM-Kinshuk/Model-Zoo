@@ -70,6 +70,44 @@ def heartbeat_is_stale(
     return now - last_update > timeout_seconds
 
 
+def _timestamp_from_heartbeat(value) -> Optional[float]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        timestamp = value.strip()
+        if timestamp.endswith("Z"):
+            timestamp = f"{timestamp[:-1]}+00:00"
+        parsed = datetime.fromisoformat(timestamp)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return None
+
+
+def heartbeat_stage_is_stale(
+    heartbeat_path: Path,
+    stage_timeout_seconds: dict[str, int],
+    now: Optional[float] = None,
+) -> Optional[tuple[str, str]]:
+    if not stage_timeout_seconds:
+        return None
+    heartbeat = _read_json_optional(heartbeat_path)
+    if heartbeat is None:
+        return None
+    stage = str(heartbeat.get("stage") or "unknown").strip() or "unknown"
+    timeout_seconds = int(stage_timeout_seconds.get(stage, stage_timeout_seconds.get("default", 0)) or 0)
+    if timeout_seconds <= 0:
+        return None
+    stage_entered_at = _timestamp_from_heartbeat(heartbeat.get("stage_entered_at"))
+    if stage_entered_at is None:
+        return None
+    now = time.time() if now is None else now
+    if now - stage_entered_at > timeout_seconds:
+        return "stale_stage_timeout", f"Stage {stage!r} has not advanced for {timeout_seconds} seconds"
+    return None
+
+
 @dataclass(frozen=True)
 class WorkerJob:
     command: str
