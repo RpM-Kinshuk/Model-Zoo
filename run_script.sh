@@ -26,19 +26,20 @@ trap cleanup EXIT INT TERM
 # --- Environment ---
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
-export HF_HOME="/tmp/kinshuk/.cache/huggingface"
-export TRANSFORMERS_CACHE="/tmp/kinshuk/.cache/huggingface"
-export MODEL_ZOO_WORKER_CACHE_ROOT="/tmp/kinshuk/hf_worker_cache"
+export HF_HOME="/scratch/kinshuk/.cache/huggingface"
+export TRANSFORMERS_CACHE="/scratch/kinshuk/.cache/huggingface"
+export MODEL_ZOO_WORKER_CACHE_ROOT="/scratch/kinshuk/.cache/hf_worker_cache"
 
 # --- Paths ---
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 echo "Project Directory: $PROJECT_ROOT"
 
-OUTPUT_DIR="$PROJECT_ROOT/Model-Zoo/svd_results"
-# MODEL_LIST="$SCRIPT_DIR/esd_experiment/examples/atlas_models.csv"
-MODEL_LIST="$PROJECT_ROOT/data/sampled_metadata.csv"
-GPUS=(0 1 2)
+OUTPUT_DIR="$PROJECT_ROOT/results"
+mkdir -p "$OUTPUT_DIR" || true
+# MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
+MODEL_LIST="$SCRIPT_DIR/data/curated/model_zoo_phase2.csv"
+GPUS=(0 1 2 3 4 5 6 7)
 
 # --- Periodic cache cleaner  ---
 clean_cache() {
@@ -77,11 +78,13 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --save_eigs \
   --gpu_memory_threshold 500 \
   --max_check 1 \
-  --max_concurrent_jobs 3 \
+  --max_concurrent_jobs 1 \
   --worker_cache_root "$MODEL_ZOO_WORKER_CACHE_ROOT" \
-  --stale_process_action log \
+  --stale_process_action terminate \
   --heartbeat_timeout_seconds 7200 \
-  --termination_grace_seconds 30
+  --stage_timeout_seconds load=4000,analyze=28800,save=1800,default=14400 \
+  --termination_grace_seconds 30 \
+  --skip_failed
 PY_EXIT_CODE=$?
 # set -e
 
