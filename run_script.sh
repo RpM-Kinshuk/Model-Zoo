@@ -1,7 +1,7 @@
 #!/bin/bash
 set -uo pipefail
 
-# --- Signal-safe background cleaner management ---
+# ------------------ Signal-safe background cleaner management -----------------
 cleanup() {
     echo "Caught signal or exit. Cleaning up process group..."
     
@@ -23,50 +23,30 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# --- Environment ---
+# -------------------------------- Environment ---------------------------------
+CACHE_DIR="/scratch/kinshuk/.cache"
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
-export HF_HOME="/scratch/kinshuk/.cache/huggingface"
-export TRANSFORMERS_CACHE="/scratch/kinshuk/.cache/huggingface"
-export MODEL_ZOO_WORKER_CACHE_ROOT="/scratch/kinshuk/.cache/hf_worker_cache"
+export HF_TOKEN="<YOUR_HUGGINGFACE_TOKEN>"
+export HF_HOME="$CACHE_DIR/huggingface"
+export TRANSFORMERS_CACHE="$CACHE_DIR/huggingface"
+export WORKER_CACHE_ROOT="$CACHE_DIR/hf_worker_cache"
 
-# --- Paths ---
+# ------------------------------------ Paths -----------------------------------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 echo "Project Directory: $PROJECT_ROOT"
 
 OUTPUT_DIR="$PROJECT_ROOT/results"
 mkdir -p "$OUTPUT_DIR" || true
-# MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
 MODEL_LIST="$SCRIPT_DIR/data/curated/model_zoo_phase2.csv"
+# MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
 GPUS=(0 1 2 3 4 5 6 7)
 
-# --- Periodic cache cleaner  ---
-clean_cache() {
-  echo "[$(date '+%F %T')] Clearing HF cache at: $HF_HOME"
-  rm -rf "$HF_HOME" || true
-  # Recreate directories so the running process can continue using the paths
-  mkdir -p "$HF_HOME" "$TRANSFORMERS_CACHE" || true
-}
-
-start_cleaner() {
-  (
-    while true; do
-      sleep 1800  # ~30 minutes
-      clean_cache
-    done
-  ) &
-  CLEANER_PID=$!
-  echo "Started background cache cleaner (PID: $CLEANER_PID)"
-}
-
-# Worker caches are per-worker and cleaned by the dispatcher after each worker exits.
-# Do not delete the shared HF cache while workers are active.
-# start_cleaner
 
 echo "Running with GPUs: ${GPUS[*]}"
 
-# --- Run Python, capture exit code explicitly ---
+# ------------------ Run Python, capture exit code explicitly ------------------
 # set +e
 python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --model_list "$MODEL_LIST" \
@@ -79,10 +59,10 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --gpu_memory_threshold 500 \
   --max_check 1 \
   --max_concurrent_jobs 1 \
-  --worker_cache_root "$MODEL_ZOO_WORKER_CACHE_ROOT" \
+  --worker_cache_root "$WORKER_CACHE_ROOT" \
   --stale_process_action terminate \
   --heartbeat_timeout_seconds 7200 \
-  --stage_timeout_seconds load=4000,analyze=28800,save=1800,default=14400 \
+  --stage_timeout_seconds load=1800,analyze=28800,save=1800,default=14400 \
   --termination_grace_seconds 30 \
   --skip_failed
 PY_EXIT_CODE=$?
