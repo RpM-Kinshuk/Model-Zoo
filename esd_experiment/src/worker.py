@@ -8,8 +8,12 @@ import os
 import argparse
 import warnings
 import traceback
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 
 import torch
 import pandas as pd
@@ -25,7 +29,7 @@ EXPERIMENT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from model_loader import load_model, parse_model_string, safe_filename
+from model_loader import LoaderFailure, load_model, parse_model_string, safe_filename
 from net_esd import net_esd_estimator
 
 
@@ -35,8 +39,11 @@ def parse_args():
     
     # Model specification
     parser.add_argument("--model_id", type=str, required=True, help="HuggingFace model ID")
+    parser.add_argument("--revision", type=str, default="", help="Optional model revision")
     parser.add_argument("--base_model_relation", type=str, default="", help="Adapter relation type")
     parser.add_argument("--source_model", type=str, default="", help="Base model for adapters")
+    parser.add_argument("--loader_scenario", type=str, default="", help="Curated loader scenario hint")
+    parser.add_argument("--primary_type_bucket", type=str, default="", help="Curated type bucket")
     
     # Output
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
@@ -49,12 +56,21 @@ def parse_args():
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter zeros")
     parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD")
     parser.add_argument("--use_svd", action="store_true", default=True, help="Use SVD for ESD")
+    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
-    parser.add_argument("--max_retries", type=int, default=2, help="Max retry attempts")
+    parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
     
     return parser.parse_args()
+
+
+def resolve_model_revision(model_id: str, revision_override: str = ""):
+    """Resolve repo ID and effective revision, honoring curated overrides."""
+    repo_id, revision = parse_model_string(model_id)
+    if revision_override and revision_override.strip():
+        revision = revision_override.strip()
+    return repo_id, revision
 
 
 # ------------------------------------------------------------
@@ -155,6 +171,7 @@ def save_results(
     source_model: Optional[str] = None,
     base_model_relation: str = "",
     fix_fingers: str = "",
+    h5_output_path: Optional[Path] = None,
 ):
     """
     Save ESD metrics to CSV file and write alpha matrix to HDF5.
@@ -215,47 +232,282 @@ def save_results(
             print(f"  Layers: {len(alpha_values)}")
 
     # ---- Also write per-model H5 (alpha matrix) in output_dir/metrics ----
-    try:
-        longnames = metrics.get("longname", [])
-        alphas = metrics.get("alpha", [])
-        # strip trailing None if present
-        if longnames and longnames[-1] is None:
-            longnames = longnames[:-1]
-        if alphas and alphas[-1] is None:
-            alphas = alphas[:-1]
-        if len(longnames) != len(alphas):
-            n = min(len(longnames), len(alphas))
-            longnames, alphas = longnames[:n], alphas[:n]
+    longnames = metrics.get("longname", [])
+    alphas = metrics.get("alpha", [])
+    # strip trailing None if present
+    if longnames and longnames[-1] is None:
+        longnames = longnames[:-1]
+    if alphas and alphas[-1] is None:
+        alphas = alphas[:-1]
+    if len(longnames) != len(alphas):
+        n = min(len(longnames), len(alphas))
+        longnames, alphas = longnames[:n], alphas[:n]
 
-        if longnames and alphas:
-            mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+    if longnames and alphas:
+        mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+        if h5_output_path is None:
             h5_dir = output_path.parent.parent / "metrics"
             h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
-            relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
-            file_attrs = {
-                "full_name": model_id,
-                "source_model": source_model or "",
-                "base_model_relation": relation_attr,
-                "fix_fingers": fix_fingers,
-                "alpha_only": "true",
-            }
-            save_h5(h5_path, mat, module_names, num_layers, file_attrs)
-            print(f"Saved H5 alpha matrix to: {h5_path}")
         else:
-            print("Skipping H5 save (no longname/alpha)")
-    except Exception as e:
-        print(f"Failed to write H5 for {model_id}: {e}")
+            h5_path = h5_output_path
+        relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
+        file_attrs = {
+            "full_name": model_id,
+            "source_model": source_model or "",
+            "base_model_relation": relation_attr,
+            "fix_fingers": fix_fingers,
+            "alpha_only": "true",
+        }
+        save_h5(h5_path, mat, module_names, num_layers, file_attrs)
+        print(f"Saved H5 alpha matrix to: {h5_path}")
+    else:
+        print("Skipping H5 save (no longname/alpha)")
 
 
-def record_failure(output_dir: Path, model_id: str, error: str):
-    """Record failed model in failed_models.txt."""
-    failed_file = output_dir / "logs" / "failed_models.txt"
-    failed_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(failed_file, "a") as f:
-        f.write(f"{model_id}\t{error}\n")
-    
-    print(f"Recorded failure for {model_id}")
+def temp_output_path(final_path: Path) -> Path:
+    return final_path.with_name(f".{final_path.name}.tmp")
+
+
+def finalize_output_path(temp_path: Path, final_path: Path) -> None:
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path.replace(final_path)
+
+
+def cleanup_temp_path(path: Path) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def cleanup_output_artifacts(*paths: Path) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
+
+
+def _terminal_status_path(output_dir: Path, model_id: str) -> Path:
+    return output_dir / "logs" / "terminal_status" / f"{safe_filename(model_id)}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+        f.write("\n")
+    temp_path.replace(path)
+
+
+
+def write_worker_heartbeat(
+    heartbeat_path: Path,
+    model_id: str,
+    state: str,
+    stage: str,
+    pid: Optional[int] = None,
+    stage_entered_at: Optional[str] = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "updated_at": now,
+        "stage_entered_at": stage_entered_at or now,
+        "model_id": model_id,
+        "state": state,
+        "stage": stage,
+        "pid": os.getpid() if pid is None else pid,
+        "origin": "worker",
+    }
+    _write_json_atomic(Path(heartbeat_path), payload)
+
+
+class HeartbeatReporter:
+    def __init__(self, heartbeat_path: Optional[str], model_id: str, interval_seconds: int = 30):
+        self.path = Path(heartbeat_path) if heartbeat_path else None
+        self.model_id = model_id
+        self.interval_seconds = interval_seconds
+        self.state = "starting"
+        self.stage = "start"
+        self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._stopped = False
+
+    def start(self, stage: str = "start", state: str = "running") -> None:
+        if self.path is None:
+            return
+        self.update(stage=stage, state=state)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def update(self, stage: str, state: Optional[str] = None) -> None:
+        if self.path is None or self._stopped:
+            return
+        with self._lock:
+            if stage != self.stage:
+                self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+            self.stage = stage
+            if state is not None:
+                self.state = state
+            current_state = self.state
+            current_stage = self.stage
+            current_stage_entered_at = self.stage_entered_at
+        write_worker_heartbeat(
+            self.path,
+            self.model_id,
+            current_state,
+            current_stage,
+            stage_entered_at=current_stage_entered_at,
+        )
+
+    def stop(self, state: str = "stopped", stage: Optional[str] = None) -> None:
+        if self.path is None or self._stopped:
+            return
+        with self._lock:
+            self._stopped = True
+            self.state = state
+            if stage is not None and stage != self.stage:
+                self.stage_entered_at = datetime.now(timezone.utc).isoformat()
+                self.stage = stage
+            elif stage is not None:
+                self.stage = stage
+            current_state = self.state
+            current_stage = self.stage
+            current_stage_entered_at = self.stage_entered_at
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        write_worker_heartbeat(
+            self.path,
+            self.model_id,
+            current_state,
+            current_stage,
+            stage_entered_at=current_stage_entered_at,
+        )
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval_seconds):
+            with self._lock:
+                current_state = self.state
+                current_stage = self.stage
+                current_stage_entered_at = self.stage_entered_at
+            try:
+                write_worker_heartbeat(
+                    self.path,
+                    self.model_id,
+                    current_state,
+                    current_stage,
+                    stage_entered_at=current_stage_entered_at,
+                )
+            except Exception:
+                pass
+
+
+def record_terminal_status(
+    output_dir: Path,
+    model_id: str,
+    status: str,
+    stage: str,
+    reason: str,
+    message: str,
+    attempt: int = 0,
+):
+    """Record the final terminal outcome for a model."""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model_id": model_id,
+        "status": status,
+        "stage": stage,
+        "reason": reason,
+        "message": message,
+        "attempt": attempt,
+    }
+    _write_json_atomic(_terminal_status_path(output_dir, model_id), record)
+
+
+def record_failure(
+    output_dir: Path,
+    model_id: str,
+    stage: str,
+    reason: str,
+    message: str,
+    attempt: int,
+):
+    """Record machine-readable failure details and keep a text summary."""
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    jsonl_path = logs_dir / "failure_records.jsonl"
+    text_path = logs_dir / "failed_models.txt"
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model_id": model_id,
+        "stage": stage,
+        "reason": reason,
+        "message": message,
+        "attempt": attempt,
+    }
+
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with open(text_path, "a", encoding="utf-8") as f:
+        f.write(f"{model_id}\t{stage}\t{reason}\t{message}\n")
+
+    print(f"Recorded failure for {model_id}: {stage}/{reason}")
+
+
+def validate_metrics_output(metrics: dict):
+    longnames = metrics.get("longname", []) or []
+    alphas = metrics.get("alpha", []) or []
+    if longnames and longnames[-1] is None:
+        longnames = longnames[:-1]
+    if alphas and alphas[-1] is None:
+        alphas = alphas[:-1]
+    if not longnames:
+        return ("analyze", "analysis_empty")
+    usable_pairs = zip(longnames, alphas)
+    usable_alpha_count = sum(
+        1
+        for longname, alpha in usable_pairs
+        if longname is not None and not pd.isna(alpha)
+    )
+    if usable_alpha_count == 0:
+        return ("analyze", "analysis_empty")
+    return None
+
+
+def classify_retryable_failure(stage: str, reason: str) -> bool:
+    non_retryable_by_stage = {
+        "load": {
+            "unsupported_loader_scenario",
+            "adapter_base_unresolved",
+            "repo_missing_or_private",
+            "repo_gated",
+        },
+        "analyze": {"analysis_empty"},
+    }
+    retryable_by_stage = {
+        "load": {"model_load_error", "cuda_oom"},
+        "analyze": {"analysis_exception", "cuda_oom"},
+        "save": {"save_error", "cuda_oom"},
+    }
+
+    if reason in non_retryable_by_stage.get(stage, set()):
+        return False
+    if reason in retryable_by_stage.get(stage, set()):
+        return True
+    return False
+
+
+def classify_runtime_error(stage: str, error: Exception):
+    message = str(error)
+    lowered = message.lower()
+    if "out of memory" in lowered and "cuda" in lowered:
+        return stage, "cuda_oom", message
+    if stage == "load":
+        return stage, "model_load_error", message
+    if stage == "save":
+        return stage, "save_error", message
+    return stage, "analysis_exception", message
 
 
 def cleanup_model(model):
@@ -273,23 +525,58 @@ def main():
     """Main worker function."""
     args = parse_args()
     
-    # Parse model ID (may include revision)
-    repo_id, revision = parse_model_string(args.model_id)
+    # Parse model ID (may include revision) and allow curated revision override
+    repo_id, revision = resolve_model_revision(args.model_id, args.revision)
     display_name = args.model_id
     
     # Setup output path
     output_dir = Path(args.output_dir)
     output_file = output_dir / "stats" / f"{safe_filename(args.model_id)}.csv"
+    temp_output_file = temp_output_path(output_file)
+    metrics_file = output_dir / "metrics" / f"{safe_filename(args.model_id)}.h5"
+    temp_metrics_file = temp_output_path(metrics_file)
+    heartbeat = HeartbeatReporter(os.environ.get("WORKER_HEARTBEAT_FILE"), display_name)
+    heartbeat.start(stage="prepare")
     
     # Check if already done
-    if output_file.exists() and not args.overwrite:
-        print(f"Results already exist: {output_file}")
-        return 0
-    
-    # Create placeholder to indicate work in progress
-    if not args.overwrite:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.touch()
+    try:
+        if args.overwrite:
+            if output_file.exists() or metrics_file.exists() or temp_output_file.exists() or temp_metrics_file.exists():
+                print("Overwrite requested; clearing existing artifacts before regeneration")
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
+        else:
+            if output_file.exists() and metrics_file.exists():
+                print(f"Results already exist: {output_file}")
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="success",
+                    stage="skip",
+                    reason="already_complete",
+                    message="Results already exist",
+                    attempt=0,
+                )
+                heartbeat.stop(state="success", stage="skip")
+                return 0
+            if output_file.exists() or metrics_file.exists():
+                print("Incomplete existing outputs detected; clearing stale artifacts before regeneration")
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
+    except Exception as exc:
+        stage, reason, message = classify_runtime_error("save", exc)
+        record_failure(output_dir, display_name, stage, reason, message, attempt=0)
+        record_terminal_status(output_dir, display_name, "failed", stage, reason, message, attempt=0)
+        heartbeat.stop(state="failed", stage=stage)
+        return 1
     
     print("=" * 80)
     print(f"Analyzing model: {display_name}")
@@ -311,6 +598,8 @@ def main():
     success = False
     
     for attempt in range(1, args.max_retries + 2):
+        current_stage = "load"
+        heartbeat.update(stage=current_stage)
         try:
             print(f"\nAttempt {attempt}/{args.max_retries + 1}")
             
@@ -319,15 +608,24 @@ def main():
             base_relation = args.base_model_relation if args.base_model_relation else None
             source_model = args.source_model if args.source_model else None
             
-            model, is_adapter = load_model(
-                repo_id=repo_id,
-                base_model_relation=base_relation,
-                source_model=source_model,
-                device_map=args.device_map,
-                torch_dtype=torch.float16,
-                revision=revision,
-            )
+            try:
+                model, is_adapter = load_model(
+                    repo_id=repo_id,
+                    base_model_relation=base_relation,
+                    source_model=source_model,
+                    device_map=args.device_map,
+                    torch_dtype=torch.float16,
+                    revision=revision,
+                    loader_scenario=args.loader_scenario if args.loader_scenario else None,
+                )
+            except LoaderFailure as exc:
+                raise exc
+            except Exception as exc:
+                stage, reason, message = classify_runtime_error("load", exc)
+                raise LoaderFailure(stage, reason, message) from exc
             
+            current_stage = "analyze"
+            heartbeat.update(stage=current_stage)
             print(f"Model loaded successfully (adapter: {is_adapter})")
             print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
             
@@ -341,29 +639,57 @@ def main():
             print("\nRunning ESD analysis...")
             fix_fingers_value = None if args.fix_fingers == "DKS" else args.fix_fingers
             
-            metrics = net_esd_estimator(
-                model,
-                EVALS_THRESH=args.evals_thresh,
-                bins=args.bins,
-                fix_fingers=fix_fingers_value,
-                filter_zeros=args.filter_zeros,
-                use_svd=args.use_svd,
-                parallel=args.parallel_esd,
-            )
+            try:
+                metrics = net_esd_estimator(
+                    model,
+                    EVALS_THRESH=args.evals_thresh,
+                    bins=args.bins,
+                    fix_fingers=fix_fingers_value,
+                    filter_zeros=args.filter_zeros,
+                    use_svd=args.use_svd,
+                    save_eigs=getattr(args, "save_eigs", False),
+                    parallel=args.parallel_esd,
+                )
+            except Exception as exc:
+                stage, reason, message = classify_runtime_error("analyze", exc)
+                raise LoaderFailure(stage, reason, message) from exc
+
+            validation_failure = validate_metrics_output(metrics)
+            if validation_failure is not None:
+                stage, reason = validation_failure
+                raise LoaderFailure(stage, reason, "ESD analysis returned no layer metrics")
             
             print(f"ESD analysis completed successfully")
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
             
             # Save results
-            save_results(
-                metrics,
-                output_file,
-                display_name,
-                is_adapter,
-                source_model if is_adapter else None,
-                base_model_relation=args.base_model_relation or "",
-                fix_fingers=args.fix_fingers or "",
-            )
+            current_stage = "save"
+            heartbeat.update(stage=current_stage)
+            cleanup_temp_path(temp_output_file)
+            cleanup_temp_path(temp_metrics_file)
+            try:
+                save_results(
+                    metrics,
+                    temp_output_file,
+                    display_name,
+                    is_adapter,
+                    source_model if is_adapter else None,
+                    base_model_relation=args.base_model_relation or "",
+                    fix_fingers=args.fix_fingers or "",
+                    h5_output_path=temp_metrics_file,
+                )
+                finalize_output_path(temp_output_file, output_file)
+                if temp_metrics_file.exists():
+                    finalize_output_path(temp_metrics_file, metrics_file)
+            except Exception as exc:
+                cleanup_output_artifacts(
+                    temp_output_file,
+                    temp_metrics_file,
+                    output_file,
+                    metrics_file,
+                )
+                stage, reason, message = classify_runtime_error("save", exc)
+                raise LoaderFailure(stage, reason, message) from exc
             
             success = True
             break
@@ -371,39 +697,105 @@ def main():
         except KeyboardInterrupt:
             print("\nInterrupted by user")
             cleanup_model(model)
-            if output_file.exists() and output_file.stat().st_size == 0:
-                output_file.unlink()
+            cleanup_temp_path(temp_output_file)
+            cleanup_temp_path(temp_metrics_file)
+            record_terminal_status(
+                output_dir,
+                display_name,
+                status="failed",
+                stage="save",
+                reason="interrupted",
+                message="Interrupted by user",
+                attempt=attempt,
+            )
+            heartbeat.stop(state="failed", stage="interrupted")
             return 1
             
-        except Exception as e:
+        except LoaderFailure as e:
             error_msg = str(e)
             print(f"\nAttempt {attempt} failed: {error_msg}")
-            
-            if attempt <= args.max_retries:
+
+            retryable = classify_retryable_failure(e.stage, e.reason)
+            if retryable and attempt <= args.max_retries:
                 print("Retrying...")
                 warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
             else:
                 print("\nAll attempts failed!")
                 print("Full traceback:")
                 traceback.print_exc()
-                
-                # Record failure
-                record_failure(output_dir, display_name, error_msg)
+                record_failure(output_dir, display_name, e.stage, e.reason, error_msg, attempt)
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="failed",
+                    stage=e.stage,
+                    reason=e.reason,
+                    message=error_msg,
+                    attempt=attempt,
+                )
+                heartbeat.stop(state="failed", stage=e.stage)
+                break
+        except Exception as e:
+            error_msg = str(e)
+            print(f"\nAttempt {attempt} failed: {error_msg}")
+
+            stage, reason, message = classify_runtime_error(current_stage, e)
+            retryable = classify_retryable_failure(stage, reason)
+            if retryable and attempt <= args.max_retries:
+                print("Retrying...")
+                warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
+            else:
+                print("\nAll attempts failed!")
+                print("Full traceback:")
+                traceback.print_exc()
+                record_failure(output_dir, display_name, stage, reason, message, attempt)
+                record_terminal_status(
+                    output_dir,
+                    display_name,
+                    status="failed",
+                    stage=stage,
+                    reason=reason,
+                    message=message,
+                    attempt=attempt,
+                )
+                heartbeat.stop(state="failed", stage=stage)
+                break
         
         finally:
             # Cleanup
             cleanup_model(model)
     
-    # Final cleanup of empty file if failed
+    cleanup_temp_path(temp_output_file)
+    cleanup_temp_path(temp_metrics_file)
+
     if not success:
-        if output_file.exists() and output_file.stat().st_size == 0:
-            output_file.unlink()
         print(f"\nFailed to analyze {display_name}")
+        if not _terminal_status_path(output_dir, display_name).exists():
+            record_terminal_status(
+                output_dir,
+                display_name,
+                status="failed",
+                stage="save",
+                reason="analysis_failed",
+                message="Failed to analyze model",
+                attempt=args.max_retries + 1,
+            )
+        heartbeat.stop(state="failed")
         return 1
     
     print(f"\n{'=' * 80}")
     print(f"Successfully completed: {display_name}")
     print(f"{'=' * 80}")
+    record_terminal_status(
+        output_dir,
+        display_name,
+        status="success",
+        stage="save",
+        reason="completed",
+        message="Successfully completed",
+        attempt=attempt,
+    )
+    heartbeat.stop(state="success", stage="save")
     return 0
 
 

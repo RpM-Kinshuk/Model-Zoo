@@ -1,7 +1,7 @@
 #!/bin/bash
 set -uo pipefail
 
-# --- Signal-safe background cleaner management ---
+# ------------------ Signal-safe background cleaner management -----------------
 cleanup() {
     echo "Caught signal or exit. Cleaning up process group..."
     
@@ -23,46 +23,30 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# --- Environment ---
+# -------------------------------- Environment ---------------------------------
+CACHE_DIR="/scratch/kinshuk/.cache"
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
+: "${HF_TOKEN:?Please export HF_TOKEN in your shell before running (do not hardcode it in run_script.sh)}"; export HF_TOKEN
+export HF_HOME="$CACHE_DIR/huggingface"
+export TRANSFORMERS_CACHE="$CACHE_DIR/huggingface"
+export WORKER_CACHE_ROOT="$CACHE_DIR/hf_worker_cache"
 
-# --- Paths ---
+# ------------------------------------ Paths -----------------------------------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 echo "Project Directory: $PROJECT_ROOT"
 
-OUTPUT_DIR="$PROJECT_ROOT/Model-Zoo/svd_results"
-# MODEL_LIST="$SCRIPT_DIR/esd_experiment/examples/atlas_models.csv"
-MODEL_LIST="$PROJECT_ROOT/data/sampled_metadata.csv"
-GPUS=(0 1 2)
+OUTPUT_DIR="$PROJECT_ROOT/results"
+mkdir -p "$OUTPUT_DIR" || true
+MODEL_LIST="$SCRIPT_DIR/data/curated/model_zoo_phase2.csv"
+# MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
+GPUS=(0 1 2 3 4 5 6 7)
 
-# --- Periodic cache cleaner  ---
-clean_cache() {
-  echo "[$(date '+%F %T')] Clearing HF cache at: $HF_HOME"
-  rm -rf "$HF_HOME" || true
-  rm -rf "/scratch/kinshuk/.cache/huggingface" || true
-  # Recreate directories so the running process can continue using the paths
-  mkdir -p "$HF_HOME" "$TRANSFORMERS_CACHE" || true
-  mkdir -p "/scratch/kinshuk/.cache/huggingface" || true
-}
-
-start_cleaner() {
-  (
-    while true; do
-      sleep 1500  # ~25 minutes
-      clean_cache
-    done
-  ) &
-  CLEANER_PID=$!
-  echo "Started background cache cleaner (PID: $CLEANER_PID)"
-}
-
-start_cleaner
 
 echo "Running with GPUs: ${GPUS[*]}"
 
-# --- Run Python, capture exit code explicitly ---
+# ------------------ Run Python, capture exit code explicitly ------------------
 # set +e
 python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --model_list "$MODEL_LIST" \
@@ -71,8 +55,16 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --num_gpus_per_job 1 \
   --fix_fingers DKS \
   --filter_zeros \
+  --save_eigs \
   --gpu_memory_threshold 500 \
-  --max_check 1
+  --max_check 1 \
+  --max_concurrent_jobs 1 \
+  --worker_cache_root "$WORKER_CACHE_ROOT" \
+  --stale_process_action terminate \
+  --heartbeat_timeout_seconds 7200 \
+  --stage_timeout_seconds load=1800,analyze=28800,save=1800,default=14400 \
+  --termination_grace_seconds 30 \
+  --skip_failed
 PY_EXIT_CODE=$?
 # set -e
 

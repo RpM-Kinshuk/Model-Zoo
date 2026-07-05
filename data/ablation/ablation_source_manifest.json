@@ -1,0 +1,33 @@
+{
+  "builder": "fetch_data/build_ablation_dataset.py",
+  "created_from": "audited dry run /tmp/model_research_ablation_dryrun_current_old_rootfix_20260426",
+  "final_outputs": [
+    "ablation_candidates.csv",
+    "ablation_selected.csv",
+    "ablation_rejected.csv",
+    "ablation_overlap_audit.csv",
+    "ablation_summary.json"
+  ],
+  "max_eval_missing_fraction": 0.15,
+  "metadata_source": "data/sampled_metadata.csv",
+  "notes": [
+    "Old leaderboard aggregate rows are passed through the builder as the supplemental results source.",
+    "No model weights were downloaded during curation.",
+    "Final data was copied only after dry-run audits passed overlap, duplicate, and eval-coverage checks."
+  ],
+  "phase2_dedup_source": "Model-Zoo/data/curated/model_zoo_phase2.csv",
+  "source_datasets": [
+    {
+      "access": "datasets.load_dataset(split=train)",
+      "dataset": "open-llm-leaderboard/contents",
+      "role": "current leaderboard contents"
+    },
+    {
+      "access": "datasets.load_dataset(split=train)",
+      "dataset": "open-llm-leaderboard-old/contents",
+      "role": "old leaderboard aggregate contents",
+      "temporary_csv": "/tmp/model_research_old_leaderboard_contents_20260426.csv"
+    }
+  ],
+  "target_size": 5000
+}

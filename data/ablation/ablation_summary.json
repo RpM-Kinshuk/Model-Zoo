@@ -1,0 +1,34 @@
+{
+  "counts_by_esd_suitability": {
+    "good": 4382,
+    "usable_with_caution": 331
+  },
+  "counts_by_eval_source": {
+    "open_llm_leaderboard_contents": 793,
+    "open_llm_leaderboard_results": 3920
+  },
+  "counts_by_lineage_status": {
+    "known": 291,
+    "unknown": 4422
+  },
+  "counts_by_primary_type_bucket": {
+    "adapter": 1,
+    "finetune": 1174,
+    "merge": 30,
+    "moe": 328,
+    "multimodal": 1,
+    "other_text": 3178,
+    "quantized": 1
+  },
+  "eval_labelled_rows": 4662,
+  "missing_eval_percentage": 1.0821,
+  "missing_eval_rows": 51,
+  "phase2_overlap_rows": 4177,
+  "selected_rows": 4713,
+  "top_rejection_reasons": {
+    "duplicate_lower_priority": 272,
+    "phase2_duplicate": 4177,
+    "repo_inaccessible": 2674
+  },
+  "total_candidate_rows": 11836
+}

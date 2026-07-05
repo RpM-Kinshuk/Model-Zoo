@@ -10,24 +10,256 @@ This script:
 5. Saves per-model ESD metrics as CSV files
 
 Usage:
-    python run_esd_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
+    python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
 """
 import argparse
+import importlib
+import importlib.util
 import itertools
 import json
 import os
 import pandas as pd
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
+from typing import FrozenSet, Optional, Tuple
 
 # Add shells directory to path for gputracker
 SCRIPT_DIR = Path(__file__).parent
 EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
+sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
-from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher
+from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, WorkerJob
+from model_preflight import classify_row_preflight
+from model_loader import safe_filename
+
+
+BACKEND_PROBE_TIMEOUT_SECONDS = 30
+
+
+def _normalize_text(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _backend_import_probe(module_names: tuple[str, ...]) -> bool:
+    """Check backend imports in a GPU-hidden child process."""
+    code = "import importlib\n" + "\n".join(
+        f"importlib.import_module({module_name!r})" for module_name in module_names
+    )
+    env = os.environ.copy()
+    # Optional quantization packages can initialize CUDA on import. Keep the
+    # parent runner GPU-clean so the dispatcher can see truly free devices.
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=BACKEND_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _available_backends() -> set[str]:
+    backends = set()
+    if importlib.util.find_spec("gptqmodel") is not None:
+        if _backend_import_probe(("gptqmodel",)):
+            backends.add("gptq")
+    if importlib.util.find_spec("autoawq") is not None:
+        if _backend_import_probe(("autoawq",)):
+            backends.add("awq")
+    if importlib.util.find_spec("gguf") is not None:
+        if _backend_import_probe(("gguf",)):
+            backends.add("gguf")
+    if importlib.util.find_spec("compressed_tensors") is not None:
+        if _backend_import_probe(("compressed_tensors",)):
+            backends.add("compressed_tensors")
+        elif (
+            importlib.util.find_spec("gptqmodel") is not None
+            and _backend_import_probe(("gptqmodel", "compressed_tensors"))
+        ):
+            backends.add("gptq")
+            backends.add("compressed_tensors")
+    return backends
+
+
+@dataclass(frozen=True)
+class RunOutcomes:
+    success_count: int
+    failure_count: int
+    completed_models: FrozenSet[str]
+    failed_models: FrozenSet[str]
+
+
+def _completed_models_from_artifacts(output_dir: Path) -> set[str]:
+    completed = set()
+
+    stats_dir = output_dir / "stats"
+    metrics_dir = output_dir / "metrics"
+
+    if stats_dir.exists():
+        for csv_file in stats_dir.glob("*.csv"):
+            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
+            if not metrics_file.exists():
+                continue
+            model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+            completed.add(model_id)
+
+    return completed
+
+
+def _decode_model_id_from_terminal_file(path: Path) -> str:
+    return path.stem.replace("--", "/").replace("__", "@")
+
+
+def _terminal_failed_models(output_dir: Path) -> set[str]:
+    failed_models = set()
+    terminal_dir = output_dir / "logs" / "terminal_status"
+    if not terminal_dir.exists():
+        return failed_models
+
+    success_statuses = {"success", "succeeded", "completed", "done"}
+
+    for status_file in terminal_dir.glob("*.json"):
+        try:
+            payload = json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        records = payload if isinstance(payload, list) else [payload]
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            status = _normalize_text(record.get("status") or record.get("state") or record.get("outcome"))
+            if status in success_statuses or not status:
+                continue
+            model_id = _normalize_text(record.get("model_id")) or _decode_model_id_from_terminal_file(status_file)
+            failed_models.add(model_id)
+
+    return failed_models
+
+
+def _legacy_failed_models(output_dir: Path) -> set[str]:
+    failed_models = set()
+    failed_file = output_dir / "logs" / "failed_models.txt"
+    if not failed_file.exists():
+        return failed_models
+
+    for line in failed_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        model_id = line.strip().split("\t", 1)[0].strip()
+        if model_id:
+            failed_models.add(model_id)
+
+    return failed_models
+
+
+def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
+    completed_models = frozenset(_completed_models_from_artifacts(output_dir))
+    failed_models = set(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
+    failed_models -= set(completed_models)
+    return RunOutcomes(
+        success_count=len(completed_models),
+        failure_count=len(failed_models),
+        completed_models=completed_models,
+        failed_models=frozenset(failed_models),
+    )
+
+
+def _row_backend_status(
+    row: pd.Series,
+    available_backends: set[str],
+    effective_loader: str = "",
+) -> str:
+    backend_status = _normalize_text(row.get("backend_status"))
+
+    loader_scenario = _normalize_text(row.get("loader_scenario"))
+    resolved_loader = _normalize_text(effective_loader)
+    tags_blob = " ".join(
+        _normalize_text(value)
+        for value in (
+            row.get("tags"),
+            row.get("tags_lb"),
+            row.get("Type"),
+            row.get("Type_lb"),
+            row.get("model_id"),
+            row.get("source_model"),
+            row.get("base_model"),
+            row.get("base_model_name_or_path"),
+            row.get("parent_model"),
+        )
+        if _normalize_text(value)
+    ).lower()
+    file_blob = " ".join(
+        _normalize_text(value)
+        for value in (
+            row.get("files"),
+            row.get("file_names"),
+            row.get("repo_file_names"),
+            row.get("repo_files"),
+        )
+        if _normalize_text(value)
+    ).lower()
+    required_backend = ""
+    if resolved_loader == "gguf" or loader_scenario == "gguf" or ".gguf" in file_blob:
+        required_backend = "gguf"
+    elif resolved_loader == "compressed_tensors" or "compressed-tensors" in tags_blob or "compressed_tensors" in tags_blob:
+        required_backend = "compressed_tensors"
+    elif resolved_loader in {"awq", "gptq"}:
+        required_backend = resolved_loader
+    elif "awq" in tags_blob:
+        required_backend = "awq"
+    elif "gptq" in tags_blob:
+        required_backend = "gptq"
+    if required_backend:
+        return "available" if required_backend in available_backends else "missing"
+    if backend_status:
+        return backend_status
+    if loader_scenario == "quantized_transformers_native":
+        return ""
+    return ""
+
+
+def apply_preflight(model_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if model_df.empty:
+        empty = model_df.iloc[0:0].copy()
+        for column in ("preflight_eligible", "preflight_reason", "preflight_effective_loader"):
+            empty[column] = []
+        return empty, empty.copy()
+
+    available_backends = _available_backends()
+    runnable_rows = []
+    blocked_rows = []
+
+    for _, row in model_df.iterrows():
+        row_dict = row.to_dict()
+        initial_decision = classify_row_preflight(row_dict)
+        row_dict["backend_status"] = _row_backend_status(
+            row,
+            available_backends,
+            effective_loader=initial_decision.effective_loader,
+        )
+        decision = classify_row_preflight(row_dict)
+        annotated_row = dict(row_dict)
+        annotated_row["preflight_eligible"] = decision.eligible
+        annotated_row["preflight_reason"] = decision.reason
+        annotated_row["preflight_effective_loader"] = decision.effective_loader
+        if decision.eligible:
+            runnable_rows.append(annotated_row)
+        else:
+            blocked_rows.append(annotated_row)
+
+    return pd.DataFrame(runnable_rows), pd.DataFrame(blocked_rows)
 
 
 def parse_args():
@@ -36,16 +268,34 @@ def parse_args():
         description="Run large-scale ESD analysis with GPU resource management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-        Example model list CSV format:
+        Supported model list CSV formats:
+
+        Minimal / legacy:
             model_id,base_model_relation,source_model
             meta-llama/Llama-2-7b-hf,,
             some/adapter-model,adapter,meta-llama/Llama-2-7b-hf
             org/model@revision,,
 
+        Curated table (preferred):
+            model_id,revision_norm,base_model_relation,source_model,loader_scenario,primary_type_bucket,files,pipeline_tag,Architecture,Available on the hub
+            meta-llama/Llama-2-7b-hf,main,source,,,base_source
+            some/adapter-model,main,adapter,meta-llama/Llama-2-7b-hf,adapter_requires_base,adapter
+            org/model,commit-sha,,,,quantized
+
         Columns:
             - model_id: HuggingFace repo ID (required)
-            - base_model_relation: "adapter", "lora", "peft" for adapters (optional)
-            - source_model: Base model for adapters (optional, will be inferred if missing)
+            - revision_norm: explicit revision override (optional)
+            - base_model_relation: lineage / adapter relation (optional)
+            - source_model: base model for adapters (optional, inferred when possible)
+            - loader_scenario: curated loader hint such as standard_transformers or adapter_requires_base (optional)
+            - primary_type_bucket: curated type bucket for logging / analysis (optional)
+            - files / repo_files / file_names: optional artifact hints used by preflight for adapters and gguf
+            - pipeline_tag / Architecture / model_type fields: optional routing hints for seq2seq, classification, or multimodal models
+            - Available on the hub: optional curated availability gate
+
+        Notes:
+            - Preflight may replace loader_scenario with a more specific effective loader before dispatch.
+            - Quantized-native rows are only backend-gated when they resolve to an explicit gptq or awq path.
         """
     )
     
@@ -56,24 +306,71 @@ def parse_args():
     # GPU configuration
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
     parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
+    parser.add_argument("--max_concurrent_jobs", type=int, default=None, help="Maximum number of model analysis jobs to run at once (default: GPU-limited)")
     parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
     parser.add_argument("--max_check", type=int, default=5, help="Number of checks to confirm GPU is free (default: 5)")
+    parser.add_argument("--stale_process_action", type=str, default="log", choices=["log", "terminate"], help="Action when a worker heartbeat is stale (default: log)")
+    parser.add_argument("--heartbeat_timeout_seconds", type=int, default=3600, help="Seconds without heartbeat before a worker is stale (default: 3600)")
+    parser.add_argument("--termination_grace_seconds", type=int, default=30, help="Seconds to wait after SIGTERM before SIGKILL for stale workers (default: 30)")
+    parser.add_argument(
+        "--stage_timeout_seconds",
+        type=str,
+        default="load=7200,analyze=28800,save=1800,default=14400",
+        help="Comma-separated stage=seconds limits for stale stages; use 0 to disable a stage (default: load=7200,analyze=28800,save=1800,default=14400)",
+    )
     
     # ESD configuration
     parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter near-zero eigenvalues (default: True)")
-    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: True)")
+    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: False)")
     parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD computation across multiple GPUs (experimental)")
+    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
     
     # Experiment control
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
     parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
     parser.add_argument("--skip_failed", action="store_true", default=True, help="Skip models that previously failed (default: True)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
+    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
+        parser.error("--max_concurrent_jobs must be >= 1")
+    if args.heartbeat_timeout_seconds < 0:
+        parser.error("--heartbeat_timeout_seconds must be >= 0")
+    if args.termination_grace_seconds < 1:
+        parser.error("--termination_grace_seconds must be >= 1")
+    try:
+        args.stage_timeout_seconds = parse_stage_timeout_seconds(args.stage_timeout_seconds)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def parse_stage_timeout_seconds(value: str) -> dict[str, int]:
+    if value is None or not str(value).strip():
+        return {}
+    stage_timeouts = {}
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError("--stage_timeout_seconds entries must use stage=seconds")
+        stage, seconds = item.split("=", 1)
+        stage = stage.strip()
+        if not stage:
+            raise ValueError("--stage_timeout_seconds stage names cannot be empty")
+        try:
+            timeout_seconds = int(seconds.strip())
+        except ValueError as exc:
+            raise ValueError(f"--stage_timeout_seconds has non-integer timeout for stage {stage!r}") from exc
+        if timeout_seconds < 0:
+            raise ValueError("--stage_timeout_seconds values must be >= 0")
+        stage_timeouts[stage] = timeout_seconds
+    return stage_timeouts
 
 
 def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
@@ -84,6 +381,11 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         - model_id (required): HuggingFace repository ID
         - base_model_relation (optional): "adapter", "lora", "peft" for adapters
         - source_model (optional): Base model for adapters
+        - revision_norm (optional): Curated revision override
+        - loader_scenario (optional): Curated loader dispatch hint
+        - primary_type_bucket (optional): Curated type bucket
+        - optional routing/probe fields such as files, repo_files, pipeline_tag, Architecture,
+          model_type/config_model_type, and Available on the hub
     
     Returns:
         DataFrame with model information
@@ -95,17 +397,24 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
         raise ValueError(
             f"CSV must have 'model_id' column. Found columns: {list(df.columns)}"
         )
-    
-    # Add optional columns if missing
-    if "base_model_relation" not in df.columns:
-        df["base_model_relation"] = ""
-    if "source_model" not in df.columns:
-        df["source_model"] = ""
-    
+
+    optional_columns = [
+        "base_model_relation",
+        "source_model",
+        "revision_norm",
+        "loader_scenario",
+        "primary_type_bucket",
+        "lineage_status",
+        "candidate_source",
+    ]
+    for column in optional_columns:
+        if column not in df.columns:
+            df[column] = ""
+
     # Clean up data
-    df["model_id"] = df["model_id"].astype(str).str.strip()
-    df["base_model_relation"] = df["base_model_relation"].fillna("").astype(str).str.strip()
-    df["source_model"] = df["source_model"].fillna("").astype(str).str.strip()
+    df["model_id"] = df["model_id"].map(_normalize_text)
+    for column in optional_columns:
+        df[column] = df[column].map(_normalize_text)
     
     # Remove empty rows
     df = df[df["model_id"] != ""]
@@ -134,9 +443,14 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     worker_script = SCRIPT_DIR / "worker.py"
     
     for idx, row in model_df.iterrows():
-        model_id = row["model_id"]
-        base_relation = row["base_model_relation"]
-        source_model = row["source_model"]
+        model_id = _normalize_text(row["model_id"])
+        base_relation = _normalize_text(row["base_model_relation"])
+        source_model = _normalize_text(row["source_model"])
+        revision_norm = _normalize_text(row.get("revision_norm", ""))
+        loader_scenario = _normalize_text(
+            row.get("preflight_effective_loader", "") or row.get("loader_scenario", "")
+        )
+        primary_type_bucket = _normalize_text(row.get("primary_type_bucket", ""))
         
         # Build command
         cmd_parts = [
@@ -152,7 +466,11 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         if args.filter_zeros: cmd_parts.append("--filter_zeros")
         if args.use_svd: cmd_parts.append("--use_svd")
         if args.parallel_esd: cmd_parts.append("--parallel_esd")
+        if getattr(args, "save_eigs", False): cmd_parts.append("--save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
+        if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
+        if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")
+        if primary_type_bucket: cmd_parts.append(f"--primary_type_bucket '{primary_type_bucket}'")
         if base_relation: cmd_parts.append(f"--base_model_relation '{base_relation}'")
         if source_model: cmd_parts.append(f"--source_model '{source_model}'")
         
@@ -161,6 +479,28 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         commands.append(cmd)
     
     return commands
+
+
+def _worker_file_name(model_id: str) -> str:
+    return safe_filename(model_id)
+
+
+def generate_worker_jobs(model_df: pd.DataFrame, output_dir: Path, args) -> list[WorkerJob]:
+    commands = generate_commands(model_df, output_dir, args)
+    jobs = []
+    for index, (_, row) in enumerate(model_df.iterrows()):
+        model_id = _normalize_text(row["model_id"])
+        file_name = _worker_file_name(model_id)
+        jobs.append(
+            WorkerJob(
+                command=commands[index],
+                worker_id=f"{index:06d}-{file_name}",
+                label=model_id,
+                model_id=model_id,
+                terminal_status_path=str(output_dir / "logs" / "terminal_status" / f"{file_name}.json"),
+            )
+        )
+    return jobs
 
 
 def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
@@ -176,13 +516,14 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     """
     completed = set()
     
-    # Check for existing result CSVs
-    if output_dir.exists():
-        for csv_file in output_dir.glob("*.csv"):
-            # Skip special files
-            if csv_file.name in ["failed_models.txt", "summary.csv"]:
+    stats_dir = output_dir / "stats"
+    metrics_dir = output_dir / "metrics"
+
+    if stats_dir.exists():
+        for csv_file in stats_dir.glob("*.csv"):
+            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
+            if not metrics_file.exists():
                 continue
-            # Extract model ID from filename (reverse safe_filename transformation)
             model_id = csv_file.stem.replace("--", "/").replace("__", "@")
             completed.add(model_id)
     
@@ -191,7 +532,11 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
         failed_file = output_dir / "logs" / "failed_models.txt"
         if failed_file.exists():
             with open(failed_file, "r") as f:
-                failed = {line.strip() for line in f if line.strip()}
+                failed = {
+                    line.strip().split("\t", 1)[0]
+                    for line in f
+                    if line.strip()
+                }
             completed -= failed
     
     return completed
@@ -212,16 +557,21 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
     """
     if overwrite: return model_df
     
-    completed = get_completed_models(output_dir, skip_failed)
-    if not completed: return model_df
+    completed = get_completed_models(output_dir, skip_failed=False)
+    skipped_models = set(completed)
+    if skip_failed:
+        skipped_models |= _terminal_failed_models(output_dir)
+        skipped_models |= _legacy_failed_models(output_dir)
+    if not skipped_models: return model_df
     
-    # Filter out completed models
-    mask = ~model_df["model_id"].isin(completed)
+    # Filter out completed and optionally previously failed models
+    mask = ~model_df["model_id"].isin(skipped_models)
     filtered_df = model_df[mask].reset_index(drop=True)
     
     skipped = len(model_df) - len(filtered_df)
     if skipped > 0:
-        print(f"Skipping {skipped} already-completed models")
+        skipped_label = "already-completed or failed" if skip_failed else "already-completed"
+        print(f"Skipping {skipped} {skipped_label} models")
     
     return filtered_df
 
@@ -236,7 +586,12 @@ def create_runtime_config(args, config_path):
     config = {
         "available_gpus": args.gpus,
         "max_checks": args.max_check,
-        "memory_threshold_mb": args.gpu_memory_threshold
+        "memory_threshold_mb": args.gpu_memory_threshold,
+        "max_concurrent_jobs": args.max_concurrent_jobs,
+        "stale_process_action": getattr(args, "stale_process_action", "log"),
+        "heartbeat_timeout_seconds": getattr(args, "heartbeat_timeout_seconds", 3600),
+        "stage_timeout_seconds": getattr(args, "stage_timeout_seconds", {}),
+        "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
     }
     try:
         with open(config_path, 'w') as f:
@@ -273,6 +628,9 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"GPUs: {args.gpus}")
     logger.info(f"GPUs per job: {args.num_gpus_per_job}")
+    logger.info(f"Max concurrent jobs: {args.max_concurrent_jobs if args.max_concurrent_jobs is not None else 'GPU-limited'}")
+    logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s; stage timeouts: {args.stage_timeout_seconds}")
+    logger.info(f"Worker cache root: {args.worker_cache_root or 'disabled'}")
     logger.info(f"Fix fingers: {args.fix_fingers}")
     logger.info("=" * 80)
     
@@ -288,27 +646,42 @@ def main():
         overwrite=args.overwrite,
         skip_failed=args.skip_failed
     )
+
+    model_df, blocked_df = apply_preflight(model_df)
+    if len(blocked_df) > 0:
+        logger.info(f"Blocked by preflight: {len(blocked_df)} models")
+        logger.info(
+            "Preflight reasons: "
+            + ", ".join(sorted(set(blocked_df["preflight_reason"].astype(str).tolist())))
+        )
     
     if len(model_df) == 0:
-        logger.info("No models to process (all completed or skipped)")
+        logger.info("No models to process (all completed, skipped, or blocked by preflight)")
+        outcomes = collect_run_outcomes(output_dir)
+        logger.info(f"Successfully analyzed: {outcomes.success_count} models")
+        logger.info(f"Failed: {outcomes.failure_count} models")
+        logger.info(f"Results saved to: {output_dir}")
         return
     
     logger.info(f"Will process {len(model_df)} models")
     
     # Generate commands
     logger.info("Generating commands...")
-    commands = generate_commands(model_df, output_dir, args)
-    logger.info(f"Generated {len(commands)} commands")
+    jobs = generate_worker_jobs(model_df, output_dir, args)
+    logger.info(f"Generated {len(jobs)} commands")
     
     # Create and start dispatch thread
     logger.info("Starting GPU dispatch thread...")
     dispatch_thread = DispatchThread(
         name="ESD Analysis",
-        bash_command_list=commands,
+        bash_command_list=jobs,
         logger=logger,
         dispatcher=dispatcher,
         config_path=config_path,
         num_gpus_needed=args.num_gpus_per_job,
+        max_concurrent_jobs=args.max_concurrent_jobs,
+        state_dir=log_dir,
+        cache_root=args.worker_cache_root or None,
     )
     
     # Start and wait for completion
@@ -321,15 +694,9 @@ def main():
     logger.info("=" * 80)
     
     # Print summary
-    completed = get_completed_models(output_dir, skip_failed=False)
-    failed_file = output_dir / "failed_models.txt"
-    num_failed = 0
-    if failed_file.exists():
-        with open(failed_file, "r") as f:
-            num_failed = sum(1 for line in f if line.strip())
-    
-    logger.info(f"Successfully analyzed: {len(completed)} models")
-    logger.info(f"Failed: {num_failed} models")
+    outcomes = collect_run_outcomes(output_dir)
+    logger.info(f"Successfully analyzed: {outcomes.success_count} models")
+    logger.info(f"Failed: {outcomes.failure_count} models")
     logger.info(f"Results saved to: {output_dir}")
 
 

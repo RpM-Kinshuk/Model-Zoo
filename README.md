@@ -28,7 +28,7 @@ These metrics provide insights into:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/Model-Zoo.git
+git clone <your-model-zoo-remote> Model-Zoo
 cd Model-Zoo
 
 # Create conda environment (recommended)
@@ -45,28 +45,45 @@ pip install -r requirements.txt
 # 1. Test your setup
 python esd_experiment/tests/test_setup.py
 
-# 2. Create a model list
-cd esd_experiment
-cat > my_models.csv << EOF
-model_id,base_model_relation,source_model
-meta-llama/Llama-2-7b-hf,,
-microsoft/phi-2,,
-EOF
-
-# 3. Run analysis with GPU scheduling
-python run_experiment.py \
-    --model_list my_models.csv \
-    --output_dir results/ \
+# 2. Run analysis with the canonical curated list
+python esd_experiment/run_experiment.py \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3
 
-# 4. Analyze results
-python analyze_results.py --results_dir results/ --verbose
+# 3. Analyze results
+python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/example_run --verbose
 ```
+
+Legacy three-column CSVs (`model_id,base_model_relation,source_model`) are still accepted, but curated tables are now the preferred input.
+
+Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
+Phase-2 ESD runs use `data/curated/model_zoo_phase2.csv`, run a preflight eligibility step before dispatch, and keep output-root accounting under `analysis_runs/phase2/<run_name>/`.
+Preflight also consumes optional curated routing/probe fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when they are present.
+
+## Plug-And-Play Infra
+
+The reusable infra path is:
+
+```
+run_experiment.py -> gputracker -> worker.py -> model_loader.py -> net_esd
+```
+
+- `run_experiment.py` normalizes the model table, writes `gpu_config.json`, and queues worker jobs.
+- `gputracker/` owns GPU scheduling, runtime reloads, process-group cleanup, active worker state, stale-worker policy, and per-worker cache cleanup.
+- `worker.py` owns one model at a time: load, ESD analysis, output writes, heartbeat stage updates, and terminal status records.
+- `model_loader.py` keeps HuggingFace/model-format handling isolated from scheduling.
+- `net_esd/` is the reusable spectral-analysis core.
+
+For HPC-style runs, `run_script.sh` is the reference wrapper. It sets cache locations, launches the runner, and passes the scheduler/stale-worker knobs explicitly.
 
 ## 📁 Repository Structure
 
 ```
 Model-Zoo/
+├── data/curated/               # Canonical phase-1 artifacts and synced views
+├── analysis_runs/phase2/       # Canonical phase-2 run outputs
+├── docs/operations/            # Human operational docs for phases 1 and 2
 ├── net_esd/                      # Core ESD computation library
 │   ├── core.py                   # Main ESD algorithms (vectorized, multi-GPU)
 │   ├── utils.py                  # Helper functions (rank, entropy, layer filtering)
@@ -94,11 +111,11 @@ Model-Zoo/
 │   │   ├── sample.sh            # GPU scheduling examples
 │   │   └── atlas_models.csv     # Sample model list
 │   │
-│   └── docs/                    # Detailed documentation
-│       ├── README.md            # Full user guide
-│       ├── QUICKSTART.md        # 5-minute tutorial
-│       ├── OVERVIEW.md          # Architecture details
-│       └── GPU_FIX.md           # GPU troubleshooting
+│   └── docs/                    # Concise current references
+│       ├── README.md            # Docs index
+│       ├── QUICKSTART.md        # Minimal run command
+│       ├── OVERVIEW.md          # Infra boundaries
+│       └── GPU_FIX.md           # GPU and worker supervision
 │
 ├── scatter.py                   # Interactive metric comparison tool
 ├── atlas_metadata.csv           # Large-scale model metadata
@@ -117,26 +134,40 @@ Model-Zoo/
 ### 2. Intelligent GPU Management
 - **Dynamic GPU allocation**: Monitors GPU memory and assigns jobs automatically
 - **Runtime reconfiguration**: Modify GPU pool without restarting (via SIGHUP signal)
+- **Worker supervision**: Heartbeat timeout catches dead workers; stage timeout catches alive-but-stuck workers
+- **Active state**: `logs/current_state.json` shows current workers, stages, PIDs, PGIDs, GPUs, and cache paths
 - **Graceful shutdown**: SIGUSR1 for drain mode, SIGTERM/SIGINT for hard stop
 - **Per-job GPU assignment**: Control how many GPUs each model analysis uses
 
 ### 3. Robust Model Loading
 - **PEFT/LoRA adapter support**: Automatically detects and merges adapters with base models
+- **Multimodal support**: Routes Llava-style image-text-to-text repos through the appropriate auto model class
+- **Quantized-native support**: Supports common HF-native quantized repos when the required backend is available, and records structured incompatibility failures otherwise
+- **GGUF and conditional compressed-tensors support**: The loader supports the Transformers `gguf_file=...` path; `compressed-tensors` checkpoints are attempted only when the backend imports cleanly in the active runtime
+- **Config-aware routing**: Uses loader hints first, then config/task metadata such as `quantization_config`, `pipeline_tag`, and architectures to choose the most appropriate loader path
+- **Spectral-only fallback**: If a task-head auto class rejects an otherwise valid Transformers checkpoint, the loader can fall back to `AutoModel` so ESD can still analyze the base weights
 - **Revision support**: Analyze specific model versions (e.g., `model@revision`)
 - **Retry logic**: Handles transient HuggingFace Hub errors
-- **Memory management**: Automatic cleanup and cache clearing
+- **Memory/cache management**: Per-worker HuggingFace caches are isolated and removed when a worker finishes, fails, or is killed
+
+Main-env support matrix:
+
+- supported: `standard_causal`, `seq2seq`, `sequence_classification`, `multimodal`, `adapter_requires_base`, `gptq`, `gguf`
+- conditionally supported: `compressed_tensors` when the backend imports cleanly in the active environment
+- not in the main lane: `awq`
+- explicitly unsupported: `exl2` / `quantized_alt_format`
 
 ### 4. Production-Ready Workflow
 - **Resume capability**: Automatically skips already-analyzed models
-- **Failure tracking**: Records failed models with error messages
+- **Failure tracking**: Records failed models in both `logs/failed_models.txt` and machine-readable `logs/failure_records.jsonl`
 - **Progress logging**: Detailed logs for debugging and monitoring
 - **Output formats**: CSV (per-layer metrics) + HDF5 (alpha matrices for ML)
 
 ## 📊 Understanding the Output
 
-### Per-Model CSV Files (`results/stats/*.csv`)
+### Per-Model CSV Files
 
-Each model produces a CSV with one row per layer containing:
+Each model produces a CSV with one row per layer under the chosen run directory, for example `analysis_runs/phase2/example_run/stats/*.csv`:
 
 | Metric | Description | Use Case |
 |--------|-------------|----------|
@@ -148,20 +179,21 @@ Each model produces a CSV with one row per layer containing:
 | `D` | Kolmogorov-Smirnov statistic | Quality of power-law fit |
 | `num_evals` | Number of eigenvalues | Matrix size indicator |
 
-### Alpha Matrix HDF5 Files (`results/metrics/*.h5`)
+### Alpha Matrix HDF5 Files
 
 Structured format for machine learning pipelines:
 ```python
+import json
 import h5py
-with h5py.File('results/metrics/model.h5', 'r') as f:
+with h5py.File('analysis_runs/phase2/example_run/metrics/model.h5', 'r') as f:
     alpha_matrix = f['alpha'][:]  # Shape: (num_layers, num_modules)
     module_names = json.loads(f['alpha'].attrs['module_names_json'])
     print(f"Model: {f.attrs['full_name']}")
 ```
 
-### Summary Statistics (`results/summary.csv`)
+### Summary Statistics
 
-Aggregated metrics across all analyzed models for easy comparison.
+Aggregated metrics across all analyzed models for easy comparison. Canonical phase-2 summaries live under `analysis_runs/phase2/<run_name>/summary.csv`.
 
 ## 🔧 Advanced Usage
 
@@ -169,15 +201,21 @@ Aggregated metrics across all analyzed models for easy comparison.
 
 ```bash
 python esd_experiment/run_experiment.py \
-    --model_list models.csv \
-    --output_dir results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3 \
-    --fix_fingers xmin_peak \     # or 'xmin_mid' or 'DKS'
-    --evals_thresh 1e-6 \          # Eigenvalue threshold
-    --bins 100 \                   # Histogram bins for xmin_peak
-    --use_svd \                    # Use SVD (slower but more accurate)
-    --parallel_esd                 # Parallel layer processing
+    --fix_fingers xmin_peak \
+    --evals_thresh 1e-6 \
+    --bins 100 \
+    --use_svd \
+    --parallel_esd
 ```
+
+Optional tuning:
+- `--fix_fingers xmin_mid` or `DKS`
+- `--evals_thresh 1e-6`
+- `--bins 100`
+- `--use_svd`
 
 **ESD Methods:**
 - `xmin_mid`: Divide spectrum at midpoint (fast, default)
@@ -189,15 +227,29 @@ python esd_experiment/run_experiment.py \
 ```bash
 # Start experiment
 python esd_experiment/run_experiment.py \
-    --model_list models.csv \
-    --output_dir results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1 2 3 4 5 6 7 &
 
 PID=$!
 
-# Edit GPU pool during runtime
-echo '{"available_gpus": [4, 5, 6, 7], "max_checks": 5, "memory_threshold_mb": 500}' \
-    > results/gpu_config.json
+# Edit GPU pool and scheduling policy during runtime
+echo '{
+  "available_gpus": [4, 5, 6, 7],
+  "max_checks": 5,
+  "memory_threshold_mb": 500,
+  "max_concurrent_jobs": 2,
+  "stale_process_action": "log",
+  "heartbeat_timeout_seconds": 7200,
+  "stage_timeout_seconds": {
+    "load": 7200,
+    "analyze": 28800,
+    "save": 1800,
+    "default": 14400
+  },
+  "termination_grace_seconds": 30
+}' \
+    > analysis_runs/phase2/example_run/gpu_config.json
 
 # Reload configuration
 kill -HUP $PID
@@ -208,6 +260,8 @@ kill -USR1 $PID
 # Force stop
 kill -TERM $PID
 ```
+
+Use `stale_process_action: "log"` while tuning timeout windows. Switch to `"terminate"` when the timeouts are trusted.
 
 ### Working with Adapters
 
@@ -221,7 +275,7 @@ EOF
 
 python esd_experiment/run_experiment.py \
     --model_list adapters.csv \
-    --output_dir adapter_results/ \
+    --output_dir analysis_runs/phase2/example_run \
     --gpus 0 1
 ```
 
@@ -236,20 +290,20 @@ The framework automatically:
 ```bash
 # Generate summary statistics
 python esd_experiment/analyze_results.py \
-    --results_dir results/ \
+    --results_dir analysis_runs/phase2/example_run \
     --verbose
 
 # Compare two experiment runs (e.g., SVD vs Gram method)
 python scatter.py \
-    --dir_a results_svd/stats/ \
-    --dir_b results_gram/stats/ \
+    --dir_a analysis_runs/phase2/example_run/stats/ \
+    --dir_b analysis_runs/phase2/example_run_alt/stats/ \
     --metric alpha \
     --output alpha_comparison.png
 
 # Interactive plot (for Jupyter or local)
 python scatter.py \
-    --dir_a results_svd/stats/ \
-    --dir_b results_gram/stats/ \
+    --dir_a analysis_runs/phase2/example_run/stats/ \
+    --dir_b analysis_runs/phase2/example_run_alt/stats/ \
     --metric alpha \
     --interactive
 ```
@@ -265,18 +319,18 @@ python esd_experiment/tests/test_gpu.py
 
 # Run on small model list
 python esd_experiment/run_experiment.py \
-    --model_list esd_experiment/examples/atlas_models.csv \
-    --output_dir test_results/ \
+    --model_list data/curated/model_zoo_phase2.csv \
+    --output_dir analysis_runs/phase2/example_run \
     --limit 5 \
     --gpus 0
 ```
 
 ## 📚 Documentation
 
-- **[Quick Start Guide](esd_experiment/docs/QUICKSTART.md)**: Get running in 5 minutes
-- **[Full User Guide](esd_experiment/docs/README.md)**: Comprehensive documentation
-- **[Architecture Overview](esd_experiment/docs/OVERVIEW.md)**: Technical implementation details
-- **[GPU Troubleshooting](esd_experiment/docs/GPU_FIX.md)**: Common GPU issues and solutions
+- **[Quick Start](esd_experiment/docs/QUICKSTART.md)**: Minimal run command and output checks
+- **[ESD Experiment README](esd_experiment/README.md)**: Current scheduler/orchestration reference
+- **[Infra Overview](esd_experiment/docs/OVERVIEW.md)**: Component boundaries
+- **[GPU And Worker Supervision](esd_experiment/docs/GPU_FIX.md)**: GPU assignment and stale-worker policy
 
 ## 🛠️ Technical Details
 
@@ -356,7 +410,7 @@ If you use this framework in your research, please cite:
   title = {Model-Zoo: Large-Scale Neural Network Spectral Analysis},
   author = {Your Name},
   year = {2026},
-  url = {https://github.com/yourusername/Model-Zoo}
+  url = {https://github.com/RpM-Kinshuk/Model-Zoo.git}
 }
 ```
 
