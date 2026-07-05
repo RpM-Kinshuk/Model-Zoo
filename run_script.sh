@@ -27,7 +27,7 @@ trap cleanup EXIT INT TERM
 CACHE_DIR="/scratch/kinshuk/.cache"
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
-export HF_TOKEN="<YOUR_HUGGINGFACE_TOKEN>"
+: "${HF_TOKEN:?Please export HF_TOKEN in your shell before running (do not hardcode it in run_script.sh)}"; export HF_TOKEN
 export HF_HOME="$CACHE_DIR/huggingface"
 export TRANSFORMERS_CACHE="$CACHE_DIR/huggingface"
 export WORKER_CACHE_ROOT="$CACHE_DIR/hf_worker_cache"
