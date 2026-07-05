@@ -324,7 +324,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
     parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter near-zero eigenvalues (default: True)")
-    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: True)")
+    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: False)")
     parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD computation across multiple GPUs (experimental)")
     parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
     
