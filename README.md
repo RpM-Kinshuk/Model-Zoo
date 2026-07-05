@@ -61,6 +61,22 @@ Canonical phase-2 outputs belong under `analysis_runs/phase2/`.
 Phase-2 ESD runs use `data/curated/model_zoo_phase2.csv`, run a preflight eligibility step before dispatch, and keep output-root accounting under `analysis_runs/phase2/<run_name>/`.
 Preflight also consumes optional curated routing/probe fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when they are present.
 
+## Plug-And-Play Infra
+
+The reusable infra path is:
+
+```
+run_experiment.py -> gputracker -> worker.py -> model_loader.py -> net_esd
+```
+
+- `run_experiment.py` normalizes the model table, writes `gpu_config.json`, and queues worker jobs.
+- `gputracker/` owns GPU scheduling, runtime reloads, process-group cleanup, active worker state, stale-worker policy, and per-worker cache cleanup.
+- `worker.py` owns one model at a time: load, ESD analysis, output writes, heartbeat stage updates, and terminal status records.
+- `model_loader.py` keeps HuggingFace/model-format handling isolated from scheduling.
+- `net_esd/` is the reusable spectral-analysis core.
+
+For HPC-style runs, `run_script.sh` is the reference wrapper. It sets cache locations, launches the runner, and passes the scheduler/stale-worker knobs explicitly.
+
 ## 📁 Repository Structure
 
 ```
@@ -95,11 +111,11 @@ Model-Zoo/
 │   │   ├── sample.sh            # GPU scheduling examples
 │   │   └── atlas_models.csv     # Sample model list
 │   │
-│   └── docs/                    # Detailed documentation
-│       ├── README.md            # Full user guide
-│       ├── QUICKSTART.md        # 5-minute tutorial
-│       ├── OVERVIEW.md          # Architecture details
-│       └── GPU_FIX.md           # GPU troubleshooting
+│   └── docs/                    # Concise current references
+│       ├── README.md            # Docs index
+│       ├── QUICKSTART.md        # Minimal run command
+│       ├── OVERVIEW.md          # Infra boundaries
+│       └── GPU_FIX.md           # GPU and worker supervision
 │
 ├── scatter.py                   # Interactive metric comparison tool
 ├── atlas_metadata.csv           # Large-scale model metadata
@@ -118,6 +134,8 @@ Model-Zoo/
 ### 2. Intelligent GPU Management
 - **Dynamic GPU allocation**: Monitors GPU memory and assigns jobs automatically
 - **Runtime reconfiguration**: Modify GPU pool without restarting (via SIGHUP signal)
+- **Worker supervision**: Heartbeat timeout catches dead workers; stage timeout catches alive-but-stuck workers
+- **Active state**: `logs/current_state.json` shows current workers, stages, PIDs, PGIDs, GPUs, and cache paths
 - **Graceful shutdown**: SIGUSR1 for drain mode, SIGTERM/SIGINT for hard stop
 - **Per-job GPU assignment**: Control how many GPUs each model analysis uses
 
@@ -130,7 +148,7 @@ Model-Zoo/
 - **Spectral-only fallback**: If a task-head auto class rejects an otherwise valid Transformers checkpoint, the loader can fall back to `AutoModel` so ESD can still analyze the base weights
 - **Revision support**: Analyze specific model versions (e.g., `model@revision`)
 - **Retry logic**: Handles transient HuggingFace Hub errors
-- **Memory management**: Automatic cleanup and cache clearing
+- **Memory/cache management**: Per-worker HuggingFace caches are isolated and removed when a worker finishes, fails, or is killed
 
 Main-env support matrix:
 
@@ -215,8 +233,22 @@ python esd_experiment/run_experiment.py \
 
 PID=$!
 
-# Edit GPU pool during runtime
-echo '{"available_gpus": [4, 5, 6, 7], "max_checks": 5, "memory_threshold_mb": 500}' \
+# Edit GPU pool and scheduling policy during runtime
+echo '{
+  "available_gpus": [4, 5, 6, 7],
+  "max_checks": 5,
+  "memory_threshold_mb": 500,
+  "max_concurrent_jobs": 2,
+  "stale_process_action": "log",
+  "heartbeat_timeout_seconds": 7200,
+  "stage_timeout_seconds": {
+    "load": 7200,
+    "analyze": 28800,
+    "save": 1800,
+    "default": 14400
+  },
+  "termination_grace_seconds": 30
+}' \
     > analysis_runs/phase2/example_run/gpu_config.json
 
 # Reload configuration
@@ -228,6 +260,8 @@ kill -USR1 $PID
 # Force stop
 kill -TERM $PID
 ```
+
+Use `stale_process_action: "log"` while tuning timeout windows. Switch to `"terminate"` when the timeouts are trusted.
 
 ### Working with Adapters
 
@@ -293,10 +327,10 @@ python esd_experiment/run_experiment.py \
 
 ## 📚 Documentation
 
-- **[Quick Start Guide](esd_experiment/docs/QUICKSTART.md)**: Get running in 5 minutes
-- **[Full User Guide](esd_experiment/docs/README.md)**: Comprehensive documentation
-- **[Architecture Overview](esd_experiment/docs/OVERVIEW.md)**: Technical implementation details
-- **[GPU Troubleshooting](esd_experiment/docs/GPU_FIX.md)**: Common GPU issues and solutions
+- **[Quick Start](esd_experiment/docs/QUICKSTART.md)**: Minimal run command and output checks
+- **[ESD Experiment README](esd_experiment/README.md)**: Current scheduler/orchestration reference
+- **[Infra Overview](esd_experiment/docs/OVERVIEW.md)**: Component boundaries
+- **[GPU And Worker Supervision](esd_experiment/docs/GPU_FIX.md)**: GPU assignment and stale-worker policy
 
 ## 🛠️ Technical Details
 
