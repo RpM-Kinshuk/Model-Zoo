@@ -206,6 +206,37 @@ def test_validate_metrics_output_rejects_longnames_without_usable_alpha_values()
     assert worker.validate_metrics_output(metrics) == ("analyze", "analysis_empty")
 
 
+def test_save_results_keeps_eigenvalues_in_csv_and_h5_when_requested(tmp_path: Path):
+    worker = load_worker_module()
+    output_path = tmp_path / "stats" / "org--model.csv"
+    h5_path = tmp_path / "metrics" / "org--model.h5"
+    metrics = {
+        "longname": ["model.layers.0.mlp.up_proj", "model.layers.1.mlp.up_proj"],
+        "alpha": [1.5, 2.5],
+        "eigs": [
+            worker.np.array([1.0, 2.0], dtype=float),
+            worker.np.array([3.0, 4.0, 5.0], dtype=float),
+        ],
+    }
+
+    worker.save_results(
+        metrics,
+        output_path,
+        model_id="org/model",
+        is_adapter=False,
+        save_eigs=True,
+        h5_output_path=h5_path,
+    )
+
+    csv_text = output_path.read_text()
+    assert "eigs" in csv_text
+    assert "[1. 2.]" in csv_text
+    with worker.h5py.File(h5_path, "r") as h5:
+        assert "eigs" in h5
+        assert h5["eigs"][0].tolist() == [1.0, 2.0]
+        assert h5["eigs"][1].tolist() == [3.0, 4.0, 5.0]
+
+
 def test_classify_retryable_failure_marks_only_transient_cases_retryable():
     worker = load_worker_module()
 
@@ -849,4 +880,3 @@ def test_heartbeat_reporter_keeps_stage_entered_at_until_stage_changes(tmp_path:
     assert second["stage_entered_at"] == first["stage_entered_at"]
     assert third["stage"] == "analyze"
     assert third["stage_entered_at"] != first["stage_entered_at"]
-

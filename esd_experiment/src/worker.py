@@ -147,7 +147,14 @@ def build_tensor_from_pairs(longnames, alphas):
 
     return mat, module_names, num_layers
 
-def save_h5(h5_path: Path, mat: np.ndarray, module_names, num_layers: int, file_attrs: dict):
+def save_h5(
+    h5_path: Path,
+    mat: np.ndarray,
+    module_names,
+    num_layers: int,
+    file_attrs: dict,
+    eigs=None,
+):
     h5_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(h5_path, "w") as h5:
         dset = h5.create_dataset("alpha", data=mat)
@@ -155,6 +162,11 @@ def save_h5(h5_path: Path, mat: np.ndarray, module_names, num_layers: int, file_
         dset.attrs["num_modules"] = int(len(module_names))
         dset.attrs["missing_value"] = "NaN"
         dset.attrs["module_names_json"] = json.dumps(module_names, ensure_ascii=False)
+        if eigs is not None:
+            vlen_float = h5py.vlen_dtype(np.dtype("float64"))
+            eigs_dset = h5.create_dataset("eigs", (len(eigs),), dtype=vlen_float)
+            for i, values in enumerate(eigs):
+                eigs_dset[i] = np.asarray(values if values is not None else [], dtype=np.float64)
         h5.attrs["format_version"] = "1.0"
         for k, v in (file_attrs or {}).items():
             try:
@@ -172,6 +184,7 @@ def save_results(
     base_model_relation: str = "",
     fix_fingers: str = "",
     h5_output_path: Optional[Path] = None,
+    save_eigs: bool = False,
 ):
     """
     Save ESD metrics to CSV file and write alpha matrix to HDF5.
@@ -193,7 +206,7 @@ def save_results(
     
     # Add all metrics
     for key in metrics.keys():
-        if key == "eigs":
+        if key == "eigs" and not save_eigs:
             # Skip raw eigenvalues (too large)
             continue
         values = metrics[key]
@@ -234,14 +247,19 @@ def save_results(
     # ---- Also write per-model H5 (alpha matrix) in output_dir/metrics ----
     longnames = metrics.get("longname", [])
     alphas = metrics.get("alpha", [])
+    eigs = metrics.get("eigs", []) if save_eigs else None
     # strip trailing None if present
     if longnames and longnames[-1] is None:
         longnames = longnames[:-1]
     if alphas and alphas[-1] is None:
         alphas = alphas[:-1]
+    if eigs is not None and eigs and eigs[-1] is None:
+        eigs = eigs[:-1]
     if len(longnames) != len(alphas):
         n = min(len(longnames), len(alphas))
         longnames, alphas = longnames[:n], alphas[:n]
+        if eigs is not None:
+            eigs = eigs[:n]
 
     if longnames and alphas:
         mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
@@ -256,9 +274,9 @@ def save_results(
             "source_model": source_model or "",
             "base_model_relation": relation_attr,
             "fix_fingers": fix_fingers,
-            "alpha_only": "true",
+            "alpha_only": str(not save_eigs).lower(),
         }
-        save_h5(h5_path, mat, module_names, num_layers, file_attrs)
+        save_h5(h5_path, mat, module_names, num_layers, file_attrs, eigs=eigs)
         print(f"Saved H5 alpha matrix to: {h5_path}")
     else:
         print("Skipping H5 save (no longname/alpha)")
@@ -677,6 +695,7 @@ def main():
                     base_model_relation=args.base_model_relation or "",
                     fix_fingers=args.fix_fingers or "",
                     h5_output_path=temp_metrics_file,
+                    save_eigs=getattr(args, "save_eigs", False),
                 )
                 finalize_output_path(temp_output_file, output_file)
                 if temp_metrics_file.exists():
