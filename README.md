@@ -84,44 +84,58 @@ Use `--limit 5` for a smoke run. For the curated workflow, use `data/curated/mod
 ## The system, visually
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","primaryColor":"#EAF3FF","primaryTextColor":"#002F6C","primaryBorderColor":"#006CE4","lineColor":"#006CE4","secondaryColor":"#FFF4D6","tertiaryColor":"#E8F5EF","clusterBkg":"#F8FAFC","clusterBorder":"#8DB9E8"}}}%%
-flowchart LR
-    CSV[(Model CSV)] --> RUN
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":32,"rankSpacing":48},"themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","clusterBkg":"#F7FAFF","clusterBorder":"#8DB9E8","edgeLabelBackground":"#FFFFFF"}}}%%
+flowchart TB
+    INPUT[("📋  MODEL MANIFEST")]
 
-    subgraph ORCH[Orchestration]
-        direction TB
-        RUN[Validate + resume] --> PREFLIGHT{Preflight}
-        PREFLIGHT -->|eligible| QUEUE[Worker queue]
-        PREFLIGHT -->|blocked| DIAG[Diagnostic]
+    subgraph CONTROL["CONTROL PLANE  ·  plan once, adapt live"]
+        direction LR
+        PREP["①  PREPARE<br/>validate · normalize · resume"]
+        PREFLIGHT{"②  PREFLIGHT<br/>can this model run?"}
+        QUEUE["③  QUEUE<br/>one job per model"]
+        PREP --> PREFLIGHT
+        PREFLIGHT -->|eligible| QUEUE
     end
 
-    subgraph SCHED[GPU scheduler]
-        direction TB
-        QUEUE --> POLL[Poll GPU memory]
-        POLL --> RESERVE[Reserve GPU set]
-        RESERVE --> SUP[Launch + supervise]
+    subgraph EXECUTION["EXECUTION PLANE  ·  isolated per model"]
+        direction LR
+        ALLOC["④  ALLOCATE<br/>poll · confirm · reserve"]
+        LOAD["⑤  LOAD<br/>route · download · merge"]
+        ESD["⑥  ANALYZE<br/>cost-sort · parallel ESD"]
+        FINAL["⑦  FINALIZE<br/>validate · clean up"]
+        ALLOC --> LOAD --> ESD --> FINAL
     end
 
-    subgraph JOB[Isolated model worker]
-        direction TB
-        SUP --> LOAD[Load / merge model]
-        LOAD --> ESD[Parallel layer ESD]
-        ESD --> FINAL[Validate + finalize]
-    end
+    INPUT --> PREP
+    QUEUE --> ALLOC
+    PREFLIGHT -->|blocked| EXPLAIN["Known incompatibility<br/>explained before allocation"]
+    FINAL --> DONE(["✓  MODEL COMPLETE"])
 
-    CONFIG[[gpu_config.json]] -. SIGHUP .-> SCHED
-    SIGNALS[[Runtime signals]] -. drain / stop .-> SCHED
-    CACHE[(Worker cache)] <--> LOAD
+    CONFIG[["⚙  gpu_config.json"]] -. SIGHUP reload .-> ALLOC
+    SIGNALS[["↯  runtime signals"]] -. drain / stop .-> ALLOC
+    CACHE[("♻  isolated cache")] <--> LOAD
+    WATCH[["♥  heartbeat supervisor"]] -. observe .-> LOAD
+    WATCH -. observe .-> ESD
 
-    classDef gold fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef blue fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef green fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
-    classDef dark fill:#003B95,stroke:#003262,color:#FFFFFF,stroke-width:2px;
-    class CSV,CONFIG,SIGNALS,CACHE gold;
-    class RUN,QUEUE,POLL,RESERVE blue;
-    class PREFLIGHT,DIAG green;
-    class SUP,LOAD,ESD,FINAL dark;
+    classDef source fill:#FFF7E3,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
+    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
+    classDef decision fill:#FFF4D6,stroke:#D69E00,color:#3B2A00,stroke-width:3px;
+    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:3px;
+    classDef muted fill:#F2F4F7,stroke:#98A2B3,color:#344054,stroke-width:2px;
+    class INPUT,CONFIG,SIGNALS,CACHE,WATCH source;
+    class PREP,QUEUE control;
+    class PREFLIGHT decision;
+    class ALLOC,LOAD,ESD,FINAL execute;
+    class DONE success;
+    class EXPLAIN muted;
+
+    style CONTROL fill:#F7FAFF,stroke:#8DB9E8,stroke-width:2px,color:#002F6C
+    style EXECUTION fill:#F3F8FF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    linkStyle default stroke:#3978C5,stroke-width:2px
 ```
+
+<p align="center"><sub>Gold = inputs & controls&nbsp;&nbsp;·&nbsp;&nbsp;Light blue = orchestration&nbsp;&nbsp;·&nbsp;&nbsp;Navy = GPU execution&nbsp;&nbsp;·&nbsp;&nbsp;Green = successful completion</sub></p>
 
 | Component | Owns |
 | --- | --- |
@@ -134,32 +148,51 @@ flowchart LR
 ## Two levels of parallelism
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#006CE4","clusterBkg":"#F8FAFC","clusterBorder":"#8DB9E8"}}}%%
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":36,"rankSpacing":52},"themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","clusterBkg":"#F7FAFF","clusterBorder":"#8DB9E8","edgeLabelBackground":"#FFFFFF"}}}%%
 flowchart TB
-    Q[Model queue] --> A[Model A]
-    Q --> B[Model B]
+    POOL["PHYSICAL GPU POOL<br/>GPU 0 · GPU 1 · GPU 2 · GPU 3"]
+    LIMIT[["max_concurrent_jobs = 2"]]
 
-    subgraph OUTER[Level 1 · model parallelism]
-        A --> GA[Reserved GPUs 0 + 1]
-        B --> GB[Reserved GPUs 2 + 3]
+    POOL -->|reserve 2| QA
+    POOL -->|reserve 2| QB
+    LIMIT -. caps model processes .-> POOL
+
+    subgraph A["MODEL WORKER A  ·  CUDA_VISIBLE_DEVICES=0,1"]
+        direction TB
+        QA[("cost-sorted layer queue")]
+        QA --> A0["▦  local cuda:0<br/>physical GPU 0"]
+        QA --> A1["▦  local cuda:1<br/>physical GPU 1"]
+        A0 --> AO["ordered layer results"]
+        A1 --> AO
     end
 
-    subgraph INNERA[Level 2 · layers inside Model A]
-        GA --> A0[GPU 0<br/>large layers first]
-        GA --> A1[GPU 1<br/>shared task queue]
+    subgraph B["MODEL WORKER B  ·  CUDA_VISIBLE_DEVICES=2,3"]
+        direction TB
+        QB[("cost-sorted layer queue")]
+        QB --> B0["▦  local cuda:0<br/>physical GPU 2"]
+        QB --> B1["▦  local cuda:1<br/>physical GPU 3"]
+        B0 --> BO["ordered layer results"]
+        B1 --> BO
     end
 
-    subgraph INNERB[Level 2 · layers inside Model B]
-        GB --> B0[GPU 2<br/>large layers first]
-        GB --> B1[GPU 3<br/>shared task queue]
-    end
+    OUTER["LEVEL 1<br/>independent model subprocesses"] -.-> POOL
+    INNER["LEVEL 2<br/>one layer thread per visible GPU"] -.-> QA
+    INNER -.-> QB
 
-    classDef model fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef group fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef gpu fill:#003B95,stroke:#003262,color:#FFFFFF,stroke-width:2px;
-    class Q,A,B model;
-    class GA,GB group;
+    classDef annotation fill:#FFF7E3,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
+    classDef scheduler fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:3px;
+    classDef queue fill:#FFF4D6,stroke:#D69E00,color:#3B2A00,stroke-width:2px;
+    classDef gpu fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef result fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
+    class POOL scheduler;
+    class LIMIT,OUTER,INNER annotation;
+    class QA,QB queue;
     class A0,A1,B0,B1 gpu;
+    class AO,BO result;
+
+    style A fill:#F7FAFF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    style B fill:#F7FAFF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    linkStyle default stroke:#3978C5,stroke-width:2px
 ```
 
 ### Level 1 · models across GPUs
@@ -198,36 +231,65 @@ The library API also offers a spawned-process backend. Batch workers use the thr
 ## A worker's lifecycle
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#006CE4"}}}%%
-flowchart LR
-    START([Dispatched]) --> PREP[Prepare]
-    PREP --> LOAD[Load]
-    LOAD --> ANALYZE[Analyze]
-    ANALYZE --> SAVE[Finalize]
-    SAVE --> OK([Complete])
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":34,"rankSpacing":48},"themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","clusterBkg":"#F7FAFF","clusterBorder":"#8DB9E8","edgeLabelBackground":"#FFFFFF"}}}%%
+flowchart TB
+    subgraph WORKER["WORKER PROCESS  ·  one model, one process group"]
+        direction LR
+        START(["DISPATCHED"]) --> PREP["① PREPARE"]
+        PREP --> LOAD["② LOAD"]
+        LOAD --> ANALYZE["③ ANALYZE"]
+        ANALYZE --> FINAL["④ FINALIZE"]
+        FINAL --> OK(["✓ COMPLETE"])
+    end
 
-    LOAD -->|retryable error| RETRY{Retries left?}
-    ANALYZE -->|retryable error| RETRY
-    SAVE -->|retryable error| RETRY
-    RETRY -->|yes| CLEAN[Free model + CUDA cache]
-    CLEAN --> LOAD
-    RETRY -->|no| FAIL([Terminal failure])
+    LOAD -->|error| CLASSIFY
+    ANALYZE -->|error| CLASSIFY
+    FINAL -->|error| CLASSIFY
 
-    HEARTBEAT[[Heartbeat thread<br/>every 30 s]] -. stage + state .-> PREP
-    HEARTBEAT -.-> LOAD
-    HEARTBEAT -.-> ANALYZE
-    HEARTBEAT -.-> SAVE
-    WATCH[[Supervisor]] -. timeout .-> KILL[TERM → grace → KILL]
-    KILL --> FAIL
+    subgraph RECOVERY["RECOVERY PATH"]
+        direction LR
+        CLASSIFY{"retryable +<br/>attempts left?"}
+        CLEAN["release model<br/>empty CUDA cache"]
+        FAIL(["TERMINAL FAILURE"])
+        CLASSIFY -->|yes| CLEAN
+        CLASSIFY -->|no| FAIL
+    end
+    CLEAN -->|next attempt| LOAD
 
-    classDef stage fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef success fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
-    classDef warning fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef failure fill:#FDECEC,stroke:#B42318,color:#7A271A,stroke-width:2px;
-    class PREP,LOAD,ANALYZE,SAVE stage;
+    subgraph SUPERVISION["SUPERVISOR  ·  outside the worker process"]
+        direction LR
+        HEART["♥ heartbeat<br/>stage + state · every 30 s"]
+        CLOCKS{"heartbeat stale?<br/>stage too long?"}
+        POLICY{"policy"}
+        LOG["mark + log"]
+        STOP["SIGTERM<br/>grace period<br/>SIGKILL"]
+        HEART --> CLOCKS
+        CLOCKS -->|yes| POLICY
+        POLICY -->|log| LOG
+        POLICY -->|terminate| STOP
+    end
+
+    PREP -. updates .-> HEART
+    LOAD -. updates .-> HEART
+    ANALYZE -. updates .-> HEART
+    FINAL -. updates .-> HEART
+    STOP -. process group .-> FAIL
+
+    classDef stage fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef success fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:3px;
+    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
+    classDef decision fill:#FFF4D6,stroke:#D69E00,color:#3B2A00,stroke-width:3px;
+    classDef failure fill:#FDECEC,stroke:#B42318,color:#7A271A,stroke-width:3px;
     class START,OK success;
-    class RETRY,CLEAN,HEARTBEAT,WATCH warning;
-    class KILL,FAIL failure;
+    class PREP,LOAD,ANALYZE,FINAL stage;
+    class CLEAN,HEART,LOG control;
+    class CLASSIFY,CLOCKS,POLICY decision;
+    class STOP,FAIL failure;
+
+    style WORKER fill:#F3F8FF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    style RECOVERY fill:#FFFBF0,stroke:#FDB515,stroke-width:2px,color:#3B2A00
+    style SUPERVISION fill:#F7FAFF,stroke:#8DB9E8,stroke-width:2px,color:#002F6C
+    linkStyle default stroke:#3978C5,stroke-width:2px
 ```
 
 One dispatch thread walks the queue. Each active model gets a lightweight controller thread, a separate subprocess, and its own Unix process group. This isolates model-specific crashes and gives the supervisor a precise termination boundary.
@@ -265,22 +327,42 @@ If an adapter's base cannot be inferred confidently, add `source_model` to the C
 ## Cache: isolated by design
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#006CE4"}}}%%
-flowchart LR
-    ROOT[(worker_cache_root)] --> RUN[run_id]
-    RUN --> A[worker A]
-    RUN --> B[worker B]
-    A --> ENV1[HF_HOME<br/>HF_HUB_CACHE<br/>TRANSFORMERS_CACHE]
-    B --> ENV2[HF_HOME<br/>HF_HUB_CACHE<br/>TRANSFORMERS_CACHE]
-    A -->|finish / fail / kill| CLEAN1([remove])
-    B -->|finish / fail / kill| CLEAN2([remove])
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":38,"rankSpacing":48},"themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","clusterBkg":"#F7FAFF","clusterBorder":"#8DB9E8","edgeLabelBackground":"#FFFFFF"}}}%%
+flowchart TB
+    ROOT[("♻  WORKER CACHE ROOT")]
+    ROOT --> RUN["run_id  ·  isolates separate launches"]
 
-    classDef root fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef worker fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef clean fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
-    class ROOT,RUN root;
-    class A,B,ENV1,ENV2 worker;
-    class CLEAN1,CLEAN2 clean;
+    subgraph SCOPE["ONE DIRECTORY PER ACTIVE WORKER"]
+        direction LR
+        A["worker A<br/>model-000"]
+        B["worker B<br/>model-001"]
+        C["worker C<br/>model-002"]
+    end
+
+    RUN --> A
+    RUN --> B
+    RUN --> C
+    A --> ENV["same variable names · different paths<br/>HF_HOME · HF_HUB_CACHE<br/>TRANSFORMERS_CACHE · HF_DATASETS_CACHE"]
+    B --> ENV
+    C --> ENV
+    ENV --> EXIT{"job exits"}
+    EXIT -->|success| CLEAN(["✓ remove cache"])
+    EXIT -->|failure| CLEAN
+    EXIT -->|terminated| CLEAN
+
+    classDef source fill:#FFF7E3,stroke:#FDB515,color:#3B2A00,stroke-width:3px;
+    classDef worker fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
+    classDef decision fill:#FFF4D6,stroke:#D69E00,color:#3B2A00,stroke-width:3px;
+    classDef success fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:3px;
+    class ROOT source;
+    class A,B,C worker;
+    class RUN,ENV control;
+    class EXIT decision;
+    class CLEAN success;
+
+    style SCOPE fill:#F3F8FF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    linkStyle default stroke:#3978C5,stroke-width:2px
 ```
 
 Every job gets `<worker_cache_root>/<run_id>/<worker_id>/`. Isolation prevents partial-download collisions; automatic removal prevents long runs from filling scratch storage.
@@ -339,24 +421,63 @@ Start with `stale_process_action: "log"` while tuning. Once the limits fit your 
 ## ESD in one picture
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#006CE4"}}}%%
-flowchart LR
-    MODEL[Model] --> LAYERS[Linear · Conv1d · Conv2d]
-    LAYERS --> SPLIT[Split eligible attention Q / K / V]
-    SPLIT --> MATRIX[2D matrix / batched conv matrices]
-    MATRIX --> SPECTRUM{Spectrum}
-    SPECTRUM -->|default| GRAM[Smaller Gram matrix]
-    SPECTRUM -->|--use_svd| SVD[Direct SVD]
-    GRAM --> FIT[Power-law fit + KS distance]
-    SVD --> FIT
-    FIT --> METRICS[α · spectral norm · stable rank<br/>entropy · matrix rank · norm metrics]
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":34,"rankSpacing":50},"themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","clusterBkg":"#F7FAFF","clusterBorder":"#8DB9E8","edgeLabelBackground":"#FFFFFF"}}}%%
+flowchart TB
+    MODEL[("NEURAL NETWORK")]
 
-    classDef input fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
+    subgraph PREPARE["①  SELECT + PREPARE"]
+        direction LR
+        LAYERS["Linear · Conv1d · Conv2d"]
+        FILTER["skip aspect ratio ≥ 8"]
+        SPLIT["split fused attention<br/>Q · K · V"]
+        MATRIX["2D weight matrix<br/>or batched conv matrices"]
+        LAYERS --> FILTER --> SPLIT --> MATRIX
+    end
+
+    subgraph SOLVE["②  COMPUTE THE SPECTRUM"]
+        direction LR
+        CHOICE{"solver"}
+        GRAM["DEFAULT<br/>smaller symmetric<br/>Gram matrix"]
+        SVD["--use_svd<br/>direct singular<br/>values"]
+        STABLE["sort · threshold<br/>numerical safeguards"]
+        CHOICE -->|fast path| GRAM
+        CHOICE -->|robust path| SVD
+        GRAM --> STABLE
+        SVD --> STABLE
+    end
+
+    subgraph INTERPRET["③  FIT + INTERPRET"]
+        direction LR
+        XMIN{"choose x-min"}
+        FIT["power-law α<br/>+ KS distance"]
+        METRICS["spectral norm · stable rank<br/>entropy · matrix rank<br/>norm + α-weighted measures"]
+        XMIN --> FIT --> METRICS
+    end
+
+    MODEL --> LAYERS
+    MATRIX --> CHOICE
+    STABLE --> XMIN
+    METRICS --> DONE(["✓  LAYER PROFILE"])
+
+    MID[["xmin_mid"]] -. fast .-> XMIN
+    PEAK[["xmin_peak"]] -. histogram .-> XMIN
+    DKS[["DKS"]] -. full scan .-> XMIN
+
+    classDef source fill:#FFF7E3,stroke:#FDB515,color:#3B2A00,stroke-width:3px;
     classDef stage fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef result fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
-    class MODEL input;
-    class LAYERS,SPLIT,MATRIX,SPECTRUM,GRAM,SVD,FIT stage;
-    class METRICS result;
+    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef decision fill:#FFF4D6,stroke:#D69E00,color:#3B2A00,stroke-width:3px;
+    classDef success fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:3px;
+    class MODEL,MID,PEAK,DKS source;
+    class LAYERS,FILTER,SPLIT,MATRIX,STABLE stage;
+    class GRAM,SVD,FIT,METRICS execute;
+    class CHOICE,XMIN decision;
+    class DONE success;
+
+    style PREPARE fill:#F7FAFF,stroke:#8DB9E8,stroke-width:2px,color:#002F6C
+    style SOLVE fill:#F3F8FF,stroke:#006CE4,stroke-width:2px,color:#002F6C
+    style INTERPRET fill:#F7FAFF,stroke:#8DB9E8,stroke-width:2px,color:#002F6C
+    linkStyle default stroke:#3978C5,stroke-width:2px
 ```
 
 The estimator avoids copying the model, skips linear matrices with aspect ratio ≥ 8, batches convolution kernels, and uses pinned host memory for CPU→GPU transfers. The Gram path symmetrizes its matrix, retries with diagonal jitter, then falls back to SVD if eigendecomposition remains unstable.
