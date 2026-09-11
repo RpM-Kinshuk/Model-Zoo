@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Small, pinned public-checkpoint measurement/storage pilot; CPU only.
+"""Small, pinned public-checkpoint measurement/storage pilot.
 
 This is a numerical and coverage smoke test, not predictive validation. It
-uses explicit built-in HF classes, so automatic loader routing is not tested.
+defaults to explicit built-in HF classes on CPU. --loader auto also verifies
+the production loader against their complete state tensors and tied parameters.
 Only config.json and pytorch_model.bin are downloaded (7.5 MB total); model
-loading is local-only with remote code disabled. Reuse a cache with --cache-dir
-and --offline while publishing to a fresh --output-dir.
+loading uses these local snapshots, rejecting remote-code configurations.
+Explicit loads also disable remote code; auto exercises the existing loader
+policy. Reuse a cache with --cache-dir
+and --offline while publishing to a fresh --output-dir. CUDA and multi-GPU
+threaded measurement are opt-in; requested CUDA never falls back to CPU.
 """
 
 import argparse
@@ -34,6 +38,7 @@ SPECS = [
      "fafa6cdf9986c6cfbae360596b3574162430bcd3", "ResNetModel", 106926),
 ]
 FILES = ["config.json", "pytorch_model.bin"]
+SPECTRUM_TOLERANCE = 1e-4  # Fixed before the CUDA checkpoint pilot, not a fit-quality test.
 
 
 def json_safe(value):
@@ -85,7 +90,7 @@ def reference_spectrum(weight, ww_svd_vals):
     return np.sort(np.concatenate([ww_svd_vals(matrix, method="accurate") ** 2 for matrix in matrices]))
 
 
-def compare_weight(name, weight, ww_svd_vals):
+def compare_weight(name, weight, ww_svd_vals, *, stored_spectrum=None, stored_device=None):
     import numpy as np
     from net_esd.core import compute_esd_for_weight
 
@@ -111,10 +116,32 @@ def compare_weight(name, weight, ww_svd_vals):
         result["spectrum_linf_relative_to_ww64"] = float(np.max(np.abs(eigs - reference)) / denominator)
         result["seconds"] = time.perf_counter() - started
         comparisons[label] = result
-    return {"longname": name, "shape": list(weight.shape), "variants": comparisons}
+    row = {"longname": name, "shape": list(weight.shape), "variants": comparisons}
+    if stored_spectrum is not None:
+        stored = np.asarray(stored_spectrum)
+        row["stored_spectrum_linf_relative_to_ww64"] = (
+            float(np.max(np.abs(stored - reference)) / denominator)
+            if stored.shape == reference.shape and np.isfinite(stored).all() else math.inf
+        )
+        row["stored_compute_device"] = stored_device
+    return row
 
 
-def synthetic_controls(ww_svd_vals):
+def reference_checks_passed(comparisons):
+    """Gate only the SVD baselines, not intentionally changed measurement settings."""
+    return bool(comparisons) and all(
+        math.isfinite(error) and error <= SPECTRUM_TOLERANCE
+        for row in comparisons
+        for label in ("float32_svd", "float64_svd")
+        for error in [row["variants"][label]["spectrum_linf_relative_to_ww64"]]
+    ) and all(
+        math.isfinite(error) and error <= SPECTRUM_TOLERANCE
+        for row in comparisons if "stored_spectrum_linf_relative_to_ww64" in row
+        for error in [row["stored_spectrum_linf_relative_to_ww64"]]
+    )
+
+
+def synthetic_controls(ww_svd_vals, device="cpu"):
     import numpy as np
     import torch
 
@@ -127,46 +154,107 @@ def synthetic_controls(ww_svd_vals):
         "near_constant": torch.diag(.84 + torch.arange(8, dtype=torch.float32) * 1e-7),
         "low_rank": torch.diag(torch.tensor([0., 0., 0., 0., 0., 0., 1., 2.])),
     }
-    return [compare_weight(name, weight, ww_svd_vals) for name, weight in controls.items()]
+    return [compare_weight(name, weight.to(device), ww_svd_vals) for name, weight in controls.items()]
 
 
-def analyze_checkpoint(spec, snapshot, output_dir, ww_svd_vals):
+def tied_parameter_groups(model):
+    groups = {}
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        groups.setdefault(id(parameter), []).append(name)
+    return sorted(sorted(names) for names in groups.values() if len(names) > 1)
+
+
+def check_checkpoint_identity(model, baseline):
+    """Counts alone cannot detect an original layer replaced by an invented head."""
+    import torch
+
+    if type(model) is not type(baseline):
+        raise AssertionError("Automatic loader changed the checkpoint architecture")
+    actual, expected = model.state_dict(), baseline.state_dict()
+    if actual.keys() != expected.keys():
+        raise AssertionError("Automatic loader changed checkpoint tensor identities")
+    for name in expected:
+        torch.testing.assert_close(actual[name].cpu(), expected[name].cpu(), rtol=0, atol=0)
+    if tied_parameter_groups(model) != tied_parameter_groups(baseline):
+        raise AssertionError("Automatic loader changed tied parameter identities")
+    return {"state_tensor_count": len(expected), "state_tensors_equal": True,
+            "tied_parameter_groups_equal": True}
+
+
+def load_checkpoint(snapshot, class_name, loader, device):
+    import transformers
+    from model_loader import hf_from_pretrained, load_model
+    from model_preflight import resolve_effective_loader
+
+    baseline, baseline_info = hf_from_pretrained(
+        getattr(transformers, class_name), str(snapshot), trust_remote_code=False,
+        local_files_only=True, torch_dtype="auto", device_map="cpu", output_loading_info=True,
+    )
+    if any(baseline_info.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
+        raise ValueError("Checkpoint loading left missing, mismatched, or erroneous weights")
+    if loader == "explicit":
+        return baseline.to(device).eval(), baseline_info, None, "explicit"
+    scenario = resolve_effective_loader({
+        "loader_scenario": "standard_transformers",
+        "config_model_type": baseline.config.model_type,
+        "config_architectures": baseline.config.architectures,
+    })
+    # download_snapshot already rejects auto_map and fetches no executable code.
+    model, is_adapter = load_model(str(snapshot), device_map=device, torch_dtype="auto",
+                                   loader_scenario=scenario)
+    if is_adapter:
+        raise AssertionError("Pinned full checkpoint was mistaken for an adapter")
+    integrity = check_checkpoint_identity(model, baseline)
+    return model, model._model_zoo_loading_info, integrity, scenario
+
+
+def validate_device(device, parallel, torch):
+    if device == "cpu":
+        if parallel:
+            raise ValueError("--parallel-esd requires an explicit --device cuda:N")
+        return
+    if not device.startswith("cuda:") or not device[5:].isdigit():
+        raise ValueError("--device must be cpu or cuda:N")
+    if not torch.cuda.is_available() or int(device[5:]) >= torch.cuda.device_count():
+        raise ValueError(f"Requested {device} is unavailable; refusing a CPU fallback")
+
+
+def analyze_checkpoint(spec, snapshot, output_dir, ww_svd_vals, *, loader="explicit",
+                       device="cpu", parallel=False):
     import h5py
     import numpy as np
     import pandas as pd
-    import transformers
     from measurement_config import artifact_compatibility, measurement_config
-    from model_loader import hf_from_pretrained, safe_filename
+    from model_loader import safe_filename
     from net_esd import net_esd_estimator
     from net_esd.utils import iter_eligible_layers
     from worker import coverage_report, runtime_provenance, save_results
 
     family, repo, revision, class_name, expected_bytes = spec
     started = time.perf_counter()
-    model, loading_info = hf_from_pretrained(
-        getattr(transformers, class_name), str(snapshot), trust_remote_code=False,
-        local_files_only=True, torch_dtype="auto", device_map="cpu", output_loading_info=True,
-    )
-    if loading_info.get("missing_keys") or loading_info.get("mismatched_keys") or loading_info.get("error_msgs"):
-        raise ValueError("Checkpoint loading left missing, mismatched, or erroneous weights")
-    model.eval()
+    model, loading_info, integrity, scenario = load_checkpoint(snapshot, class_name, loader, device)
     loaded_at = time.perf_counter()
     records = []
     metrics = net_esd_estimator(
         model, fix_fingers="xmin_mid", filter_zeros=True, use_svd=True,
-        save_eigs=True, parallel=False, compute_dtype="float32", coverage=records,
+        save_eigs=True, parallel=parallel, compute_dtype="float32", coverage=records,
     )
+    devices = sorted(set(metrics["compute_device"]))
+    if not devices or (not parallel and devices != [device]):
+        raise AssertionError("Measurements did not run on the requested device")
+    if parallel and any(not value.startswith("cuda:") for value in devices):
+        raise AssertionError("Parallel GPU measurements unexpectedly used the CPU")
     analyzed_at = time.perf_counter()
     report = coverage_report(records, metrics)
     args = SimpleNamespace(
         fix_fingers="xmin_mid", evals_thresh=1e-5, bins=100, filter_zeros=True,
         use_svd=True, save_eigs=True, load_dtype="auto", compute_dtype="float32",
-        device_map="cpu", parallel_esd=False,
+        device_map=device, parallel_esd=parallel,
     )
-    config = measurement_config(args, model_id=repo, revision=revision)
-    config.update(runtime_provenance(model, args))
-    config.update(resolved_revision=revision, explicit_loader_class=class_name,
-                  trust_remote_code=False, pilot=True)
+    config = measurement_config(args, model_id=repo, revision=revision, loader_scenario=scenario)
+    config.update(runtime=runtime_provenance(model, args), resolved_revision=revision,
+                  pilot_loader=loader, expected_loader_class=class_name,
+                  remote_code_configuration=False, pilot=True)
     csv_path = output_dir / "stats" / f"{safe_filename(repo)}.csv"
     h5_path = output_dir / "metrics" / f"{safe_filename(repo)}.h5"
     if csv_path.exists() or h5_path.exists():
@@ -186,16 +274,25 @@ def analyze_checkpoint(spec, snapshot, output_dir, ww_svd_vals):
 
     eligible = list(iter_eligible_layers(model))
     indices = sorted({0, len(eligible) // 2, len(eligible) - 1})
-    representatives = [compare_weight(eligible[i][0], eligible[i][1], ww_svd_vals) for i in indices]
+    record_indices = {name: index for index, name in enumerate(metrics["longname"])}
+    representatives = [
+        compare_weight(eligible[i][0], eligible[i][1], ww_svd_vals,
+                       stored_spectrum=metrics["eigs"][record_indices[eligible[i][0]]],
+                       stored_device=metrics["compute_device"][record_indices[eligible[i][0]]])
+        for i in indices
+    ]
     return {
         "family": family, "repo_id": repo, "revision": revision,
-        "loader_class": class_name, "checkpoint_bytes": expected_bytes,
-        "loading_info": loading_info,
+        "loader_class": type(model).__name__, "checkpoint_bytes": expected_bytes,
+        "loading_info": loading_info, "checkpoint_integrity": integrity,
+        "runtime": config["runtime"], "loader_scenario": scenario,
+        "measurement_devices": devices,
         "coverage": report, "artifacts_checked": True,
         "csv": str(csv_path), "hdf5": str(h5_path),
         "timing_seconds": {"load": loaded_at - started, "analyze": analyzed_at - loaded_at,
                            "total": time.perf_counter() - started},
         "representative_layers": representatives,
+        "reference_checks_passed": reference_checks_passed(representatives),
     }
 
 
@@ -206,6 +303,10 @@ def main(argv=None):
     parser.add_argument("--weightwatcher-path", type=Path, default=PROJECT_ROOT.parent / "WeightWatcher")
     parser.add_argument("--offline", action="store_true", help="Require already downloaded pinned snapshots")
     parser.add_argument("--download-only", action="store_true", help="Populate cache without loading models")
+    parser.add_argument("--loader", choices=["explicit", "auto"], default="explicit",
+                        help="Auto validates production routing against the declared built-in class")
+    parser.add_argument("--device", default="cpu", help="cpu or an explicit visible CUDA index, e.g. cuda:0")
+    parser.add_argument("--parallel-esd", action="store_true", help="Exercise threaded multi-GPU dispatch")
     args = parser.parse_args(argv)
     output = args.output_dir.resolve()
     cache = args.cache_dir.resolve() if args.cache_dir else output / "cache"
@@ -213,7 +314,8 @@ def main(argv=None):
     report_path = output / "pilot_report.json"
     if report_path.exists():
         parser.error("pilot_report.json already exists; use a fresh output directory")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    if args.device == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
     os.environ["HF_HUB_DISABLE_XET"] = "1"
     os.environ["HF_HOME"] = str(cache)
@@ -224,14 +326,15 @@ def main(argv=None):
         os.environ[name] = "1"
     sys.dont_write_bytecode = True
     sys.path[:0] = [str(PROJECT_ROOT), str(PROJECT_ROOT / "esd_experiment/src")]
+    import torch
+    validate_device(args.device, args.parallel_esd, torch)
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
     snapshots = [download_snapshot(spec, cache, args.offline) for spec in SPECS]
     if args.download_only:
         print(json.dumps({"downloaded_bytes": sum(spec[-1] for spec in SPECS), "snapshots": list(map(str, snapshots))}))
         return 0
 
-    import torch
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
     ww_path = args.weightwatcher_path.resolve()
     sys.path.insert(0, str(ww_path))
     ww = importlib.import_module("weightwatcher")
@@ -241,7 +344,11 @@ def main(argv=None):
     ww_commit = subprocess.check_output(["git", "-C", str(ww_path), "rev-parse", "HEAD"], text=True).strip()
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(), "seed": 123,
-        "scope": "CPU numerical/coverage/storage pilot, not predictive validation or automatic loader-routing validation",
+        "scope": "Small-checkpoint numerical/coverage/storage pilot; not predictive validation",
+        "loader": args.loader, "device": args.device, "parallel_esd": args.parallel_esd,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "svd_spectrum_tolerance": SPECTRUM_TOLERANCE,
+        "tolerance_definition": "max(abs(eigenvalues-reference))/reference_lambda_max; not per-eigenvalue or alpha error",
         "weightwatcher": {"path": str(ww_path), "version": ww.__version__, "commit": ww_commit,
                           "reference": "accurate SVD on explicit float64 arrays; no legacy D or entropy comparison"},
         "checkpoint_bytes_total": sum(spec[-1] for spec in SPECS),
@@ -250,6 +357,7 @@ def main(argv=None):
             for name in (
                 "net_esd/core.py", "net_esd/utils.py", "net_esd/__init__.py", "net_esd/constants.py",
                 "esd_experiment/src/worker.py", "esd_experiment/src/measurement_config.py",
+                "esd_experiment/src/model_loader.py", "esd_experiment/src/model_preflight.py",
                 "esd_experiment/scripts/measurement_pilot.py",
             )
         },
@@ -257,12 +365,27 @@ def main(argv=None):
     }
     for spec, snapshot in zip(SPECS, snapshots):
         try:
-            result = analyze_checkpoint(spec, snapshot, output, svd_vals)
+            result = analyze_checkpoint(spec, snapshot, output, svd_vals, loader=args.loader,
+                                        device=args.device, parallel=args.parallel_esd)
             report["models"].append(result)
+            if not result["reference_checks_passed"]:
+                report["errors"].append({"repo_id": spec[1], "type": "SpectrumToleranceFailure",
+                                         "message": "Representative SVD spectrum exceeded the predeclared tolerance"})
             print(json.dumps({"repo_id": spec[1], "coverage": result["coverage"]["counts"]}), flush=True)
         except Exception as error:
             report["errors"].append({"repo_id": spec[1], "type": type(error).__name__, "message": str(error)})
-    report["controls"] = synthetic_controls(svd_vals)
+    try:
+        report["controls"] = synthetic_controls(svd_vals, args.device)
+        if not reference_checks_passed(report["controls"]):
+            report["errors"].append({"type": "SpectrumToleranceFailure", "message": "Synthetic SVD control exceeded tolerance"})
+    except Exception as error:
+        report["errors"].append({"stage": "controls", "type": type(error).__name__, "message": str(error)})
+    report["sources_consistent"] = all(
+        hashlib.sha256((PROJECT_ROOT / name).read_bytes()).hexdigest() == digest
+        for name, digest in report["source_sha256"].items()
+    )
+    if not report["sources_consistent"]:
+        report["errors"].append({"type": "SourceChanged", "message": "Measurement sources changed during the pilot"})
     report_path.write_text(json.dumps(json_safe(report), indent=2, allow_nan=False) + "\n")
     print(f"Pilot report: {report_path}", flush=True)
     return int(bool(report["errors"]))

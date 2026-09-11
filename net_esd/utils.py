@@ -58,9 +58,10 @@ def iter_eligible_layers(
     When provided, coverage receives one record per weight-bearing module,
     including skipped candidates. Known packed attributes and direct matrix
     parameters with nonstandard names are recorded, but never unpacked or
-    interpreted as supported layouts. Arbitrary buffers are not weight
-    candidates. The estimator changes eligible records to analyzed after
-    computation; absence of a power-law fit is not a skip.
+    interpreted as supported layouts. Packed recurrent weights are recorded at
+    their owning module, not again at each storage helper. Arbitrary buffers
+    are not weight candidates. The estimator changes eligible records to
+    analyzed after computation; absence of a power-law fit is not a skip.
     """
     emitted_names = set()
     for name, module in net.named_modules():
@@ -71,6 +72,14 @@ def iter_eligible_layers(
                 attribute for attribute in ("qweight", "weight_packed", "packed_weight")
                 if getattr(module, attribute, None) is not None
             ]
+            # These declared recurrent modules store learned weights only in
+            # packed helpers, with no Tensor weight or named parameters. Keep
+            # their missingness visible without calling get_weight/unpacking,
+            # or counting each private storage helper as another model layer.
+            if not unsupported_attributes and isinstance(
+                module, (nn.quantized.dynamic.LSTM, nn.quantized.dynamic.GRU)
+            ) and getattr(module, "_all_weight_values", None) is not None:
+                unsupported_attributes = ["_all_weight_values"]
             if not unsupported_attributes:
                 unsupported_attributes = [
                     attribute for attribute, parameter in module.named_parameters(recurse=False)

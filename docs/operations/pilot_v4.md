@@ -1,5 +1,10 @@
 # Numerics v4 pilot: 11 September 2026
 
+Historical baseline. See the [v5 follow-up](pilot_v5.md) for the automatic-loader
+fix, CUDA driver correction, and actual GPU validation. Repeating the command
+below with current code uses current conventions; reproducing v4 exactly needs
+the source versions identified by this report's hashes.
+
 The small CPU measurement/storage pilot passed for four pinned public Hugging
 Face checkpoints. It produced 153 canonical measurements, including 18 missing
 fits; every layer identity and saved spectrum round-tripped exactly through

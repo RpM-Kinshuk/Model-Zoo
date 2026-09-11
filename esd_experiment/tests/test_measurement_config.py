@@ -13,7 +13,7 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC))
 from measurement_config import (
-    FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility, measurement_config,
+    FORMAT_VERSION, LOADER_VERSION, NUMERICS_VERSION, artifact_compatibility, measurement_config,
 )
 
 
@@ -37,6 +37,32 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert expected["requested_revision"] == "pinned"
     csv_path, h5_path = write_pair(tmp_path, dict(expected, torch_version="test", resolved_revision="sha"))
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
+
+
+@pytest.mark.parametrize("stored_version", [None, "older"])
+def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
+    expected = measurement_config(SimpleNamespace(), model_id="org/model")
+    assert expected["loader_version"] == LOADER_VERSION
+    stored = dict(expected)
+    if stored_version is None:
+        del stored["loader_version"]
+    else:
+        stored["loader_version"] = stored_version
+    csv_path, h5_path = write_pair(tmp_path, stored)
+    compatible, reason = artifact_compatibility(csv_path, h5_path, expected)
+    assert not compatible
+    assert "loader_version" in reason
+    assert not artifact_compatibility(csv_path, h5_path)[0]
+
+
+def test_runtime_records_actual_class_and_checkpoint_loading_report():
+    import torch
+    import worker
+    model = torch.nn.Linear(2, 2)
+    model._model_zoo_loading_info = {"missing_keys": [], "instantiated_class": "Linear"}
+    runtime = worker.runtime_provenance(model, SimpleNamespace(device_map="cpu", parallel_esd=False))
+    assert runtime["model_class"].endswith(".Linear")
+    assert runtime["loading_info"] == model._model_zoo_loading_info
 
 
 @pytest.mark.parametrize("key,value", [

@@ -5,8 +5,11 @@ import json
 import math
 from pathlib import Path
 
-NUMERICS_VERSION = "4"
+NUMERICS_VERSION = "5"
 FORMAT_VERSION = "2.0"
+# Architecture selection / checkpoint-loading integrity is separate from the
+# spectral formulas. Older artifacts must not bypass the corrected loader.
+LOADER_VERSION = "1"
 
 
 def measurement_config(args, *, model_id=None, revision="", source_model="",
@@ -14,11 +17,13 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
     """Build the same configuration in the dispatcher and standalone worker."""
     config = {
         "numerics_version": NUMERICS_VERSION,
+        "loader_version": LOADER_VERSION,
         "fix_fingers": getattr(args, "fix_fingers", "xmin_mid") or "DKS",
         "evals_thresh": float(getattr(args, "evals_thresh", 1e-5)),
         "bins": int(getattr(args, "bins", 100)),
         "filter_zeros": bool(getattr(args, "filter_zeros", True)),
         "use_svd": bool(getattr(args, "use_svd", True)),
+        "cuda_svd_driver": "gesvd",
         "save_eigs": bool(getattr(args, "save_eigs", False)),
         "load_dtype": getattr(args, "load_dtype", "auto"),
         "compute_dtype": getattr(args, "compute_dtype", "float32"),
@@ -64,6 +69,8 @@ def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
             config = json.loads(h5.attrs.get("measurement_config_json", "null"))
             if not isinstance(config, dict) or config.get("numerics_version") != NUMERICS_VERSION:
                 return False, "missing measurement configuration"
+            if config.get("loader_version") != LOADER_VERSION:
+                return False, "different or missing loader_version"
             for key, value in (expected or {}).items():
                 if config.get(key) != value:
                     return False, f"measurement setting differs: {key}"

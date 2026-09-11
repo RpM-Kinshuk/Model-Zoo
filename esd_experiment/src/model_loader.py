@@ -6,6 +6,7 @@ import importlib
 import os
 import re
 import torch
+import transformers
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,110 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
             retry_kwargs["low_cpu_mem_usage"] = False
             return _call(retry_kwargs)
         raise
+
+
+def _json_safe_loading_value(value):
+    """Transformers versions return lists, sets, tuples, or shape objects."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe_loading_value(item) for key, item in value.items()}
+    if isinstance(value, set):
+        value = sorted(value, key=str)
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_loading_value(item) for item in value]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    return str(value)
+
+
+def _load_checkpoint_checked(model_cls, repo_id: str, **kwargs):
+    """Never measure parameters silently initialized or discarded during loading.
+
+    Keep ``hf_from_pretrained``'s public return convention unchanged; only
+    production loads require and validate Transformers' loading report.
+    """
+    loaded = hf_from_pretrained(model_cls, repo_id, output_loading_info=True, **kwargs)
+    if not isinstance(loaded, tuple) or len(loaded) != 2 or not isinstance(loaded[1], dict):
+        raise LoaderFailure("load", "checkpoint_loading_info_missing", "Loader did not return a checkpoint loading report")
+    model, info = loaded
+    required = {"missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"}
+    if not required.issubset(info):
+        raise LoaderFailure("load", "checkpoint_loading_info_missing", "Checkpoint loading report is incomplete")
+    info = _json_safe_loading_value(info)
+    config = getattr(model, "config", None)
+    allowed_unexpected = []
+    unexpected = []
+    for key in info["unexpected_keys"]:
+        # These scalar buffers were serialized by old GPT2 versions but are
+        # absent in current checkpoints/models. Do not whitelist arbitrary
+        # biases or other unexpected keys, which may be trained parameters.
+        if (getattr(config, "model_type", None) == "gpt2"
+                and re.fullmatch(r"transformer\.h\.\d+\.attn\.masked_bias", key)):
+            allowed_unexpected.append(key)
+        else:
+            unexpected.append(key)
+    if (info["missing_keys"] or info["mismatched_keys"] or info["error_msgs"]
+            or info.get("conversion_errors") or unexpected):
+        problems = {
+            "missing_keys": info["missing_keys"], "mismatched_keys": info["mismatched_keys"],
+            "error_msgs": info["error_msgs"], "unexpected_keys": unexpected,
+            "conversion_errors": info.get("conversion_errors"),
+        }
+        raise LoaderFailure(
+            "load", "checkpoint_weight_mismatch",
+            f"Checkpoint weights do not match {type(model).__name__}: "
+            + "; ".join(f"{key}={value}" for key, value in problems.items() if value),
+        )
+    model._model_zoo_loading_info = {
+        "model_class": type(model).__name__,
+        "loader_class": model_cls.__name__,
+        "loading_info": info,
+        "allowed_unexpected_keys": allowed_unexpected,
+        "validated": True,
+    }
+    return model
+
+
+def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None):
+    """Prefer the checkpoint's built-in architecture over a task-name guess.
+
+    Looking up an installed Transformers class does not evaluate checkpoint
+    code. Unknown/custom architectures keep their existing AutoModel route,
+    whose loaded weights must still pass the integrity check.
+    """
+    try:
+        config = AutoConfig.from_pretrained(
+            repo_id, token=get_hf_token(), revision=revision, trust_remote_code=False,
+        )
+    except Exception:
+        return None
+    candidates = []
+    for name in getattr(config, "architectures", None) or []:
+        if not isinstance(name, str) or not name.isidentifier():
+            continue
+        try:
+            candidate = getattr(transformers, name, None)
+        except (ImportError, RuntimeError) as exc:
+            raise LoaderFailure(
+                "load", "checkpoint_architecture_unavailable",
+                f"Could not import declared Transformers architecture {name}: {exc}",
+            ) from exc
+        if (isinstance(candidate, type)
+                and issubclass(candidate, transformers.PreTrainedModel)
+                and candidate.__module__.startswith("transformers.")):
+            config_cls = getattr(candidate, "config_class", None)
+            if config_cls is not None and not isinstance(config, config_cls):
+                raise LoaderFailure(
+                    "load", "checkpoint_architecture_mismatch",
+                    f"Declared architecture {name} is incompatible with {type(config).__name__}",
+                )
+            if candidate not in candidates:
+                candidates.append(candidate)
+    if len(candidates) > 1:
+        raise LoaderFailure(
+            "load", "ambiguous_checkpoint_architecture",
+            "Checkpoint declares multiple supported architectures; refusing to choose a different set of weights",
+        )
+    return candidates[0] if candidates else None
 
 
 def ensure_optimum_gptq_backend_compat() -> None:
@@ -621,13 +726,15 @@ def load_and_merge_adapter(
     try:
         if effective_loader == "compressed_tensors":
             ensure_compressed_tensors_backend_compat()
-        base = hf_from_pretrained(
+        base = _load_checkpoint_checked(
             auto_model_cls,
             base_repo,
             device_map=device_map,
             torch_dtype=torch_dtype,
             revision=base_revision,
         )
+    except LoaderFailure:
+        raise
     except Exception as exc:
         if effective_loader in {"gptq", "awq", "compressed_tensors"}:
             dependency_failure = classify_quantized_dependency_failure(exc)
@@ -635,6 +742,7 @@ def load_and_merge_adapter(
                 raise dependency_failure from exc
         raise
     base.eval()
+    base_loading_info = base._model_zoo_loading_info
     if effective_loader == "gptq":
         try:
             base = base.dequantize()
@@ -679,6 +787,12 @@ def load_and_merge_adapter(
             ) from exc
         raise
     merged.eval()
+    merged._model_zoo_loading_info = {
+        "model_class": type(merged).__name__,
+        "base_loading_info": base_loading_info,
+        "adapter_merge": True,
+        "adapter_weights_verified": False,
+    }
     
     return merged
 
@@ -739,6 +853,9 @@ def load_model(
             revision=revision,
         )
         auto_model_cls = _select_auto_model_cls(effective_loader)
+        if (effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}
+                and (loader_scenario or "").strip().lower() != "quantized_transformers_native"):
+            auto_model_cls = _declared_checkpoint_model_cls(repo_id, revision) or auto_model_cls
         if effective_loader == "gptq":
             ensure_optimum_gptq_backend_compat()
         load_kwargs: dict[str, Any] = {
@@ -753,15 +870,17 @@ def load_model(
         try:
             if effective_loader == "compressed_tensors":
                 ensure_compressed_tensors_backend_compat()
-            model = hf_from_pretrained(
+            model = _load_checkpoint_checked(
                 auto_model_cls,
                 repo_id,
                 **load_kwargs,
             )
+        except LoaderFailure:
+            raise
         except Exception as exc:
             fallback_loader = _fallback_loader_from_error(effective_loader, exc)
             if fallback_loader is not None and fallback_loader != effective_loader:
-                model = hf_from_pretrained(
+                model = _load_checkpoint_checked(
                     _select_auto_model_cls(fallback_loader),
                     repo_id,
                     device_map=device_map,
@@ -772,7 +891,7 @@ def load_model(
                 fallback_cls = _fallback_auto_model_cls(effective_loader, exc)
                 if fallback_cls is not None:
                     try:
-                        model = hf_from_pretrained(
+                        model = _load_checkpoint_checked(
                             fallback_cls,
                             repo_id,
                             **load_kwargs,

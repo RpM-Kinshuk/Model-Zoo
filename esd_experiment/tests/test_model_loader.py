@@ -15,6 +15,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 def _raise_runtime_error(message: str):
     raise RuntimeError(message)
 
+
+def _loaded(model):
+    return model, {"missing_keys": [], "unexpected_keys": [], "mismatched_keys": [], "error_msgs": []}
+
 MODULE_PATH = PROJECT_ROOT / "src" / "model_loader.py"
 SPEC = importlib.util.spec_from_file_location("model_loader_under_test", MODULE_PATH)
 model_loader = importlib.util.module_from_spec(SPEC)
@@ -199,7 +203,7 @@ def test_load_model_raises_structured_failure_for_unresolved_adapter(mock_is_ada
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_forwards_revision_to_standard_load(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/model",
@@ -215,7 +219,7 @@ def test_load_model_forwards_revision_to_standard_load(mock_from_pretrained):
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_uses_multimodal_auto_class(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/multimodal-model",
@@ -230,7 +234,7 @@ def test_load_model_uses_multimodal_auto_class(mock_from_pretrained):
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_accepts_standard_causal_alias(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/standard-model",
@@ -245,7 +249,7 @@ def test_load_model_accepts_standard_causal_alias(mock_from_pretrained):
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_accepts_multimodal_alias(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/multimodal-model",
@@ -260,7 +264,7 @@ def test_load_model_accepts_multimodal_alias(mock_from_pretrained):
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_uses_seq2seq_auto_class(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/seq2seq-model",
@@ -275,7 +279,7 @@ def test_load_model_uses_seq2seq_auto_class(mock_from_pretrained):
 @patch("model_loader_under_test.hf_from_pretrained")
 def test_load_model_uses_sequence_classification_auto_class(mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/classifier-model",
@@ -300,7 +304,7 @@ def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkey
                 "for this kind of AutoModel: AutoModelForCausalLM."
             )
         if auto_cls is auto_model_cls:
-            return fallback_model
+            return _loaded(fallback_model)
         raise AssertionError(f"Unexpected auto class {auto_cls}")
 
     monkeypatch.setattr(model_loader, "AutoModel", auto_model_cls, raising=False)
@@ -445,7 +449,7 @@ def test_load_model_prepares_compressed_tensors_backend_after_gptq_side_effect(
     mock_import_module,
 ):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
     imported = set()
 
     def fake_import_module(name):
@@ -488,7 +492,7 @@ def test_load_model_remaps_gptq_adapter_base_to_dense_upstream_base(
     merged_model = Mock()
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
-    mock_from_pretrained.return_value = base_model
+    mock_from_pretrained.return_value = _loaded(base_model)
     mock_peft_from_pretrained.return_value = peft_model
 
     model, is_adapter = load_model(
@@ -548,7 +552,7 @@ def test_load_model_applies_gptq_backend_compat_shim(
     mock_ensure_optimum_gptq_backend_compat,
 ):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/gptq-model",
@@ -602,7 +606,7 @@ def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
     merged_model = Mock()
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
-    mock_from_pretrained.return_value = base_model
+    mock_from_pretrained.return_value = _loaded(base_model)
     mock_peft_from_pretrained.return_value = peft_model
     with patch(
         "model_loader_under_test.PeftConfig.from_pretrained",
@@ -635,7 +639,7 @@ def test_load_model_reports_gptq_adapter_merge_unsupported_when_dequantize_missi
 ):
     base_model = Mock()
     base_model.dequantize.side_effect = NotImplementedError("no gptq dequantize")
-    mock_from_pretrained.return_value = base_model
+    mock_from_pretrained.return_value = _loaded(base_model)
 
     with pytest.raises(LoaderFailure) as exc:
         load_model(
@@ -657,7 +661,7 @@ def test_load_model_reports_gptq_adapter_merge_unsupported_when_dequantize_missi
 @patch("model_loader_under_test.resolve_gguf_filename", return_value="model.Q4_K_M.gguf", create=True)
 def test_load_model_uses_gguf_file_for_gguf_loader(mock_resolve_gguf_filename, mock_from_pretrained):
     mock_model = Mock()
-    mock_from_pretrained.return_value = mock_model
+    mock_from_pretrained.return_value = _loaded(mock_model)
 
     model, is_adapter = load_model(
         "org/model-gguf",
@@ -711,7 +715,7 @@ def test_load_model_retries_seq2seq_after_multimodal_t5_misroute(mock_from_pretr
                 "Unrecognized configuration class <class 'transformers.models.t5.configuration_t5.T5Config'> "
                 "for this kind of AutoModel: AutoModelForImageTextToText."
             )
-        return mock_model
+        return _loaded(mock_model)
 
     mock_from_pretrained.side_effect = _side_effect
 
@@ -735,7 +739,7 @@ def test_load_model_retries_causal_after_multimodal_qwen2_misroute(mock_from_pre
                 "Unrecognized configuration class <class 'transformers.models.qwen2.configuration_qwen2.Qwen2Config'> "
                 "for this kind of AutoModel: AutoModelForImageTextToText."
             )
-        return mock_model
+        return _loaded(mock_model)
 
     mock_from_pretrained.side_effect = _side_effect
 
@@ -763,7 +767,7 @@ def test_load_model_uses_base_revision_from_adapter_metadata(
     merged_model = Mock()
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
-    mock_from_pretrained.return_value = base_model
+    mock_from_pretrained.return_value = _loaded(base_model)
     mock_peft_from_pretrained.return_value = peft_model
 
     model, is_adapter = load_model(
@@ -799,7 +803,7 @@ def test_load_model_classifies_adapter_checkpoint_mismatch(
     mock_peft_from_pretrained,
 ):
     base_model = Mock()
-    mock_from_pretrained.return_value = base_model
+    mock_from_pretrained.return_value = _loaded(base_model)
 
     with pytest.raises(LoaderFailure) as exc:
         load_model(

@@ -96,3 +96,56 @@ def test_pilot_refuses_to_overwrite_an_existing_report(tmp_path):
     with pytest.raises(SystemExit):
         pilot.main(["--output-dir", str(tmp_path)])
     assert existing.read_text() == "existing report"
+
+
+@pytest.mark.parametrize("device,parallel", [("cuda:0", False), ("cpu", True), ("cuda", False)])
+def test_pilot_never_silently_falls_back_from_a_requested_gpu(device, parallel):
+    cpu_only = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False, device_count=lambda: 0))
+    with pytest.raises(ValueError):
+        pilot.validate_device(device, parallel, cpu_only)
+
+
+def test_automatic_checkpoint_comparison_rejects_same_shape_random_weights():
+    original, invented = torch.nn.Linear(4, 4), torch.nn.Linear(4, 4)
+    with pytest.raises(AssertionError):
+        pilot.check_checkpoint_identity(invented, original)
+    invented.load_state_dict(original.state_dict())
+    assert pilot.check_checkpoint_identity(invented, original)["state_tensors_equal"]
+
+
+def test_automatic_checkpoint_comparison_preserves_tied_parameters():
+    original = torch.nn.ModuleDict({"first": torch.nn.Linear(2, 2), "second": torch.nn.Linear(2, 2)})
+    original["second"].weight = original["first"].weight
+    untied = torch.nn.ModuleDict({"first": torch.nn.Linear(2, 2), "second": torch.nn.Linear(2, 2)})
+    untied.load_state_dict(original.state_dict())
+    with pytest.raises(AssertionError, match="tied parameter"):
+        pilot.check_checkpoint_identity(untied, original)
+
+
+@pytest.mark.parametrize("error,passed", [(1e-6, True), (2e-4, False), (math.nan, False)])
+def test_spectrum_gate_cannot_pass_large_or_nonfinite_errors(error, passed):
+    row = {"variants": {
+        name: {"spectrum_linf_relative_to_ww64": error}
+        for name in ("float32_svd", "float64_svd")
+    }}
+    assert pilot.reference_checks_passed([row]) is passed
+    assert not pilot.reference_checks_passed([])
+
+
+def test_spectrum_gate_also_checks_the_persisted_parallel_measurement():
+    row = {"variants": {
+        name: {"spectrum_linf_relative_to_ww64": 1e-7}
+        for name in ("float32_svd", "float64_svd")
+    }, "stored_spectrum_linf_relative_to_ww64": .1}
+    assert not pilot.reference_checks_passed([row])
+    row["stored_spectrum_linf_relative_to_ww64"] = 1e-7
+    assert pilot.reference_checks_passed([row])
+
+
+def test_stored_spectrum_is_compared_independently_of_a_correct_rerun():
+    matrix = torch.diag(torch.tensor([1., 2., 3., 4.]))
+    row = pilot.compare_weight("test", matrix, lambda array, method: np.linalg.svd(array, compute_uv=False),
+                               stored_spectrum=np.ones(4), stored_device="cuda:2")
+    assert row["stored_compute_device"] == "cuda:2"
+    assert row["stored_spectrum_linf_relative_to_ww64"] == pytest.approx(15/16)
+    assert not pilot.reference_checks_passed([row])

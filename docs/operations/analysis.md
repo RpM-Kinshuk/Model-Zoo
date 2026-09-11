@@ -9,7 +9,7 @@ If you just want to run phase 2, this is the default pattern:
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list data/curated/model_zoo_phase2.csv \
-  --output_dir analysis_runs/phase2/numerics_v4 \
+  --output_dir analysis_runs/phase2/numerics_v5 \
   --gpus 0 1 2 3 --save_eigs
 ```
 
@@ -65,7 +65,7 @@ Live state is in `logs/current_state.json`. Per-worker active logs, heartbeat fi
 ## Completion Rule
 
 A model is complete only when its CSV/HDF5 pair has the current schema and
-numerics version, aligned canonical layer names and alpha values, and matching
+numerics and loader versions, aligned canonical layer names and alpha values, and matching
 requested measurement settings. Resume checks loading/computation precision,
 filtering, fitting settings, spectrum storage, and requested model revision.
 Recorded runtime details may differ across machines; they are provenance, not
@@ -79,9 +79,30 @@ removes those models' previous outputs before loading; it is not a migration.
 
 ## Numerical Results
 
-New HDF5 outputs carry `numerics_version="4"` and `format_version="2.0"`.
+New HDF5 outputs carry `numerics_version="5"` and `format_version="2.0"`.
+Their measurement configuration includes `loader_version="1"` and
+`cuda_svd_driver="gesvd"`. V5 changes CUDA SVD to the precision-focused QR
+driver; the CPU formulas and measurement definitions are unchanged from v4.
 Do not combine versions in a research run. Local `run_script.sh` changes are
 left untouched; check its output directory and flags before using it.
+
+### Checkpoint integrity
+
+Ordinary Transformers loads prefer the checkpoint's declared, compatible
+built-in architecture, including base encoders and task-specific heads. The
+metadata-derived loader scenario is a routing hint, not the instantiated class.
+`runtime.model_class` and `runtime.loading_info` record what was actually loaded.
+Missing/mismatched weights, loading errors, and unexplained unexpected keys fail
+before measurement; the exact historical GPT2 `masked_bias` buffers are the
+only permitted unexpected-key exception and remain recorded. Ambiguous built-in
+architecture declarations fail rather than choosing a head arbitrarily.
+
+This deliberately rejects partial or task-converted checkpoints that would
+initialize or discard weights. Quantized and adapter routing remains unchanged.
+For merged adapters, provenance distinguishes checked base loading from
+`adapter_weights_verified=false`; it does not claim full adapter validation.
+The production remote-code policy is unchanged: do not treat this loader audit
+as authorization to execute code from arbitrary HF repositories.
 
 ### Layer identity and storage
 
@@ -128,6 +149,9 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
   explicitly selects Gram eigenvalues; ill-conditioned spectra can lose
   precision through the Gram construction. `--no-parallel_esd` disables
   multi-device dispatch. The runner forwards both positive and negative flags.
+  CUDA SVD uses `gesvd`, including SVD fallbacks from Gram; CPU uses the default
+  LAPACK route. `cuda_svd_driver` records this policy, not proof that a Gram
+  measurement used SVD. Gram jitter/fallback is not yet recorded per layer.
 - `--filter_zeros` retains values strictly above `evals_thresh` for the existing
   norm/rank/entropy and fitting metrics. `--no-filter_zeros` disables that
   absolute filter; fitting still requires positive values. Saved spectra are
@@ -140,6 +164,8 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
   `compute_dtype`, `compute_device`, `weight_layout`, and `fit_status`.
   `runtime.model_config_commit_hash` identifies the loaded model config; for a
   merged adapter this may be the **base** config, not the adapter's commit.
+  Runtime `gpu_names` lists visible GPUs, whereas per-layer `compute_device`
+  identifies where each measurement actually ran.
 
 - `D` is the full two-sided Kolmogorov–Smirnov distance, checking both sides of
   each empirical-CDF jump. MLE/CDF calculations use stable float64 log ratios
@@ -180,6 +206,8 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
   skipped with reasons, not treated as ordinary dense matrices. The existing
   Linear aspect-ratio skip and name/shape-based QKV split remain explicit
   conventions; arbitrary custom architectures may need declared adapters.
+  Packed PyTorch dynamic LSTM/GRU modules are explicitly reported as skipped,
+  without unpacking their weights or double-counting storage helpers.
 - Convolution normalization is unchanged: spatial-kernel slice spectra are
   pooled after multiplying each slice by `sqrt(conv_norm)` (default `0.5`).
   These are descriptors of normalized kernel slices, **not** the complete
@@ -188,7 +216,9 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
 
 ### Small public-checkpoint pilot
 
-The [v4 pilot summary](pilot_v4.md) records the initial results and limitations.
+The [v4 pilot summary](pilot_v4.md) is the historical CPU baseline. The
+[v5 pilot summary](pilot_v5.md) adds the automatic-loader audit, real GPU checks,
+matrix-scale controls, and the remaining limitations.
 
 The reproducible CPU pilot downloads four pinned public checkpoints (~7.5 MB
 total) covering encoder, decoder, encoder–decoder, and CNN measurements:
@@ -207,12 +237,19 @@ Pareto, lognormal, Gaussian, near-constant and low-rank controls. It does not
 compare against WeightWatcher's legacy KS or entropy implementations.
 
 This is a numerical/coverage/storage smoke test, not predictive validation,
-automatic loader-routing validation, GPU equivalence, or a quantized-model
-pilot. Most checkpoints are tiny random test models. Before scaling to 50k,
-extend the pilot to representative real model sizes, actual GPU/backend
-settings, quantized/custom implementations, threshold sensitivity, and related
-checkpoint groups. No aspect-ratio correction or universal quality-score claim
-is introduced here.
+or a quantized-model pilot. Its default remains explicit loading on CPU.
+`--loader auto` checks the production loader against complete explicit-class
+state tensors and shared-Parameter ties. `--device cuda:N --parallel-esd`
+exercises threaded multi-GPU dispatch; restrict visibility with
+`CUDA_VISIBLE_DEVICES` first. Requested CUDA never silently falls back to CPU.
+Representative **saved** spectra and separate SVD reruns must meet the fixed
+spectral-error tolerance against WeightWatcher's float64 reference. This is not
+an alpha-error bound or universal CPU/GPU equivalence.
+
+Most checkpoints are tiny random test models. Before scaling to 50k, extend
+coverage to trained model families, pre-quantized repositories, adapter loading,
+and related checkpoint groups. No aspect-ratio correction or universal
+quality-score claim is introduced here.
 
 Definitions: [Clauset–Shalizi–Newman, §§3–4](https://arxiv.org/html/0706.1062v2),
 [SciPy KS statistic](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kstest.html),

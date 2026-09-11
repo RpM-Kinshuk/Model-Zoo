@@ -11,6 +11,41 @@ from net_esd.core import compute_esd_for_weight
 from net_esd.utils import matrix_entropy_torch, matrix_rank_torch
 
 
+@pytest.mark.parametrize("is_cuda,expected_kwargs", [(False, {}), (True, {"driver": "gesvd"})])
+def test_svd_driver_is_precision_focused_only_on_cuda(monkeypatch, is_cuda, expected_kwargs):
+    from net_esd.core import _svdvals_for_measurement
+    matrix = SimpleNamespace(is_cuda=is_cuda)
+    expected = torch.tensor([2., 1.])
+
+    def svdvals(tensor, **kwargs):
+        assert tensor is matrix
+        assert kwargs == expected_kwargs
+        return expected
+
+    monkeypatch.setattr(torch.linalg, "svdvals", svdvals)
+    assert _svdvals_for_measurement(matrix) is expected
+
+
+@pytest.mark.parametrize("shape", [(4, 3), (2, 4, 3)])
+def test_failed_gram_uses_the_same_svd_policy(monkeypatch, shape):
+    import net_esd.core as core
+    matrix = torch.arange(math.prod(shape), dtype=torch.float32).reshape(shape)
+    expected = core.squared_singular_values(matrix)
+    called = []
+
+    def fail_gram(*args, **kwargs):
+        raise RuntimeError("Synthetic eigvalsh convergence failure")
+
+    def svdvals(tensor):
+        called.append(tensor)
+        return torch.linalg.svdvals(tensor)
+
+    monkeypatch.setattr(torch.linalg, "eigvalsh", fail_gram)
+    monkeypatch.setattr(core, "_svdvals_for_measurement", svdvals)
+    torch.testing.assert_close(core.squared_singular_values(matrix, use_svd=False), expected)
+    assert len(called) == 1 and called[0] is matrix
+
+
 def analyze(weight, *, method="xmin_mid", filter_zeros=True, use_svd=True, compute_dtype="float32"):
     return compute_esd_for_weight(
         "model.layers.0.proj", weight, 1e-5, 100, method, 2, 0.5,
@@ -443,7 +478,7 @@ def test_worker_saves_real_cpu_spectra_with_missing_fits(tmp_path, monkeypatch, 
     else:
         assert saved["fit_xmin"].isna().all()
     with worker.h5py.File(tmp_path / "metrics" / "test--local-model.h5", "r") as h5:
-        assert h5.attrs["numerics_version"] == "4"
+        assert h5.attrs["numerics_version"] == "5"
         assert h5["alpha"].shape == (3, 1)
         worker.np.testing.assert_allclose(h5["alpha"][:, 0], saved["alpha"], equal_nan=True)
         assert h5["eigs"][1].tolist() == [0.0, 0.0, 0.0, 4.0]

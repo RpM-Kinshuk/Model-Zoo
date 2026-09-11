@@ -207,12 +207,22 @@ def compute_esd_for_weight(
         }
 
 
+def _svdvals_for_measurement(matrix: torch.Tensor) -> torch.Tensor:
+    """Use CUDA's QR driver when precision matters; leave CPU dispatch intact.
+
+    Default CUDA Jacobi SVD exceeded the pilot's spectral-error tolerance on
+    well-conditioned 768/2048-wide matrices. This also governs Gram fallback.
+    """
+    kwargs = {"driver": "gesvd"} if matrix.is_cuda else {}
+    return torch.linalg.svdvals(matrix, **kwargs)
+
+
 def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch.Tensor:
     """Compute squared singular values efficiently via Gram matrices or SVD.
 
     Accepts 2D (M,N) or batched 3D (B,M,N) tensors and returns a 1D tensor of
     squared singular values (flattened for batched input). 
-    If use_svd is True, uses torch.linalg.svdvals directly.
+    If use_svd is True, uses torch.linalg.svdvals (CUDA: QR-based gesvd).
     Otherwise,
     Uses eigvalsh on the smaller Gram matrix (A A^T if M<=N else A^T A) for
     speed and numerical stability, clamping tiny negative values to zero.
@@ -221,7 +231,7 @@ def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch
     ill-conditioned matrices due to condition number squaring.
     """
     if use_svd:
-        svals = torch.linalg.svdvals(matrix)
+        svals = _svdvals_for_measurement(matrix)
         return torch.square(svals) if matrix.ndim == 2 else torch.square(svals).reshape(-1)
     
     # Ensure numeric symmetry before eigvalsh to avoid off-diagonal noise
@@ -244,7 +254,7 @@ def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch
                 evals = torch.linalg.eigvalsh(G + eps * I)
             except Exception:
                 # Fallback: exact SVD path
-                svals = torch.linalg.svdvals(matrix)
+                svals = _svdvals_for_measurement(matrix)
                 return torch.square(svals)
         return torch.clamp(evals, min=0)
     elif matrix.ndim == 3:
@@ -269,7 +279,7 @@ def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch
                 return torch.clamp(evals, min=0).reshape(-1)
             except Exception:
                 # Fallback: exact batched SVD path
-                svals = torch.linalg.svdvals(matrix)
+                svals = _svdvals_for_measurement(matrix)
                 return torch.square(svals).reshape(-1)
     else:
         logger.warning(f"_squared_singular_values: unsupported shape {matrix.shape}")

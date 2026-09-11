@@ -97,6 +97,8 @@ def runtime_provenance(model, args):
     cuda_backend = getattr(getattr(torch, "backends", None), "cuda", None)
     matmul = getattr(cuda_backend, "matmul", None)
     return {
+        "model_class": f"{type(model).__module__}.{type(model).__name__}",
+        "loading_info": getattr(model, "_model_zoo_loading_info", None),
         "model_config_commit_hash": getattr(config, "_commit_hash", None),
         "model_config_name_or_path": getattr(config, "_name_or_path", None),
         "torch_version": getattr(torch, "__version__", None),

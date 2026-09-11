@@ -137,6 +137,38 @@ def test_callable_quantized_weight_is_reported_without_guessing_unpacking():
     assert coverage[""]["reason"] == "weight_is_not_a_tensor"
 
 
+@pytest.mark.parametrize("recurrent_class", [nn.LSTM, nn.GRU])
+def test_real_packed_recurrent_weights_are_reported_once_per_owning_module(recurrent_class, monkeypatch):
+    model = nn.ModuleDict({
+        "recurrent": recurrent_class(4, 4, num_layers=2, batch_first=True),
+        "projection": nn.Linear(4, 4),
+    }).eval()
+    quantized = torch.ao.quantization.quantize_dynamic(
+        model, {recurrent_class, nn.Linear}, dtype=torch.qint8, inplace=False
+    )
+    assert not list(quantized.recurrent.named_parameters())
+    assert len(quantized.recurrent._all_weight_values) == 2
+
+    def forbidden_unpack():
+        raise AssertionError("Coverage must not unpack recurrent weights")
+
+    monkeypatch.setattr(quantized.recurrent, "get_weight", forbidden_unpack)
+    layers, coverage = describe(quantized)
+
+    assert layers == []
+    # Neither recurrent PackedParameter children nor LinearPackedParams are
+    # independent learned layers and must not inflate module coverage counts.
+    assert list(coverage) == ["recurrent", "projection"]
+    recurrent = coverage["recurrent"]
+    assert recurrent["status"] == "skipped"
+    assert recurrent["reason"] == "unsupported_weight_attribute"
+    assert recurrent["weight_attribute"] == "_all_weight_values"
+    assert recurrent["unsupported_weight_attributes"] == ["_all_weight_values"]
+    assert recurrent["weight_shape"] is None
+    assert recurrent["measurement_names"] == []
+    assert coverage["projection"]["reason"] == "weight_is_not_a_tensor"
+
+
 @pytest.mark.parametrize("attribute", ["qweight", "weight_packed", "packed_weight"])
 def test_known_packed_attributes_are_visible_without_unpacking(attribute):
     module = nn.Module()
