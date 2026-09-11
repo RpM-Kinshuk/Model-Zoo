@@ -29,6 +29,8 @@ def write_pair(tmp_path, config):
         h5.attrs["measurement_config_json"] = json.dumps(config)
         h5.create_dataset("layers/longname", data=["classifier"], dtype=h5py.string_dtype())
         h5.create_dataset("layers/alpha", data=[2.0])
+        if config.get("save_eigs"):
+            h5.create_dataset("eigs", (1,), dtype=h5py.vlen_dtype("float32"))[0] = [1., 2.]
     return csv_path, h5_path
 
 
@@ -69,7 +71,7 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
 @pytest.mark.parametrize("key,value", [
     ("load_dtype", "float16"), ("compute_dtype", "float64"),
     ("evals_thresh", 0.001), ("filter_zeros", False), ("use_svd", False),
-    ("fix_fingers", "DKS"), ("save_eigs", True), ("requested_revision", "other"),
+    ("fix_fingers", "DKS"), ("save_eigs", False), ("requested_revision", "other"),
     ("source_model", "org/other"),
 ])
 def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
@@ -83,8 +85,6 @@ def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
 @pytest.mark.parametrize("mutation", ["legacy", "corrupt", "unaligned", "missing_config", "missing_eigs"])
 def test_incomplete_or_old_artifacts_are_not_completed(tmp_path, mutation):
     config = measurement_config(SimpleNamespace())
-    if mutation == "missing_eigs":
-        config["save_eigs"] = True
     csv_path, h5_path = write_pair(tmp_path, config)
     if mutation == "corrupt":
         h5_path.write_text("not HDF5")
@@ -96,6 +96,8 @@ def test_incomplete_or_old_artifacts_are_not_completed(tmp_path, mutation):
                 h5.create_dataset("layers/n_tail", data=[1, 2])
             elif mutation == "missing_config":
                 del h5.attrs["measurement_config_json"]
+            elif mutation == "missing_eigs":
+                del h5["eigs"]
     assert not artifact_compatibility(csv_path, h5_path, config)[0]
 
 

@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum, not saved eigenvalues")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
-    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save full computed spectra in HDF5")
+    parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")
     parser.add_argument("--load_dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto", help="Checkpoint/framework-selected loading precision by default")
     parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 for reference checks")
     
@@ -824,7 +824,7 @@ def main():
                     fix_fingers=fix_fingers_value,
                     filter_zeros=args.filter_zeros,
                     use_svd=args.use_svd,
-                    save_eigs=getattr(args, "save_eigs", False),
+                    save_eigs=getattr(args, "save_eigs", True),
                     parallel=args.parallel_esd,
                     compute_dtype=measurement["compute_dtype"],
                     coverage=layer_coverage,
@@ -861,7 +861,7 @@ def main():
                     base_model_relation=args.base_model_relation or "",
                     fix_fingers=args.fix_fingers or "",
                     h5_output_path=temp_metrics_file,
-                    save_eigs=getattr(args, "save_eigs", False),
+                    save_eigs=getattr(args, "save_eigs", True),
                     measurement_config=measurement,
                     coverage=coverage,
                 )

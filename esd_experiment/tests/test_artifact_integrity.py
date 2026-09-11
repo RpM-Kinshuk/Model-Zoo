@@ -21,7 +21,7 @@ def write_pair(tmp_path, *, names=("encoder.layers.0.q", "decoder.layers.0.q"),
                alphas=(2.5, math.nan), full_name="org/model"):
     csv_path = tmp_path / "model.csv"
     h5_path = tmp_path / "model.h5"
-    config = measurement_config(SimpleNamespace(), model_id=full_name)
+    config = measurement_config(SimpleNamespace(save_eigs=False), model_id=full_name)
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["model_id", "longname", "alpha"])

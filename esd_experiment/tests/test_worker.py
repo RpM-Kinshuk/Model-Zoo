@@ -894,6 +894,7 @@ def test_main_treats_h5_write_failure_as_failed_run_without_final_csv(tmp_path: 
         }
     )
 
+    worker.net_esd_estimator.return_value["eigs"] = [worker.np.array([1., 2.])]
     original_save_h5 = worker.save_h5
 
     def failing_save_h5(*args, **kwargs):

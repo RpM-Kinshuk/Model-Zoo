@@ -42,6 +42,8 @@ def _write_compatible_h5(path, config=None):
         )
         h5.create_dataset("layers/longname", data=["model.layers.0.proj"], dtype=h5py.string_dtype())
         h5.create_dataset("layers/alpha", data=[2.0])
+        if config is None or config.get("save_eigs"):
+            h5.create_dataset("eigs", (1,), dtype=h5py.vlen_dtype("float32"))[0] = [1., 2.]
 
 
 @contextmanager
@@ -142,6 +144,26 @@ def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
     args = run_experiment.parse_args()
 
     assert args.max_concurrent_jobs == 3
+
+
+@pytest.mark.parametrize("flags,expected", [([], True), (["--save_eigs"], True), (["--no-save_eigs"], False)])
+def test_eigenvalue_storage_default_and_opt_out_reach_worker(monkeypatch, tmp_path, flags, expected):
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", "models.csv",
+                                    "--output_dir", str(tmp_path), *flags])
+    args = run_experiment.parse_args()
+    assert args.save_eigs is expected
+    assert run_experiment.measurement_config(args)["save_eigs"] is expected
+    command = generate_commands(pd.DataFrame([{"model_id": "org/model", "source_model": "",
+                                              "base_model_relation": ""}]), tmp_path, args)[0]
+    assert ("--save_eigs" if expected else "--no-save_eigs") in command
+
+    with _worker_module_context():
+        spec = importlib.util.spec_from_file_location("worker_storage_default_test", PROJECT_ROOT / "src/worker.py")
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        monkeypatch.setattr(sys, "argv", ["worker.py", "--model_id", "org/model",
+                                        "--output_dir", str(tmp_path), *flags])
+        assert worker.parse_args().save_eigs is expected
 
 
 def test_parse_args_accepts_stage_timeout_seconds(monkeypatch):

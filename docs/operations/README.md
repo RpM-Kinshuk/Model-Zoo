@@ -10,7 +10,7 @@ This is the primary human entrypoint for Model-Zoo operations across phases 1 an
 
 - `phase-contract.md` for the phase ownership split and canonical file contract.
 - `curation.md` for the phase 1 curated outputs.
-- `analysis.md` for the shortest phase-2 spin-up note and output checks.
+- [Analysis](analysis.md) for phase-2 commands, measurements, storage and supervision.
 
 ## Canonical Locations
 

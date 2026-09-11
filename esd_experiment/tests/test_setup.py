@@ -153,7 +153,7 @@ def test_file_structure():
         "utils/create_model_list.py": "Model list utility",
         "run_experiment.py": "Entry point wrapper",
         "README.md": "Main README",
-        "docs/QUICKSTART.md": "Quick start guide",
+        "../docs/operations/analysis.md": "Analysis guide",
     }
     
     all_ok = True

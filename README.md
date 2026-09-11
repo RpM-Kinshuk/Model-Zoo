@@ -427,8 +427,8 @@ flowchart TB
 
     subgraph PREPARE["①  SELECT + PREPARE"]
         direction LR
-        LAYERS["Linear · Conv1d · Conv2d"]
-        FILTER["skip aspect ratio ≥ 8"]
+        LAYERS["Linear · Embedding<br/>Conv1d/2d/3d · HF Conv1D"]
+        FILTER["skip unsupported weights<br/>and Linear aspect ratio ≥ 8"]
         SPLIT["split fused attention<br/>Q · K · V"]
         MATRIX["2D weight matrix<br/>or batched conv matrices"]
         LAYERS --> FILTER --> SPLIT --> MATRIX
@@ -437,8 +437,8 @@ flowchart TB
     subgraph SOLVE["②  COMPUTE THE SPECTRUM"]
         direction LR
         CHOICE{"solver"}
-        GRAM["DEFAULT<br/>smaller symmetric<br/>Gram matrix"]
-        SVD["--use_svd<br/>direct singular<br/>values"]
+        GRAM["--no-use_svd<br/>smaller symmetric<br/>Gram matrix"]
+        SVD["DEFAULT<br/>direct singular<br/>values"]
         STABLE["sort · threshold<br/>numerical safeguards"]
         CHOICE -->|fast path| GRAM
         CHOICE -->|robust path| SVD
@@ -487,10 +487,11 @@ The estimator avoids copying the model, skips linear matrices with aspect ratio 
 | Option | Default | Choice |
 | --- | ---: | --- |
 | `--fix_fingers` | `xmin_mid` | `xmin_mid` · `xmin_peak` · `DKS` |
-| `--evals_thresh` | `1e-5` | Near-zero eigenvalue cutoff |
+| `--evals_thresh` | `1e-5` | Absolute cutoff for fitting and retained metrics; saved spectra stay full |
 | `--bins` | `100` | Histogram resolution for `xmin_peak` |
-| `--use_svd` | off | Direct SVD instead of the Gram path |
-| `--filter_zeros` | on | Filter values below the threshold |
+| `--use_svd` | on | Direct SVD; `--no-use_svd` selects Gram eigenvalues |
+| `--save_eigs` | on | Save full spectra; `--no-save_eigs` stores scalars only |
+| `--filter_zeros` | on | Retain values strictly above the threshold |
 | `--parallel_esd` | on | Distribute layers across visible GPUs |
 
 `xmin_mid` is fastest. `xmin_peak` focuses cutoff candidates near the histogram peak. `DKS` scans valid cutoffs and minimizes the Kolmogorov–Smirnov distance.
@@ -578,20 +579,19 @@ net_esd/
 ## Verify the installation
 
 ```bash
-python -m pytest esd_experiment/tests -q
+python -m pytest esd_experiment/tests -q \
+  --ignore=esd_experiment/tests/test_setup.py \
+  --ignore=esd_experiment/tests/test_gpu.py
 python esd_experiment/tests/test_setup.py
 python esd_experiment/tests/test_gpu.py
 ```
-
-Current suite: **146 passing tests**.
 
 ## Read next
 
 | Guide | Best for |
 | --- | --- |
-| [Quick start](esd_experiment/docs/QUICKSTART.md) | The shortest launch path |
-| [Infrastructure overview](esd_experiment/docs/OVERVIEW.md) | Component boundaries |
-| [GPU supervision](esd_experiment/docs/GPU_FIX.md) | Assignment and stale-worker details |
+| [Experiment runner](esd_experiment/README.md) | Quick start and code map |
+| [Analysis guide](docs/operations/analysis.md) | Measurements, storage, resume and GPU supervision |
 | [Operations](docs/operations/README.md) | End-to-end workflow context |
 
 ---

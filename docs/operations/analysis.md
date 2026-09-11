@@ -1,153 +1,55 @@
-# Analysis
+# ESD analysis
 
-Run phase 2 analysis from `data/curated/model_zoo_phase2.csv` and write outputs under `analysis_runs/phase2/<run_name>/`.
-
-## Quick Spin-Up
-
-If you just want to run phase 2, this is the default pattern:
+Run from the repository root with a curated model list and a fresh output directory:
 
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list data/curated/model_zoo_phase2.csv \
-  --output_dir analysis_runs/phase2/numerics_v5_loader_v2 \
-  --gpus 0 1 2 3 --save_eigs
+  --output_dir analysis_runs/phase2/my_run \
+  --gpus 5 6 7 --num_gpus_per_job 1
 ```
 
-Use a fresh run directory. `--save_eigs` is recommended for dataset collection;
-without it, only scalar layer measurements are stored.
+`run_script.sh` is the local HPC wrapper; check its paths and flags before use.
+Eigenvalues are saved by default. Use `--no-save_eigs` for scalar-only outputs.
 
-The runner reads `loader_scenario` first, but it also consumes optional curated fields such as `files`, `repo_files`, `pipeline_tag`, `Architecture`, `model_type`, and `Available on the hub` when they are present. Quantized-native rows are only blocked early when they resolve to an explicit `gptq` or `awq` backend requirement.
+## Measurement settings
 
-## Scheduling And Supervision
+| Setting | Default | Meaning |
+|---|---|---|
+| `--save_eigs` | on | Store full computed spectra in HDF5, including zeros and filtered values. |
+| `--load_dtype` | `auto` | Checkpoint/framework-selected precision; not a guarantee of mixed-dtype preservation. |
+| `--compute_dtype` | `float32` | SVD/Gram precision; use `float64` for reference checks. |
+| `--use_svd` | on | CUDA uses precision-focused `gesvd`; `--no-use_svd` selects Gram eigenvalues. |
+| `--filter_zeros` | on | Retain eigenvalues strictly above `--evals_thresh` for fitting and retained metrics. |
+| `--evals_thresh` | `1e-5` | Absolute threshold; rescaling weights can change which eigenvalues survive. |
+| `--fix_fingers` | `xmin_mid` | Cutoff selection: `xmin_mid`, `xmin_peak`, or full-KS minimization with `DKS`. |
+| `--parallel_esd` | on | Parallel layer analysis; disable with `--no-parallel_esd`. |
 
-The phase-2 infra is meant to be reusable:
+Upcasting cannot restore precision lost while loading. Gram construction can
+lose small-eigenvalue accuracy and inflate numerical rank; keep SVD as the
+default. Gram jitter/fallback is not recorded per layer.
 
-```
-run_experiment.py -> gputracker -> worker.py -> model_loader.py -> net_esd
-```
+## Outputs and resume
 
-The runner writes `<output_dir>/gpu_config.json`. Edit it and send `SIGHUP` to the runner PID to reload scheduling policy:
+Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
 
-```json
-{
-  "available_gpus": [0, 1, 2, 3],
-  "max_checks": 1,
-  "memory_threshold_mb": 500,
-  "max_concurrent_jobs": 2,
-  "stale_process_action": "log",
-  "heartbeat_timeout_seconds": 7200,
-  "stage_timeout_seconds": {
-    "load": 7200,
-    "analyze": 28800,
-    "save": 1800,
-    "default": 14400
-  },
-  "termination_grace_seconds": 30
-}
-```
-
-- `heartbeat_timeout_seconds` catches workers that stop writing heartbeats.
-- `stage_timeout_seconds` catches workers that are alive but stuck in one foreground stage.
-- `stale_process_action` should be `log` while tuning and `terminate` once the windows are trusted.
-
-Live state is in `logs/current_state.json`. Per-worker active logs, heartbeat files, and worker caches are removed when the worker finishes, fails, or is killed; terminal status and failure summaries remain.
-
-## What To Check After The Run
-
-- successful models should have both:
-  - `stats/*.csv`
-  - `metrics/*.h5`
-- failures should appear in:
-  - `logs/failed_models.txt`
-  - `logs/failure_records.jsonl`
-- `summary.csv` is useful for quick inspection, but it is not the success rule
-
-## Completion Rule
-
-A model is complete only when its CSV/HDF5 pair has the current schema and
-numerics and loader versions, aligned canonical layer names and alpha values, and matching
-requested measurement settings. Resume checks loading/computation precision,
-filtering, fitting settings, spectrum storage, and requested model revision.
-Recorded runtime details may differ across machines; they are provenance, not
-a claim of CPU/GPU equivalence. Pin HF commit SHAs: a moving `main` branch is
-not refreshed or re-resolved by an offline resume check.
-
-Incompatible, unreadable, or incomplete existing artifacts stop the run with an
-explanation. They are not deleted automatically. Use a fresh output directory,
-or explicitly pass `--overwrite` to regenerate the selected models. Overwrite
-removes those models' previous outputs before loading; it is not a migration.
-
-## Numerical Results
-
-New HDF5 outputs carry `numerics_version="5"` and `format_version="2.0"`.
-Their measurement configuration includes `loader_version="2"` and
-`cuda_svd_driver="gesvd"`. V5 changes CUDA SVD to the precision-focused QR
-driver; the CPU formulas and measurement definitions are unchanged from v4.
-Loader v2 adds adapter integrity checks; it does not change spectral formulas.
-Do not combine versions in a research run. Local `run_script.sh` changes are
-left untouched; check its output directory and flags before using it.
-
-### Checkpoint integrity
-
-Ordinary Transformers loads prefer the checkpoint's declared, compatible
-built-in architecture, including base encoders and task-specific heads. The
-metadata-derived loader scenario is a routing hint, not the instantiated class.
-`runtime.model_class` and `runtime.loading_info` record what was actually loaded.
-Missing/mismatched weights, loading errors, and unexplained unexpected keys fail
-before measurement; the exact historical GPT2 `masked_bias` buffers are the
-only permitted unexpected-key exception and remain recorded. Ambiguous built-in
-architecture declarations fail rather than choosing a head arbitrarily.
-
-This deliberately rejects partial or task-converted checkpoints that would
-initialize or discard weights. Quantized routing remains unchanged.
-
-For ordinary/RSLoRA matrix adapters, the loader checks the exact configured
-tensor keys, shapes, and finiteness **before applying checkpoint tensors**.
-Missing tensors, surplus keys (including injected base weights), and unconfigured
-embedding dumps fail explicitly. Loaded adapter values must match the payload
-after the recorded dtype conversion; merging uses PEFT's `safe_merge=True`.
-Configured saved heads and `bias="all"` are checked too. DoRA, other PEFT types,
-`bias="lora_only"`, embedding/convolution LoRA layouts, and unvalidated
-topology/initializer variants are deliberately rejected, not claimed as supported.
-This validation covers materialized CPU/GPU bases, not Accelerate CPU/disk
-offloading or meta tensors. Existing quantized-to-dense upstream substitution
-is recorded as such and was not validated by the adapter pilot.
-
-Adapter and base revisions are resolved separately. Pin both; a checkpoint whose
-adapter config leaves the base revision unspecified cannot establish which base
-revision was used in training. `runtime.loading_info` records requested/loaded
-base references, the base config commit, adapter configuration and tensor hashes,
-dtypes, verification scope, and `adapter_weights_verified=true` after validation.
-That flag concerns checkpoint integrity, not scientific validity or every PEFT
-variant. Installed loader/backend package versions are also recorded; their
-presence does not imply they were all used.
-
-The production remote-code policy is unchanged: do not treat this loader audit
-as authorization to execute code from arbitrary HF repositories.
-
-### Layer identity and storage
-
-- `/layers/longname` is the canonical measurement identity. All scalar metrics,
-  including `/layers/alpha`, are aligned with it. `/layers/module_name` and
-  `/layers/slice` distinguish original modules from emitted Q/K/V slices.
-  Arbitrary names and missing fits are preserved; duplicate identities or
-  unequal metric lengths are errors, not silently averaged/truncated data.
-- Root `/eigs[i]`, when requested, is the **full computed spectrum** for
-  `/layers/longname[i]`, including zeros and values below `evals_thresh`.
-  Float32 spectra are stored as float32; float64 reference spectra remain
-  float64. Eigenvalue arrays are not duplicated as strings in CSV.
-- Root `/alpha` is only a derived depth-by-module compatibility view. Encoder
-  and decoder namespaces are separated. Its `view_status` is `complete`,
-  `partial`, or `unavailable`; `/alpha_unmapped_longname` lists omitted names.
-  Unrecognized depth layouts and dense views exceeding one million cells do
-  not prevent canonical records from being saved. New consumers should read
-  `/layers`, not infer layer identities from this matrix.
-- `/coverage` contains module names, layouts, analyzed/skipped status, and skip
-  reasons. Counts distinguish candidate modules from emitted measurements and
-  finite fits. `logs/coverage/<model>.json` also preserves this report and its
-  measurement configuration when all candidates are skipped.
-
-For example:
+- `/layers/longname` is the canonical identity; every scalar metric is aligned
+  with it. `/layers/module_name` and `/layers/slice` identify original modules
+  and Q/K/V slices. Arbitrary names and missing fits remain present.
+- `/eigs[i]` is the full spectrum for `/layers/longname[i]`, unless saving was
+  disabled. Float32/float64 spectra retain their computed dtype. CSV contains
+  scalars, not duplicated eigenvalue strings.
+- `/coverage` records candidate modules, analyzed/skipped status and reasons.
+  Candidate counts differ from measurement and finite-fit counts. A completed
+  model can have partial coverage; inspect it before cross-model comparisons.
+- Root `/alpha` is a derived depth-by-module view, **not** canonical storage.
+  Its `view_status` is `complete`, `partial`, or `unavailable`; omitted names
+  appear in `/alpha_unmapped_longname`. Large/unrecognized layouts do not block
+  canonical records.
+- `measurement_config_json` records requested settings and runtime provenance:
+  actual model class, loading checks, installed backend versions and config
+  commit. Per-layer fields record source/compute dtype, compute device, weight
+  layout and fit status. Visible GPU names alone do not identify where a layer ran.
 
 ```python
 import h5py
@@ -155,138 +57,127 @@ import h5py
 with h5py.File("metrics/org--model.h5", "r") as h5:
     names = h5["layers/longname"].asstr()[:]
     alphas = h5["layers/alpha"][:]
-    first_spectrum = h5["eigs"][0]  # Only present with --save_eigs.
+    first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-### Precision, filtering, and interpretation
+Current output versions are numerics **5**, loader **2**, HDF5 format **2.0**.
+Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
+aligned alpha values and requested measurement settings must match. Changing
+spectrum storage, precision, filtering or model revisions requires new outputs.
+Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
-- Loading defaults to `--load_dtype auto` (checkpoint/framework-selected),
-  replacing forced float16. This does not guarantee preservation of mixed
-  checkpoint dtypes. Other explicit choices are `float32`, `float16`, and
-  `bfloat16`. `--compute_dtype float32` is the default SVD/Gram precision;
-  `float64` is available for reference checks. Upcasting cannot restore
-  information already lost during loading.
-- `--use_svd` is now the consistent runner/worker default. `--no-use_svd`
-  explicitly selects Gram eigenvalues; ill-conditioned spectra can lose
-  precision through the Gram construction. `--no-parallel_esd` disables
-  multi-device dispatch. The runner forwards both positive and negative flags.
-  CUDA SVD uses `gesvd`, including SVD fallbacks from Gram; CPU uses the default
-  LAPACK route. `cuda_svd_driver` records this policy, not proof that a Gram
-  measurement used SVD. Gram jitter/fallback is not yet recorded per layer.
-- `--filter_zeros` retains values strictly above `evals_thresh` for the existing
-  norm/rank/entropy and fitting metrics. `--no-filter_zeros` disables that
-  absolute filter; fitting still requires positive values. Saved spectra are
-  unfiltered in either case. `raw_norm`, `raw_spectral_norm`, `raw_matrix_rank`,
-  `raw_entropy`, and `raw_num_evals` describe the full computed spectrum;
-  existing unprefixed fields describe the retained spectrum. `norm` is
-  `sum(eigenvalues)`, the squared Frobenius norm for a 2D weight matrix.
-- HDF5 `measurement_config_json` records the requested conventions and runtime
-  provenance. Per-layer fields include `source_dtype` (loaded tensor dtype),
-  `compute_dtype`, `compute_device`, `weight_layout`, and `fit_status`.
-  `runtime.model_config_commit_hash` identifies the loaded model config; for a
-  merged adapter this may be the **base** config, not the adapter's commit.
-  Runtime `gpu_names` lists visible GPUs, whereas per-layer `compute_device`
-  identifies where each measurement actually ran.
+Pin HF commit SHAs, including adapter bases. Offline resume does not re-resolve
+moving `main` branches. Incompatible/incomplete artifacts stop the run without
+deletion. Prefer a fresh directory; explicit `--overwrite` deletes the selected
+models' previous outputs before loading. `summary.csv` alone is not completion.
 
-- `D` is the full two-sided Kolmogorov–Smirnov distance, checking both sides of
-  each empirical-CDF jump. MLE/CDF calculations use stable float64 log ratios
-  and `expm1`. DKS minimizes this distance over candidate cutoffs;
-  `xmin_mid` and `xmin_peak` retain their cutoff-selection rules. Exhaustive
-  search batches at most 64 cutoffs at a time: workspace is bounded by
-  `O(64 * spectrum_size)`, while exhaustive computation remains quadratic.
-- Per-layer CSV fields `fit_xmin` and `n_tail` record the selected fitting cutoff
-  and the number of positive retained eigenvalues at or above it. Equal values
-  at the cutoff are all included. With no fit, `fit_xmin` is NaN and `n_tail` is
-  zero. Existing `xmin`/`xmax` still describe the retained spectrum, not fit limits.
+## Loading and coverage
+
+Ordinary Transformers loads preserve the checkpoint's compatible built-in
+architecture. Metadata loader scenarios are routing hints, not model identity.
+Missing/mismatched weights, loading errors, unexplained extra keys and ambiguous
+architecture declarations fail before analysis. Only the exact historical GPT2
+`masked_bias` buffers are permitted as extra keys, and remain recorded.
+
+Ordinary/RSLoRA matrix adapters are checked for exact configured keys, shapes,
+finite values and correct loading after recorded dtype conversion; merging uses
+`safe_merge=True`. This includes HF Conv1D, configured saved heads and
+`bias="all"`. Adapter/base revisions remain separate, and provenance records
+requested/loaded base references plus adapter configuration/tensor hashes.
+An unspecified historical training-base revision cannot be reconstructed from
+these checks.
+
+DoRA, other PEFT types, `bias="lora_only"`, embedding/convolution LoRA,
+unconfigured embedding dumps and unvalidated topology/initializer variants fail
+explicitly. Adapter validation covers materialized CPU/GPU bases, not Accelerate
+CPU/disk offloading or meta tensors. Existing quantized-to-dense upstream
+substitution is recorded and must not be interpreted as quantized measurement
+equivalence. Custom repositories may execute remote code; inspect them before
+allowing execution.
+
+Supported dense weights include Linear subclasses, embeddings, Conv1d/2d/3d
+and HF Conv1D projections. Packed/custom representations are skipped with
+reasons, including packed recurrent weights. There is no automatic quantized
+reconstruction. The existing Linear aspect-ratio skip and name/shape-based QKV
+split remain measurement conventions.
+
+## Interpreting the metrics
+
+- Unprefixed norm/rank/entropy fields describe the retained spectrum. `raw_*`
+  fields describe the full computed spectrum. `norm` is the sum of eigenvalues
+  (squared Frobenius norm for a 2D weight matrix).
+- `fit_xmin` and `n_tail` describe the fitted positive tail, including all ties
+  at the cutoff. `xmin`/`xmax` are retained-spectrum extrema, not fitted limits.
+  `D` checks both sides of empirical-CDF jumps using stable float64 log-space
+  calculations. Exhaustive cutoff search uses batches of 64: bounded
+  `O(64 * spectrum_size)` workspace, but still quadratic total work.
 - Numerical rank uses `max(rows, columns)` in the singular-value tolerance.
-  Entropy uses normalized probabilities over the largest numerically retained
-  eigenvalues, divided by `log(matrix_rank)`. Rank-one entropy is zero;
-  zero-rank entropy is undefined. This measures evenness among numerically
-  active directions and can jump when numerical rank changes despite negligible
-  energy change. `raw_entropy` uses the same rank-normalized definition without
-  the absolute eigenvalue filter; it does not remove this discontinuity.
-- Constant spectra and other undefined power-law fits have missing `alpha`, `D`,
-  `alpha_weighted`, and `log_alpha_norm` values in CSV. The HDF5 alpha matrix uses
-  NaN for missing fits. `fit_status` distinguishes `fitted`,
-  `no_retained_eigenvalues`, `insufficient_positive_eigenvalues`,
-  `constant_spectrum`, and `no_valid_cutoff`. Missing fits never remove
-  canonical layer records.
-- Rank-one layers remain in the output. With filtering enabled, values at or
-  below `evals_thresh` stay excluded even when none survive. Such a layer has
-  `num_evals=0`, zero retained norm and rank, and missing retained spectrum
-  extrema. Its full spectrum and raw measurements remain available.
-- Zero retained norms have NaN `log_norm`, `log_spectral_norm`, and `stable_rank`;
-  these are undefined measurements, not ordinary numeric zeros.
-- The worker reports the number of finite fits (`alpha > 1`). Models with useful
-  spectral measurements can complete even when every fit is missing;
-  `analysis_empty` means no usable layer measurements were returned. A finite
-  exponent or a low `D` alone does not establish power-law behavior or model quality.
-- `log_alpha_norm` is computed in log space to avoid overflow.
-- Standard Conv1d/2d/3d, Linear subclasses, embeddings, and declared HF Conv1D
-  projections are supported. Unknown/packed quantized representations are
-  skipped with reasons, not treated as ordinary dense matrices. The existing
-  Linear aspect-ratio skip and name/shape-based QKV split remain explicit
-  conventions; arbitrary custom architectures may need declared adapters.
-  Packed PyTorch dynamic LSTM/GRU modules are explicitly reported as skipped,
-  without unpacking their weights or double-counting storage helpers.
-- Convolution normalization is unchanged: spatial-kernel slice spectra are
-  pooled after multiplying each slice by `sqrt(conv_norm)` (default `0.5`).
-  These are descriptors of normalized kernel slices, **not** the complete
-  convolution operator; even `raw_*` refers to these slices. Match pooling,
-  scaling, filtering, dtype, and fit conventions when comparing WeightWatcher.
+  Entropy normalizes the largest rank-many eigenvalues and divides Shannon
+  entropy by `log(rank)`: evenness among numerically active directions. Rank-one
+  entropy is zero; zero-rank entropy is undefined. Tiny changes across a rank
+  threshold can produce large entropy jumps, including in `raw_entropy`.
+- Undefined fits and logarithms use NaN, never numeric failure sentinels.
+  `fit_status` distinguishes fitted, empty/insufficient, constant and invalid
+  tails. Rank-one layers and layers with no retained eigenvalues remain stored.
+  A model can complete with no finite fits if useful spectra were measured.
+- Convolution spectra pool spatial kernel slices, each scaled by
+  `sqrt(conv_norm)` (`conv_norm=0.5`). They are **not** the spectrum of the full
+  convolution operator; this also applies to `raw_*` metrics. Match pooling,
+  scaling, filtering and dtype before comparing with WeightWatcher.
 
-### Small public-checkpoint pilot
+A finite alpha or low fitted KS distance does not establish power-law behavior,
+generalization, or an architecture-independent quality score. Aspect-ratio
+correction and broad predictive validation remain outside this pipeline.
 
-The [v4 pilot summary](pilot_v4.md) is the historical CPU baseline. The
-[v5 pilot summary](pilot_v5.md) adds the automatic-loader audit, real GPU checks,
-matrix-scale controls, and the remaining limitations. The subsequent
-[loader v2 pilot](pilot_loader_v2.md) covers public LoRA adapters and a native
-FP4 checkpoint, with explicit partial coverage and failed negative controls.
+Definitions: [Clauset–Shalizi–Newman](https://arxiv.org/abs/0706.1062),
+[SciPy KS](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kstest.html),
+[LoRA](https://arxiv.org/abs/2106.09685),
+[PEFT checkpoint format](https://huggingface.co/docs/peft/main/en/developer_guides/checkpoint).
 
-The reproducible CPU pilot downloads four pinned public checkpoints (~7.5 MB
-total) covering encoder, decoder, encoder–decoder, and CNN measurements:
+## Scheduling and monitoring
 
-```bash
-python esd_experiment/scripts/measurement_pilot.py \
-  --output-dir analysis_runs/validation/my_pilot \
-  --weightwatcher-path ../WeightWatcher
-```
+`run_experiment.py → gputracker → worker.py → model_loader.py → net_esd`
 
-Use a fresh output directory. The script restricts downloads to config/weights
-and disables remote code, uses explicit built-in model classes, verifies full
-CSV/HDF5 alignment, and compares representative layers against local
-WeightWatcher's accurate SVD on explicit float64 arrays. It also checks seeded
-Pareto, lognormal, Gaussian, near-constant and low-rank controls. It does not
-compare against WeightWatcher's legacy KS or entropy implementations.
+The runner writes `<output_dir>/gpu_config.json`. Edit it and send
+`kill -HUP <runner_pid>` to reload GPU/memory/concurrency and supervision limits.
+Workers see only assigned GPUs: a single physical GPU becomes local `cuda:0`.
+Each worker has its own process group for scoped termination.
 
-This is a numerical/coverage/storage smoke test, not predictive validation,
-or a quantized-model pilot. Its default remains explicit loading on CPU.
-`--loader auto` checks the production loader against complete explicit-class
-state tensors and shared-Parameter ties. `--device cuda:N --parallel-esd`
-exercises threaded multi-GPU dispatch; restrict visibility with
-`CUDA_VISIBLE_DEVICES` first. Requested CUDA never silently falls back to CPU.
-Representative **saved** spectra and separate SVD reruns must meet the fixed
-spectral-error tolerance against WeightWatcher's float64 reference. This is not
-an alpha-error bound or universal CPU/GPU equivalence.
+- `heartbeat_timeout_seconds` detects stopped heartbeats.
+- `stage_timeout_seconds` limits load/analyze/save stages even while heartbeats
+  continue. `termination_grace_seconds` controls shutdown grace.
+- Keep `stale_process_action="log"` while tuning; choose `terminate` only after
+  timeout windows are trusted.
+- `logs/current_state.json` records PID, PGID, assigned GPUs, stage and paths.
+  `logs/failure_records.jsonl`, `logs/failed_models.txt` and
+  `logs/terminal_status/*.json` retain terminal results. Empty-analysis coverage
+  is preserved in `logs/coverage/`.
 
-Most checkpoints are tiny random test models. Before scaling to 50k, extend
-coverage to trained model families, additional quantization/adapter formats,
-and related checkpoint groups. Packed layers still require an explicitly
-validated reconstruction policy before full quantized coverage. No aspect-ratio
-correction or universal quality-score claim is introduced here.
+Active worker logs, heartbeats and per-worker HF caches are removed on completion,
+failure or termination. Copy any needed diagnostic logs before cleanup.
 
-Definitions: [Clauset–Shalizi–Newman, §§3–4](https://arxiv.org/html/0706.1062v2),
-[SciPy KS statistic](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kstest.html),
-[numerical-rank tolerance](https://numpy.org/doc/stable/reference/generated/numpy.linalg.matrix_rank.html),
-and [WeightWatcher normalization](https://github.com/CalculatedContent/WeightWatcher/blob/master/weightwatcher/weightwatcher.py).
+## Validation
 
-## From `esd_experiment/`
-
-From `esd_experiment/`, use:
+Offline regression tests cover numerical edge cases, layer identity, coverage,
+checkpoint/adapter integrity and persistence:
 
 ```bash
-python run_experiment.py \
-  --model_list ../data/curated/model_zoo_phase2.csv \
-  --output_dir ../analysis_runs/phase2/example_run \
-  --gpus 0 1 2 3
+python -m pytest esd_experiment/tests -q \
+  --ignore=esd_experiment/tests/test_gpu.py \
+  --ignore=esd_experiment/tests/test_setup.py
 ```
+
+The reusable matrix check needs no downloads. It compares against SciPy float64
+and records precision/filter/cutoff sensitivity, with a timeout per case:
+
+```bash
+python esd_experiment/scripts/backend_pilot.py \
+  --device cpu --output-dir analysis_runs/validation/cpu_check
+# For GPU: restrict CUDA_VISIBLE_DEVICES and select --device cuda:0.
+```
+
+Prior small public-checkpoint CPU/GPU checks exercised dense loading, LoRA
+merging and FP4 partial coverage; they do not validate heterogeneous model
+quality or full quantized support. GPTQ still needs a healthy checkpoint and a
+consistent backend environment. One-off reports/checkpoint caches are disposable;
+keep production data under `analysis_runs/phase2/`.

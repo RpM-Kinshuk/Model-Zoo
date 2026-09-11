@@ -328,7 +328,7 @@ def parse_args():
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum; saved eigenvalues remain unfiltered")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD computation across multiple GPUs")
-    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save full computed spectra in HDF5")
+    parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")
     parser.add_argument("--load_dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto", help="Checkpoint/framework-selected loading precision by default; no forced float16")
     parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 is useful for reference checks")
     
@@ -476,7 +476,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         cmd_parts.append("--parallel_esd" if args.parallel_esd else "--no-parallel_esd")
         cmd_parts.append(f"--load_dtype {getattr(args, 'load_dtype', 'auto')}")
         cmd_parts.append(f"--compute_dtype {getattr(args, 'compute_dtype', 'float32')}")
-        if getattr(args, "save_eigs", False): cmd_parts.append("--save_eigs")
+        cmd_parts.append("--save_eigs" if getattr(args, "save_eigs", True) else "--no-save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
         if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
         if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")
