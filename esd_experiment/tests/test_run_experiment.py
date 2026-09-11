@@ -28,6 +28,22 @@ apply_preflight = run_experiment.apply_preflight
 collect_run_outcomes = run_experiment.collect_run_outcomes
 
 
+def _write_compatible_h5(path, config=None):
+    import h5py
+    from measurement_config import FORMAT_VERSION, NUMERICS_VERSION
+
+    csv_path = path.parent.parent / "stats" / f"{path.stem}.csv"
+    csv_path.write_text("longname,alpha\nmodel.layers.0.proj,2\n")
+    with h5py.File(path, "w") as h5:
+        h5.attrs["format_version"] = FORMAT_VERSION
+        h5.attrs["numerics_version"] = NUMERICS_VERSION
+        h5.attrs["measurement_config_json"] = run_experiment.json.dumps(
+            config or run_experiment.measurement_config(SimpleNamespace())
+        )
+        h5.create_dataset("layers/longname", data=["model.layers.0.proj"], dtype=h5py.string_dtype())
+        h5.create_dataset("layers/alpha", data=[2.0])
+
+
 @contextmanager
 def _worker_module_context():
     fake_torch = ModuleType("torch")
@@ -500,7 +516,7 @@ def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
 
     completed = get_completed_models(tmp_path, skip_failed=False)
@@ -517,7 +533,7 @@ def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Pat
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_loader_scenario\tunsupported\n"
     )
@@ -627,7 +643,7 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
     (terminal_dir / "org--model-b.json").write_text(
         "{\"model_id\": \"org/model-b\", \"status\": \"success\"}\n"
@@ -654,7 +670,7 @@ def test_collect_run_outcomes_prefers_success_over_stale_failure_history(tmp_pat
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_backend\tstale failure\n"
         "org/model-b\tload\tunsupported_backend\tfresh failure\n"
@@ -724,7 +740,7 @@ def test_worker_threads_loader_scenario_into_load_model(tmp_path: Path):
             max_retries=0,
         )
         worker.load_model = Mock(return_value=(_FakeModel(), False))
-        worker.net_esd_estimator = Mock(return_value={"longname": ["layer.0"], "alpha": [1.0]})
+        worker.net_esd_estimator = Mock(return_value={"longname": ["layer.0"], "alpha": [2.0]})
         worker.save_results = Mock(
             side_effect=lambda metrics, output_path, *args, **kwargs: (
                 output_path.parent.mkdir(parents=True, exist_ok=True),

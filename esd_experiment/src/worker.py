@@ -6,6 +6,7 @@ This is called by the main experiment runner for each model.
 import sys
 import os
 import argparse
+import math
 import warnings
 import traceback
 import threading
@@ -30,6 +31,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_loader import LoaderFailure, load_model, parse_model_string, safe_filename
+from measurement_config import (
+    FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
+    measurement_config as build_measurement_config,
+)
 from net_esd import net_esd_estimator
 
 
@@ -50,19 +55,60 @@ def parse_args():
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
     
     # ESD parameters
-    parser.add_argument("--fix_fingers", type=str, default="xmin_mid", help="xmin selection method")
+    parser.add_argument("--fix_fingers", choices=["xmin_mid", "xmin_peak", "DKS"], default="xmin_mid", help="xmin selection method")
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Eigenvalue threshold")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins")
-    parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter zeros")
-    parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD")
-    parser.add_argument("--use_svd", action="store_true", default=True, help="Use SVD for ESD")
-    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
+    parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum, not saved eigenvalues")
+    parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD")
+    parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
+    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save full computed spectra in HDF5")
+    parser.add_argument("--load_dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto", help="Checkpoint/framework-selected loading precision by default")
+    parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 for reference checks")
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
     parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        build_measurement_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
+
+
+def coverage_report(records, metrics):
+    """Keep module coverage separate from per-measurement fit availability."""
+    counts = {
+        "candidate_modules": len(records),
+        "eligible_modules": sum(bool(record["measurement_names"]) for record in records),
+        "analyzed_modules": sum(record["status"] == "analyzed" for record in records),
+        "partially_analyzed_modules": sum(record["status"] == "partially_analyzed" for record in records),
+        "skipped_modules": sum(record["status"] == "skipped" for record in records),
+        "analyzed_measurements": len(metrics.get("longname", [])),
+        "fitted_measurements": sum(status == "fitted" for status in metrics.get("fit_status", [])),
+    }
+    return {"counts": counts, "modules": records}
+
+
+def runtime_provenance(model, args):
+    """Record observed loading/runtime details without claiming checkpoint-native identity."""
+    config = getattr(model, "config", None)
+    cuda_backend = getattr(getattr(torch, "backends", None), "cuda", None)
+    matmul = getattr(cuda_backend, "matmul", None)
+    return {
+        "model_config_commit_hash": getattr(config, "_commit_hash", None),
+        "model_config_name_or_path": getattr(config, "_name_or_path", None),
+        "torch_version": getattr(torch, "__version__", None),
+        "numpy_version": getattr(np, "__version__", None),
+        "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
+        "device_map_requested": args.device_map,
+        "parallel_esd": args.parallel_esd,
+        "loaded_parameter_dtypes": sorted({str(getattr(p, "dtype", "unknown")) for p in model.parameters()}),
+        "cuda_matmul_allow_tf32": getattr(matmul, "allow_tf32", None),
+        "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+            if torch.cuda.is_available() else [],
+    }
 
 
 def resolve_model_revision(model_id: str, revision_override: str = ""):
@@ -74,11 +120,11 @@ def resolve_model_revision(model_id: str, revision_override: str = ""):
 
 
 # ------------------------------------------------------------
-# Minimal helpers to build and save alpha matrices as .h5 files
-# (mirrors ESD-Independence/Classification/run_metric.py format)
+# Canonical layer records and a derived, compatibility-only alpha matrix.
 # ------------------------------------------------------------
 
 PREFIX_CANDIDATES = {"layers", "layer", "h", "block", "blocks"}
+MAX_ALPHA_VIEW_CELLS = 1_000_000  # Optional dense view must not dominate storage/memory.
 
 def parse_longname(longname: str):
     """
@@ -107,45 +153,119 @@ def parse_longname(longname: str):
             return (layer, module) if module else (None, None)
     return (None, None)
 
+
+def _validate_layer_names(longnames):
+    """Full module paths, including the empty root path, are canonical identities."""
+    if not all(isinstance(name, str) for name in longnames):
+        raise ValueError("Layer longnames must be strings")
+    if len(set(longnames)) != len(longnames):
+        raise ValueError("Duplicate canonical layer longnames")
+
+
 def build_tensor_from_pairs(longnames, alphas):
     """
-    Convert (longname, alpha) lists into a dense matrix:
-      - Deduplicate (layer, module) by averaging alpha.
+    Build a derived depth-by-module matrix without merging distinct identities:
       - Rows: 0..max_layer; Columns: sorted unique module names.
+      - Prefix-qualify modules shared by multiple stacks (e.g. encoder/decoder).
+      - Missing fits do not remove parsed layers or modules.
+      - Unparseable names stay in canonical records, not this optional view.
     Returns (mat [L,M], module_names [list[str]], num_layers [int]).
     """
-    if (not longnames) or (not alphas) or (len(longnames) != len(alphas)):
-        raise RuntimeError("after deduplication and averaging")
+    if len(longnames) != len(alphas):
+        raise ValueError("Layer longnames and alphas must have equal lengths")
+    _validate_layer_names(longnames)
+    parsed = []
+    prefixes_by_module = {}
+    for name, alpha in zip(longnames, alphas):
+        layer, module = parse_longname(name)
+        if layer is None:
+            continue
+        tokens = name.strip().split(".")
+        # parse_longname selects the first recognized depth index.
+        index = next(i for i in range(1, len(tokens))
+                     if tokens[i - 1] in PREFIX_CANDIDATES and tokens[i].isdigit())
+        prefix = ".".join(tokens[:index])
+        prefixes_by_module.setdefault(module, set()).add(prefix)
+        parsed.append((name, layer, module, prefix, alpha))
 
-    df = pd.DataFrame({"longname": longnames, "alpha": alphas})
-    df = df.dropna(subset=["longname", "alpha"])  # type: ignore[arg-type]
+    if not parsed:
+        return np.empty((0, 0), dtype=float), [], 0
 
-    parsed = df["longname"].apply(parse_longname)
-    df["layer"] = [p[0] for p in parsed]
-    df["module"] = [p[1] for p in parsed]
-    df = df.dropna(subset=["layer", "module"])  # type: ignore[arg-type]
-    df["layer"] = df["layer"].astype(int)
+    namespaces = {(prefix, module) for _, _, module, prefix, _ in parsed}
+    labels = {(prefix, module): f"{prefix}.{module}" if len(prefixes_by_module[module]) > 1 else module
+              for prefix, module in namespaces}
+    if len(set(labels.values())) != len(labels):
+        # Rare nested namespaces can resemble another namespace's qualified
+        # label. JSON pairs are unambiguous even for names containing punctuation.
+        labels = {namespace: json.dumps(namespace, ensure_ascii=False) for namespace in namespaces}
+    entries = [(name, layer, labels[prefix, module], alpha)
+               for name, layer, module, prefix, alpha in parsed]
+    # Very unusual nested names can collide even after prefix qualification.
+    # Use their full identities as columns rather than ever averaging them.
+    cells = {}
+    for name, layer, column, alpha in entries:
+        cells.setdefault((layer, column), []).append(name)
+    if any(len(names) > 1 for names in cells.values()):
+        entries = [(name, layer, name, alpha) for name, layer, _, alpha in entries]
 
-    if df.empty:
-        raise RuntimeError("No valid (layer, module) rows after parsing longname")
-
-    df_pairs = (
-        df.groupby(["layer", "module"], as_index=False)
-          .agg(alpha=("alpha", "mean"))
-          .sort_values(by=["layer", "module"]).reset_index(drop=True)
-    )
-
-    module_names = sorted(df_pairs["module"].unique().tolist())
-    num_modules = len(module_names)
-    num_layers = int(df_pairs["layer"].max()) + 1
-
-    mat = np.full((num_layers, num_modules), np.nan, dtype=float)
-    module_index = {m: j for j, m in enumerate(module_names)}
-    for _, row in df_pairs.iterrows():
-        i = int(row["layer"]); j = module_index[row["module"]]
-        mat[i, j] = float(row["alpha"])
-
+    module_names = sorted({column for _, _, column, _ in entries})
+    num_layers = max(layer for _, layer, _, _ in entries) + 1
+    if num_layers * len(module_names) > MAX_ALPHA_VIEW_CELLS:
+        return np.empty((0, 0), dtype=float), [], 0
+    mat = np.full((num_layers, len(module_names)), np.nan, dtype=float)
+    module_index = {module: index for index, module in enumerate(module_names)}
+    occupied = set()
+    for name, layer, column, alpha in entries:
+        cell = (layer, module_index[column])
+        if cell in occupied:
+            raise ValueError(f"Ambiguous derived alpha cell for {name!r}")
+        occupied.add(cell)
+        mat[cell] = float(alpha) if alpha is not None else np.nan
     return mat, module_names, num_layers
+
+
+def _prepare_layer_records(metrics):
+    """Validate row alignment before any output is written; never truncate data."""
+    if "longname" not in metrics or "alpha" not in metrics:
+        raise ValueError("Layer records require longname and alpha columns")
+    records = {}
+    num_rows = len(metrics["longname"])
+    for key, values in metrics.items():
+        if not isinstance(key, str) or "/" in key:
+            raise ValueError(f"Invalid layer metric name: {key!r}")
+        if isinstance(values, (str, bytes)) or not hasattr(values, "__len__"):
+            raise ValueError(f"Layer metric {key!r} must be a sequence")
+        if len(values) != num_rows:
+            raise ValueError(f"Layer metric {key!r} has {len(values)} rows; expected {num_rows}")
+        records[key] = list(values)
+    # The only supported legacy aggregate is an explicitly marked, aligned row.
+    if num_rows and records["longname"][-1] is None:
+        records = {key: values[:-1] for key, values in records.items()}
+    _validate_layer_names(records["longname"])
+    if not records["longname"]:
+        raise ValueError("No canonical layer records to save")
+    return records
+
+
+def _write_layer_dataset(group, key, values):
+    """Store scalar columns natively; retain structured per-layer values as JSON."""
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    if any(isinstance(value, str) for value in values) and all(
+        value is None or isinstance(value, str) for value in values
+    ):
+        dataset = group.create_dataset(key, data=[value if value is not None else "" for value in values],
+                                       dtype=string_dtype)
+        if any(value is None for value in values):
+            dataset.attrs["missing_value"] = ""
+    elif all(value is None or (np.isscalar(value) and not isinstance(value, (str, bytes)))
+             for value in values):
+        group.create_dataset(key, data=np.asarray([np.nan if value is None else value for value in values]))
+    else:
+        dataset = group.create_dataset(
+            key, data=[json.dumps(value, ensure_ascii=False) for value in values], dtype=string_dtype,
+        )
+        dataset.attrs["encoding"] = "json"
+
 
 def save_h5(
     h5_path: Path,
@@ -154,7 +274,14 @@ def save_h5(
     num_layers: int,
     file_attrs: dict,
     eigs=None,
+    layer_records=None,
+    measurement_config=None,
+    coverage=None,
 ):
+    if layer_records is not None:
+        layer_records = _prepare_layer_records(layer_records)
+        if eigs is not None and len(eigs) != len(layer_records["longname"]):
+            raise ValueError("Eigenvalues must be aligned with canonical layer records")
     h5_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(h5_path, "w") as h5:
         dset = h5.create_dataset("alpha", data=mat)
@@ -162,12 +289,43 @@ def save_h5(
         dset.attrs["num_modules"] = int(len(module_names))
         dset.attrs["missing_value"] = "NaN"
         dset.attrs["module_names_json"] = json.dumps(module_names, ensure_ascii=False)
+        dset.attrs["canonical_records"] = "/layers"
+        if layer_records is not None:
+            layers = h5.create_group("layers")
+            layers.attrs["canonical_identity"] = "longname"
+            layers.attrs["num_records"] = len(layer_records["longname"])
+            for key, values in layer_records.items():
+                if key != "eigs":
+                    _write_layer_dataset(layers, key, values)
+            unmapped = [name for name in layer_records["longname"]
+                        if mat.size == 0 or parse_longname(name)[0] is None]
+            dset.attrs["view_status"] = (
+                "unavailable" if len(unmapped) == len(layer_records["longname"])
+                else "partial" if unmapped else "complete"
+            )
+            dset.attrs["unmapped_layer_count"] = len(unmapped)
+            h5.create_dataset("alpha_unmapped_longname", data=unmapped, dtype=h5py.string_dtype("utf-8"))
         if eigs is not None:
-            vlen_float = h5py.vlen_dtype(np.dtype("float64"))
+            # Do not double storage for float32-computed spectra. Preserve
+            # float64 reference spectra (and ordinary Python float inputs).
+            spectrum_dtype = np.dtype("float32") if all(
+                values is None or np.asarray(values).dtype == np.dtype("float32") for values in eigs
+            ) else np.dtype("float64")
+            vlen_float = h5py.vlen_dtype(spectrum_dtype)
             eigs_dset = h5.create_dataset("eigs", (len(eigs),), dtype=vlen_float)
+            eigs_dset.attrs["aligned_with"] = "/layers/longname"
+            eigs_dset.attrs["spectrum"] = "full_computed_spectrum"
+            eigs_dset.attrs["storage_dtype"] = str(spectrum_dtype)
             for i, values in enumerate(eigs):
-                eigs_dset[i] = np.asarray(values if values is not None else [], dtype=np.float64)
-        h5.attrs["format_version"] = "1.0"
+                eigs_dset[i] = np.asarray(values if values is not None else [], dtype=spectrum_dtype)
+        if measurement_config is not None:
+            h5.attrs["measurement_config_json"] = json.dumps(measurement_config, ensure_ascii=False, sort_keys=True)
+        if coverage is not None:
+            h5.create_dataset("coverage", data=json.dumps(coverage, ensure_ascii=False),
+                              dtype=h5py.string_dtype("utf-8"))
+            for key, value in coverage.get("counts", {}).items():
+                h5.attrs[f"coverage_{key}"] = int(value)
+        h5.attrs["format_version"] = FORMAT_VERSION
         for k, v in (file_attrs or {}).items():
             try:
                 h5.attrs[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else str(v)
@@ -185,9 +343,13 @@ def save_results(
     fix_fingers: str = "",
     h5_output_path: Optional[Path] = None,
     save_eigs: bool = False,
+    measurement_config: Optional[dict] = None,
+    coverage: Optional[dict] = None,
 ):
     """
-    Save ESD metrics to CSV file and write alpha matrix to HDF5.
+    Save scalar metrics to CSV and canonical aligned layer records to HDF5.
+    Eigenvalues, when requested, are stored only in HDF5. The root alpha matrix
+    is a derived compatibility view; /layers/longname is the identity authority.
     
     Args:
         metrics: Dictionary of metrics from net_esd_estimator
@@ -198,29 +360,14 @@ def save_results(
         base_model_relation: Relation tag (e.g., adapter/base/finetune)
         fix_fingers: xmin strategy used (DKS/xmin_mid/xmin_peak)
     """
-    # Prepare data for DataFrame
-    data = {}
-    
-    # Get layer names
-    longnames = metrics.get("longname", [])
-    
-    # Add all metrics
-    for key in metrics.keys():
-        if key == "eigs" and not save_eigs:
-            # Skip raw eigenvalues (too large)
-            continue
-        values = metrics[key]
-        
-        # Handle summary row (last element is often aggregate)
-        if key == "longname" and values and values[-1] is None:
-            values = values[:-1]
-        elif len(values) > len(longnames):
-            values = values[:len(longnames)]
-        
-        data[key] = values
-    
-    # Create DataFrame
-    df = pd.DataFrame(data)
+    records = _prepare_layer_records(metrics)
+    longnames, alphas = records["longname"], records["alpha"]
+    eigs = records.get("eigs") if save_eigs else None
+    if save_eigs and eigs is None:
+        raise ValueError("save_eigs requires eigenvalues aligned with layer records")
+    mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+    df = pd.DataFrame({key: values for key, values in records.items() if key != "eigs"})
+    df["alpha"] = pd.to_numeric(df["alpha"], errors="raise")
     
     # Add metadata columns
     df.insert(0, "model_id", model_id)
@@ -235,7 +382,8 @@ def save_results(
     
     # Print summary statistics
     if "alpha" in df.columns:
-        alpha_values = df["alpha"].dropna()
+        alpha_values = df.loc[np.isfinite(df["alpha"]) & (df["alpha"] > 1), "alpha"]
+        print(f"Finite power-law fits: {len(alpha_values)}/{len(df)} layers")
         if len(alpha_values) > 0:
             print(f"Alpha statistics:")
             print(f"  Mean: {alpha_values.mean():.4f}")
@@ -244,42 +392,23 @@ def save_results(
             print(f"  Range: [{alpha_values.min():.4f}, {alpha_values.max():.4f}]")
             print(f"  Layers: {len(alpha_values)}")
 
-    # ---- Also write per-model H5 (alpha matrix) in output_dir/metrics ----
-    longnames = metrics.get("longname", [])
-    alphas = metrics.get("alpha", [])
-    eigs = metrics.get("eigs", []) if save_eigs else None
-    # strip trailing None if present
-    if longnames and longnames[-1] is None:
-        longnames = longnames[:-1]
-    if alphas and alphas[-1] is None:
-        alphas = alphas[:-1]
-    if eigs is not None and eigs and eigs[-1] is None:
-        eigs = eigs[:-1]
-    if len(longnames) != len(alphas):
-        n = min(len(longnames), len(alphas))
-        longnames, alphas = longnames[:n], alphas[:n]
-        if eigs is not None:
-            eigs = eigs[:n]
-
-    if longnames and alphas:
-        mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
-        if h5_output_path is None:
-            h5_dir = output_path.parent.parent / "metrics"
-            h5_path = h5_dir / f"{safe_filename(model_id)}.h5"
-        else:
-            h5_path = h5_output_path
-        relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
-        file_attrs = {
-            "full_name": model_id,
-            "source_model": source_model or "",
-            "base_model_relation": relation_attr,
-            "fix_fingers": fix_fingers,
-            "alpha_only": str(not save_eigs).lower(),
-        }
-        save_h5(h5_path, mat, module_names, num_layers, file_attrs, eigs=eigs)
-        print(f"Saved H5 alpha matrix to: {h5_path}")
+    if h5_output_path is None:
+        h5_path = output_path.parent.parent / "metrics" / f"{safe_filename(model_id)}.h5"
     else:
-        print("Skipping H5 save (no longname/alpha)")
+        h5_path = h5_output_path
+    relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
+    file_attrs = {
+        "full_name": model_id,
+        "source_model": source_model or "",
+        "base_model_relation": relation_attr,
+        "fix_fingers": fix_fingers,
+        "alpha_only": "false",
+        "save_eigs": str(save_eigs).lower(),
+        "numerics_version": NUMERICS_VERSION,
+    }
+    save_h5(h5_path, mat, module_names, num_layers, file_attrs, eigs=eigs,
+            layer_records=records, measurement_config=measurement_config, coverage=coverage)
+    print(f"Saved H5 layer records to: {h5_path}")
 
 
 def temp_output_path(final_path: Path) -> Path:
@@ -474,21 +603,31 @@ def record_failure(
 
 
 def validate_metrics_output(metrics: dict):
+    """Accept useful spectral measurements even when every tail fit is missing."""
     longnames = metrics.get("longname", []) or []
     alphas = metrics.get("alpha", []) or []
     if longnames and longnames[-1] is None:
         longnames = longnames[:-1]
     if alphas and alphas[-1] is None:
         alphas = alphas[:-1]
-    if not longnames:
+    if not longnames or len(longnames) != len(alphas):
         return ("analyze", "analysis_empty")
     usable_pairs = zip(longnames, alphas)
     usable_alpha_count = sum(
         1
         for longname, alpha in usable_pairs
-        if longname is not None and not pd.isna(alpha)
+        if longname is not None and alpha is not None and math.isfinite(alpha) and alpha > 1
     )
-    if usable_alpha_count == 0:
+    norms = metrics.get("norm", []) or []
+    counts = metrics.get("num_evals", []) or []
+    usable_spectrum_count = sum(
+        1
+        for longname, norm, count in zip(longnames, norms, counts)
+        if longname is not None
+        and norm is not None and math.isfinite(norm) and norm >= 0
+        and count is not None and math.isfinite(count) and count >= 0
+    )
+    if usable_alpha_count == 0 and usable_spectrum_count == 0:
         return ("analyze", "analysis_empty")
     return None
 
@@ -542,6 +681,11 @@ def cleanup_model(model):
 def main():
     """Main worker function."""
     args = parse_args()
+    measurement = build_measurement_config(
+        args, model_id=args.model_id, revision=args.revision,
+        source_model=args.source_model, base_model_relation=args.base_model_relation,
+        loader_scenario=args.loader_scenario,
+    )
     
     # Parse model ID (may include revision) and allow curated revision override
     repo_id, revision = resolve_model_revision(args.model_id, args.revision)
@@ -568,7 +712,18 @@ def main():
                     metrics_file,
                 )
         else:
-            if output_file.exists() and metrics_file.exists():
+            if output_file.exists() or metrics_file.exists():
+                compatible, reason = artifact_compatibility(output_file, metrics_file, measurement)
+                if not compatible:
+                    message = (
+                        f"Existing results are incompatible ({reason}). Use a fresh output directory "
+                        "or explicitly pass --overwrite; existing artifacts were not changed."
+                    )
+                    print(message)
+                    record_terminal_status(output_dir, display_name, "failed", "save",
+                                           "incompatible_results", message, attempt=0)
+                    heartbeat.stop(state="failed", stage="save")
+                    return 1
                 print(f"Results already exist: {output_file}")
                 record_terminal_status(
                     output_dir,
@@ -581,14 +736,6 @@ def main():
                 )
                 heartbeat.stop(state="success", stage="skip")
                 return 0
-            if output_file.exists() or metrics_file.exists():
-                print("Incomplete existing outputs detected; clearing stale artifacts before regeneration")
-                cleanup_output_artifacts(
-                    temp_output_file,
-                    temp_metrics_file,
-                    output_file,
-                    metrics_file,
-                )
     except Exception as exc:
         stage, reason, message = classify_runtime_error("save", exc)
         record_failure(output_dir, display_name, stage, reason, message, attempt=0)
@@ -632,7 +779,7 @@ def main():
                     base_model_relation=base_relation,
                     source_model=source_model,
                     device_map=args.device_map,
-                    torch_dtype=torch.float16,
+                    torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
                     revision=revision,
                     loader_scenario=args.loader_scenario if args.loader_scenario else None,
                 )
@@ -646,6 +793,7 @@ def main():
             heartbeat.update(stage=current_stage)
             print(f"Model loaded successfully (adapter: {is_adapter})")
             print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+            measurement["runtime"] = runtime_provenance(model, args)
             
             # Report which device the model is on
             model_devices = set()
@@ -656,6 +804,7 @@ def main():
             # Run ESD analysis
             print("\nRunning ESD analysis...")
             fix_fingers_value = None if args.fix_fingers == "DKS" else args.fix_fingers
+            layer_coverage = []
             
             try:
                 metrics = net_esd_estimator(
@@ -667,15 +816,22 @@ def main():
                     use_svd=args.use_svd,
                     save_eigs=getattr(args, "save_eigs", False),
                     parallel=args.parallel_esd,
+                    compute_dtype=measurement["compute_dtype"],
+                    coverage=layer_coverage,
                 )
             except Exception as exc:
                 stage, reason, message = classify_runtime_error("analyze", exc)
                 raise LoaderFailure(stage, reason, message) from exc
 
+            coverage = coverage_report(layer_coverage, metrics)
+            coverage.update(model_id=display_name, measurement_config=measurement)
+            # Preserve missingness information even if every candidate is skipped.
+            _write_json_atomic(output_dir / "logs" / "coverage" / f"{safe_filename(display_name)}.json", coverage)
+            print(f"Coverage: {json.dumps(coverage['counts'], sort_keys=True)}")
             validation_failure = validate_metrics_output(metrics)
             if validation_failure is not None:
                 stage, reason = validation_failure
-                raise LoaderFailure(stage, reason, "ESD analysis returned no layer metrics")
+                raise LoaderFailure(stage, reason, "ESD analysis returned no usable layer measurements")
             
             print(f"ESD analysis completed successfully")
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
@@ -696,6 +852,8 @@ def main():
                     fix_fingers=args.fix_fingers or "",
                     h5_output_path=temp_metrics_file,
                     save_eigs=getattr(args, "save_eigs", False),
+                    measurement_config=measurement,
+                    coverage=coverage,
                 )
                 finalize_output_path(temp_output_file, output_file)
                 if temp_metrics_file.exists():

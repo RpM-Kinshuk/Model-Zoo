@@ -29,12 +29,14 @@ from typing import FrozenSet, Optional, Tuple
 SCRIPT_DIR = Path(__file__).parent
 EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
+sys.path.insert(0, str(EXPERIMENT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
 from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, WorkerJob
 from model_preflight import classify_row_preflight
 from model_loader import safe_filename
+from measurement_config import artifact_compatibility, measurement_config
 
 
 BACKEND_PROBE_TIMEOUT_SECONDS = 30
@@ -100,7 +102,7 @@ class RunOutcomes:
     failed_models: FrozenSet[str]
 
 
-def _completed_models_from_artifacts(output_dir: Path) -> set[str]:
+def _completed_models_from_artifacts(output_dir: Path, expected_config=None) -> set[str]:
     completed = set()
 
     stats_dir = output_dir / "stats"
@@ -109,7 +111,7 @@ def _completed_models_from_artifacts(output_dir: Path) -> set[str]:
     if stats_dir.exists():
         for csv_file in stats_dir.glob("*.csv"):
             metrics_file = metrics_dir / f"{csv_file.stem}.h5"
-            if not metrics_file.exists():
+            if not artifact_compatibility(csv_file, metrics_file, expected_config)[0]:
                 continue
             model_id = csv_file.stem.replace("--", "/").replace("__", "@")
             completed.add(model_id)
@@ -164,8 +166,8 @@ def _legacy_failed_models(output_dir: Path) -> set[str]:
     return failed_models
 
 
-def collect_run_outcomes(output_dir: Path) -> RunOutcomes:
-    completed_models = frozenset(_completed_models_from_artifacts(output_dir))
+def collect_run_outcomes(output_dir: Path, expected_config=None) -> RunOutcomes:
+    completed_models = frozenset(_completed_models_from_artifacts(output_dir, expected_config))
     failed_models = set(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
     failed_models -= set(completed_models)
     return RunOutcomes(
@@ -323,10 +325,12 @@ def parse_args():
     parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
-    parser.add_argument("--filter_zeros", action="store_true", default=True, help="Filter near-zero eigenvalues (default: True)")
-    parser.add_argument("--use_svd", action="store_true", default=False, help="Use SVD for ESD (default: False)")
-    parser.add_argument("--parallel_esd", action="store_true", default=True, help="Use parallel ESD computation across multiple GPUs (experimental)")
-    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save computed eigenvalues in ESD results")
+    parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum; saved eigenvalues remain unfiltered")
+    parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
+    parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD computation across multiple GPUs")
+    parser.add_argument("--save_eigs", action="store_true", default=False, help="Save full computed spectra in HDF5")
+    parser.add_argument("--load_dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto", help="Checkpoint/framework-selected loading precision by default; no forced float16")
+    parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 is useful for reference checks")
     
     # Experiment control
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
@@ -336,6 +340,10 @@ def parse_args():
     parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
     args = parser.parse_args()
+    try:
+        measurement_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
         parser.error("--max_concurrent_jobs must be >= 1")
     if args.heartbeat_timeout_seconds < 0:
@@ -463,9 +471,11 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
             f"--bins {args.bins}",
         ]
 
-        if args.filter_zeros: cmd_parts.append("--filter_zeros")
-        if args.use_svd: cmd_parts.append("--use_svd")
-        if args.parallel_esd: cmd_parts.append("--parallel_esd")
+        cmd_parts.append("--filter_zeros" if args.filter_zeros else "--no-filter_zeros")
+        cmd_parts.append("--use_svd" if args.use_svd else "--no-use_svd")
+        cmd_parts.append("--parallel_esd" if args.parallel_esd else "--no-parallel_esd")
+        cmd_parts.append(f"--load_dtype {getattr(args, 'load_dtype', 'auto')}")
+        cmd_parts.append(f"--compute_dtype {getattr(args, 'compute_dtype', 'float32')}")
         if getattr(args, "save_eigs", False): cmd_parts.append("--save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
         if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
@@ -514,18 +524,7 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     Returns:
         Set of completed model IDs
     """
-    completed = set()
-    
-    stats_dir = output_dir / "stats"
-    metrics_dir = output_dir / "metrics"
-
-    if stats_dir.exists():
-        for csv_file in stats_dir.glob("*.csv"):
-            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
-            if not metrics_file.exists():
-                continue
-            model_id = csv_file.stem.replace("--", "/").replace("__", "@")
-            completed.add(model_id)
+    completed = _completed_models_from_artifacts(output_dir)
     
     # Remove failed models if requested
     if skip_failed:
@@ -542,7 +541,7 @@ def get_completed_models(output_dir: Path, skip_failed: bool = True) -> set:
     return completed
 
 
-def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bool = False, skip_failed: bool = True) -> pd.DataFrame:
+def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bool = False, skip_failed: bool = True, args=None) -> pd.DataFrame:
     """
     Filter model list to only include models that need to be run.
     
@@ -557,7 +556,29 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
     """
     if overwrite: return model_df
     
-    completed = get_completed_models(output_dir, skip_failed=False)
+    completed = set()
+    for _, row in model_df.iterrows():
+        model_id = _normalize_text(row["model_id"])
+        stem = safe_filename(model_id)
+        csv_path = output_dir / "stats" / f"{stem}.csv"
+        h5_path = output_dir / "metrics" / f"{stem}.h5"
+        if not (csv_path.exists() or h5_path.exists()):
+            continue
+        expected = None if args is None else measurement_config(
+            args, model_id=model_id,
+            revision=_normalize_text(row.get("revision_norm", "")),
+            source_model=_normalize_text(row.get("source_model", "")),
+            base_model_relation=_normalize_text(row.get("base_model_relation", "")),
+            loader_scenario=_normalize_text(row.get("preflight_effective_loader", ""))
+                or _normalize_text(row.get("loader_scenario", "")),
+        )
+        compatible, reason = artifact_compatibility(csv_path, h5_path, expected)
+        if not compatible:
+            raise ValueError(
+                f"Existing results for {model_id} are incompatible ({reason}). "
+                "Use a fresh output directory or explicitly pass --overwrite; existing files were not changed."
+            )
+        completed.add(model_id)
     skipped_models = set(completed)
     if skip_failed:
         skipped_models |= _terminal_failed_models(output_dir)
@@ -639,14 +660,6 @@ def main():
     model_df = load_model_list(args.model_list, limit=args.limit)
     logger.info(f"Loaded {len(model_df)} models from CSV")
     
-    # Filter models to run
-    model_df = filter_models_to_run(
-        model_df,
-        output_dir,
-        overwrite=args.overwrite,
-        skip_failed=args.skip_failed
-    )
-
     model_df, blocked_df = apply_preflight(model_df)
     if len(blocked_df) > 0:
         logger.info(f"Blocked by preflight: {len(blocked_df)} models")
@@ -654,10 +667,19 @@ def main():
             "Preflight reasons: "
             + ", ".join(sorted(set(blocked_df["preflight_reason"].astype(str).tolist())))
         )
+
+    try:
+        model_df = filter_models_to_run(
+            model_df, output_dir, overwrite=args.overwrite,
+            skip_failed=args.skip_failed, args=args,
+        )
+    except ValueError as exc:
+        logger.error(str(exc))
+        raise SystemExit(2) from exc
     
     if len(model_df) == 0:
         logger.info("No models to process (all completed, skipped, or blocked by preflight)")
-        outcomes = collect_run_outcomes(output_dir)
+        outcomes = collect_run_outcomes(output_dir, measurement_config(args))
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
         logger.info(f"Failed: {outcomes.failure_count} models")
         logger.info(f"Results saved to: {output_dir}")
@@ -694,7 +716,7 @@ def main():
     logger.info("=" * 80)
     
     # Print summary
-    outcomes = collect_run_outcomes(output_dir)
+    outcomes = collect_run_outcomes(output_dir, measurement_config(args))
     logger.info(f"Successfully analyzed: {outcomes.success_count} models")
     logger.info(f"Failed: {outcomes.failure_count} models")
     logger.info(f"Results saved to: {output_dir}")
