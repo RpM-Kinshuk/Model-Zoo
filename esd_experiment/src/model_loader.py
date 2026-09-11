@@ -3,6 +3,8 @@ Robust model loader with PEFT adapter support.
 Heavily inspired by calculate_adapters.py and run_metric.py patterns.
 """
 import importlib
+import hashlib
+import json
 import os
 import re
 import torch
@@ -24,7 +26,7 @@ try:
     from transformers import AutoModelForImageTextToText
 except ImportError:  # pragma: no cover - depends on transformers version
     AutoModelForImageTextToText = None
-from peft import PeftModel, PeftConfig
+from peft import PeftConfig
 from huggingface_hub import HfApi, get_token
 
 
@@ -455,7 +457,7 @@ def _resolve_adapter_task_loader(
             return resolve_effective_loader_for_repo(
                 source_repo,
                 loader_scenario=loader_scenario,
-                revision=source_revision or revision,
+                revision=source_revision,
             )
         base_name = getattr(cfg, "base_model_name_or_path", None)
         if base_name:
@@ -655,6 +657,127 @@ def resolve_base_model(adapter_repo: str, source_model: Optional[str] = None) ->
     return base_repo
 
 
+def _load_adapter_checked(base, adapter_repo: str, revision: Optional[str] = None):
+    """Validate a configured LoRA payload before it can overwrite base weights.
+
+    PEFT's permissive loader can silently accept extra base-layer tensors.
+    Its public serializer gives us the exact configured adapter key/shape
+    manifest, including explicitly saved heads and biases, without cloning the
+    dense base. Other adapter forms need their own integrity pilot first.
+    """
+    import peft
+    from peft import (
+        get_peft_model, get_peft_model_state_dict, load_peft_weights, set_peft_model_state_dict,
+    )
+
+    config = PeftConfig.from_pretrained(adapter_repo, token=get_hf_token(), revision=revision)
+    peft_type = getattr(config.peft_type, "value", config.peft_type)
+    unsupported = [
+        name for name in (
+            "use_dora", "use_qalora", "alora_invocation_tokens", "arrow_config",
+            "layer_replication", "target_parameters", "trainable_token_indices",
+            "megatron_config", "ensure_weight_tying", "lora_bias",
+        ) if getattr(config, name, None)
+    ]
+    # PiSSA/OLoRA/LoftQ and similar initializers can modify the dense base
+    # before checkpoint tensors are loaded. Only adapter-only initializers
+    # have been validated here.
+    if getattr(config, "init_lora_weights", True) not in (True, False, "gaussian"):
+        unsupported.append("init_lora_weights")
+    if getattr(config, "bias", "none") not in ("none", "all"):
+        unsupported.append("bias")
+    if peft_type != "LORA" or unsupported:
+        raise LoaderFailure(
+            "load", "unsupported_adapter_integrity",
+            f"Adapter integrity is implemented for ordinary/RSLoRA only; unsupported: {peft_type}, {unsupported}",
+        )
+    auto_mapping = getattr(config, "auto_mapping", None) or {}
+    if not isinstance(auto_mapping, dict):
+        raise LoaderFailure("load", "unsupported_adapter_integrity", "Adapter auto_mapping must be a mapping")
+    declared_class = auto_mapping.get("base_model_class")
+    declared_library = auto_mapping.get("parent_library")
+    if declared_class and not any(
+        cls.__name__ == declared_class and (not declared_library or cls.__module__ == declared_library)
+        for cls in type(base).__mro__
+    ):
+        raise LoaderFailure(
+            "load", "adapter_base_architecture_mismatch",
+            f"Adapter declares base class {declared_class}, but checkpoint loads as {type(base).__name__}",
+        )
+
+    checkpoint_config = _json_safe_loading_value(config.to_dict())
+    config.inference_mode = True
+    adapted = get_peft_model(base, config, adapter_name="default", autocast_adapter_dtype=True)
+    # False deliberately excludes optional, unconfigured full embedding dumps.
+    # Such payloads are rejected as extra keys, not silently ignored.
+    expected = get_peft_model_state_dict(adapted, adapter_name="default", save_embedding_layers=False)
+    lora_keys = [key for key in expected if ".lora_" in key]
+    if not lora_keys or any(
+        not key.endswith((".lora_A.weight", ".lora_B.weight")) or expected[key].ndim != 2
+        for key in lora_keys
+    ):
+        raise LoaderFailure(
+            "load", "unsupported_adapter_integrity",
+            "Only dense Linear/Conv1D LoRA A/B matrix layouts have been validated",
+        )
+
+    weights = load_peft_weights(adapter_repo, device="cpu", token=get_hf_token(), revision=revision)
+    missing, surplus = sorted(set(expected) - set(weights)), sorted(set(weights) - set(expected))
+    mismatched = [key for key in expected.keys() & weights.keys() if expected[key].shape != weights[key].shape]
+    if missing or surplus or mismatched:
+        raise LoaderFailure(
+            "load", "adapter_checkpoint_mismatch",
+            f"Adapter tensor manifest mismatch: missing={missing}; unexpected={surplus}; shapes={mismatched}",
+        )
+    digest = hashlib.sha256()
+    for key in sorted(weights):
+        tensor = weights[key]
+        if expected[key].is_floating_point() and not tensor.is_floating_point():
+            raise LoaderFailure(
+                "load", "unsupported_adapter_integrity",
+                f"Expected floating adapter tensor {key}; packed/integer representations are not supported",
+            )
+        if not torch.isfinite(tensor).all():
+            raise LoaderFailure("load", "adapter_nonfinite_weights", f"Adapter tensor {key} is not finite")
+        digest.update(json.dumps([key, str(tensor.dtype), list(tensor.shape)]).encode("utf-8"))
+        # Hash contiguous CPU storage without making a second full tensor copy.
+        digest.update(memoryview(tensor.detach().contiguous().reshape(-1).view(torch.uint8).numpy()))
+
+    # PEFT may rewrite dict keys for modules_to_save, so pass a shallow copy.
+    # The tensors themselves are not duplicated.
+    load_result = set_peft_model_state_dict(adapted, dict(weights), adapter_name="default")
+    missing_adapter = [
+        key for key in load_result.missing_keys
+        if ".lora_" in key or ".modules_to_save.default." in key
+    ]
+    if missing_adapter or load_result.unexpected_keys:
+        raise LoaderFailure(
+            "load", "adapter_checkpoint_mismatch",
+            f"PEFT did not apply the verified adapter: missing={missing_adapter}; unexpected={load_result.unexpected_keys}",
+        )
+    loaded = get_peft_model_state_dict(adapted, adapter_name="default", save_embedding_layers=False)
+    for key, value in loaded.items():
+        if not torch.isfinite(value).all():
+            raise LoaderFailure("load", "adapter_nonfinite_weights", f"Loaded adapter tensor {key} is not finite")
+        if not torch.equal(value.detach().cpu(), weights[key].to(dtype=value.dtype)):
+            raise LoaderFailure("load", "adapter_checkpoint_mismatch", f"PEFT changed adapter tensor {key} while loading")
+    adapted.eval()
+    report = {
+        "peft_version": peft.__version__,
+        "adapter_config": checkpoint_config,
+        "adapter_config_sha256": hashlib.sha256(
+            json.dumps(checkpoint_config, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "adapter_state_sha256": digest.hexdigest(),
+        "adapter_tensor_count": len(weights),
+        "lora_tensor_count": len(lora_keys),
+        "checkpoint_dtypes": sorted({str(value.dtype) for value in weights.values()}),
+        "loaded_dtypes": sorted({str(value.dtype) for value in loaded.values()}),
+        "verification_scope": "exact configured keys/shapes, finite payload, exact loaded values after recorded dtype conversion",
+    }
+    return adapted, report
+
+
 def load_and_merge_adapter(
     adapter_repo: str,
     base_repo: Optional[str] = None,
@@ -677,7 +800,7 @@ def load_and_merge_adapter(
         Merged model with adapter weights incorporated
     """
     # Resolve base model
-    base_revision = revision
+    base_revision = None
     if base_repo is None:
         try:
             base_repo, base_revision = resolve_base_model_reference(
@@ -688,11 +811,12 @@ def load_and_merge_adapter(
             raise LoaderFailure("load", "adapter_base_unresolved", str(exc)) from exc
     else:
         base_repo, parsed_revision = parse_model_string(base_repo)
-        base_revision = parsed_revision or revision
+        base_revision = parsed_revision
+    requested_base_repo, requested_base_revision = base_repo, base_revision
     
     effective_loader = effective_loader or _resolve_adapter_task_loader(
         adapter_repo,
-        source_model=base_repo,
+        source_model=f"{base_repo}@{base_revision}" if base_revision else base_repo,
         loader_scenario=loader_scenario,
         revision=revision,
     )
@@ -713,6 +837,8 @@ def load_and_merge_adapter(
                     revision=revision,
                 )
     auto_model_cls = _select_auto_model_cls(effective_loader)
+    if effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}:
+        auto_model_cls = _declared_checkpoint_model_cls(base_repo, base_revision) or auto_model_cls
 
     print(f"Loading base model: {base_repo}")
     if effective_loader in {"awq", "gguf"}:
@@ -743,6 +869,7 @@ def load_and_merge_adapter(
         raise
     base.eval()
     base_loading_info = base._model_zoo_loading_info
+    base_commit_hash = getattr(getattr(base, "config", None), "_commit_hash", None)
     if effective_loader == "gptq":
         try:
             base = base.dequantize()
@@ -755,15 +882,8 @@ def load_and_merge_adapter(
             ) from exc
     
     print(f"Loading adapter: {adapter_repo}")
-    token = get_hf_token()
     try:
-        peft_model = PeftModel.from_pretrained(
-            base,
-            adapter_repo,
-            is_trainable=False,
-            token=token,
-            revision=revision,
-        )
+        peft_model, adapter_loading_info = _load_adapter_checked(base, adapter_repo, revision=revision)
     except RuntimeError as exc:
         message = str(exc)
         if "size mismatch for base_model." in message:
@@ -776,7 +896,7 @@ def load_and_merge_adapter(
     
     print("Merging adapter weights into base model...")
     try:
-        merged = peft_model.merge_and_unload() # type: ignore
+        merged = peft_model.merge_and_unload(safe_merge=True) # type: ignore
     except ValueError as exc:
         message = str(exc)
         if "cannot merge lora layers when the model is gptq quantized" in message.lower():
@@ -785,13 +905,24 @@ def load_and_merge_adapter(
                 "adapter_merge_unsupported",
                 "GPTQ base models cannot currently be merged with adapters because PEFT refuses merge on quantized GPTQ bases",
             ) from exc
+        if "nan" in message.lower() or "finite" in message.lower():
+            raise LoaderFailure("load", "adapter_merge_nonfinite", "Adapter merge produced non-finite weights") from exc
         raise
     merged.eval()
     merged._model_zoo_loading_info = {
         "model_class": type(merged).__name__,
         "base_loading_info": base_loading_info,
+        "adapter_loading_info": adapter_loading_info,
+        "adapter_repo": adapter_repo,
+        "adapter_requested_revision": revision or "main",
+        "base_repo_requested": requested_base_repo,
+        "base_revision_requested": requested_base_revision or "main",
+        "base_repo_loaded": base_repo,
+        "base_revision_loaded": base_revision or "main",
+        "base_resolved_commit_hash": base_commit_hash,
         "adapter_merge": True,
-        "adapter_weights_verified": False,
+        "adapter_weights_verified": True,
+        "safe_merge": True,
     }
     
     return merged

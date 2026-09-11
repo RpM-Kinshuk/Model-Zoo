@@ -39,7 +39,7 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
 
 
-@pytest.mark.parametrize("stored_version", [None, "older"])
+@pytest.mark.parametrize("stored_version", [None, "1", "older"])
 def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
     assert expected["loader_version"] == LOADER_VERSION
@@ -63,6 +63,7 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     runtime = worker.runtime_provenance(model, SimpleNamespace(device_map="cpu", parallel_esd=False))
     assert runtime["model_class"].endswith(".Linear")
     assert runtime["loading_info"] == model._model_zoo_loading_info
+    assert {"transformers", "peft", "bitsandbytes", "gptqmodel"} <= runtime["installed_loading_library_versions"].keys()
 
 
 @pytest.mark.parametrize("key,value", [

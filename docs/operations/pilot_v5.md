@@ -1,5 +1,9 @@
 # Numerics v5 / loader v1 pilot: 11 September 2026
 
+This is the historical loader v1 report. The subsequent
+[loader v2 pilot](pilot_loader_v2.md) adds adapter integrity checks and actual
+pre-quantized checkpoint probes; it supersedes the adapter limitation below.
+
 The bounded follow-up passed after three narrow fixes: preserve checkpoint
 architecture/weights, use precision-focused CUDA SVD, and report packed recurrent
 modules as skipped. It does **not** validate an unrestricted 50,000-model run.

@@ -9,7 +9,7 @@ If you just want to run phase 2, this is the default pattern:
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list data/curated/model_zoo_phase2.csv \
-  --output_dir analysis_runs/phase2/numerics_v5 \
+  --output_dir analysis_runs/phase2/numerics_v5_loader_v2 \
   --gpus 0 1 2 3 --save_eigs
 ```
 
@@ -80,9 +80,10 @@ removes those models' previous outputs before loading; it is not a migration.
 ## Numerical Results
 
 New HDF5 outputs carry `numerics_version="5"` and `format_version="2.0"`.
-Their measurement configuration includes `loader_version="1"` and
+Their measurement configuration includes `loader_version="2"` and
 `cuda_svd_driver="gesvd"`. V5 changes CUDA SVD to the precision-focused QR
 driver; the CPU formulas and measurement definitions are unchanged from v4.
+Loader v2 adds adapter integrity checks; it does not change spectral formulas.
 Do not combine versions in a research run. Local `run_script.sh` changes are
 left untouched; check its output directory and flags before using it.
 
@@ -98,9 +99,29 @@ only permitted unexpected-key exception and remain recorded. Ambiguous built-in
 architecture declarations fail rather than choosing a head arbitrarily.
 
 This deliberately rejects partial or task-converted checkpoints that would
-initialize or discard weights. Quantized and adapter routing remains unchanged.
-For merged adapters, provenance distinguishes checked base loading from
-`adapter_weights_verified=false`; it does not claim full adapter validation.
+initialize or discard weights. Quantized routing remains unchanged.
+
+For ordinary/RSLoRA matrix adapters, the loader checks the exact configured
+tensor keys, shapes, and finiteness **before applying checkpoint tensors**.
+Missing tensors, surplus keys (including injected base weights), and unconfigured
+embedding dumps fail explicitly. Loaded adapter values must match the payload
+after the recorded dtype conversion; merging uses PEFT's `safe_merge=True`.
+Configured saved heads and `bias="all"` are checked too. DoRA, other PEFT types,
+`bias="lora_only"`, embedding/convolution LoRA layouts, and unvalidated
+topology/initializer variants are deliberately rejected, not claimed as supported.
+This validation covers materialized CPU/GPU bases, not Accelerate CPU/disk
+offloading or meta tensors. Existing quantized-to-dense upstream substitution
+is recorded as such and was not validated by the adapter pilot.
+
+Adapter and base revisions are resolved separately. Pin both; a checkpoint whose
+adapter config leaves the base revision unspecified cannot establish which base
+revision was used in training. `runtime.loading_info` records requested/loaded
+base references, the base config commit, adapter configuration and tensor hashes,
+dtypes, verification scope, and `adapter_weights_verified=true` after validation.
+That flag concerns checkpoint integrity, not scientific validity or every PEFT
+variant. Installed loader/backend package versions are also recorded; their
+presence does not imply they were all used.
+
 The production remote-code policy is unchanged: do not treat this loader audit
 as authorization to execute code from arbitrary HF repositories.
 
@@ -218,7 +239,9 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
 
 The [v4 pilot summary](pilot_v4.md) is the historical CPU baseline. The
 [v5 pilot summary](pilot_v5.md) adds the automatic-loader audit, real GPU checks,
-matrix-scale controls, and the remaining limitations.
+matrix-scale controls, and the remaining limitations. The subsequent
+[loader v2 pilot](pilot_loader_v2.md) covers public LoRA adapters and a native
+FP4 checkpoint, with explicit partial coverage and failed negative controls.
 
 The reproducible CPU pilot downloads four pinned public checkpoints (~7.5 MB
 total) covering encoder, decoder, encoder–decoder, and CNN measurements:
@@ -247,9 +270,10 @@ spectral-error tolerance against WeightWatcher's float64 reference. This is not
 an alpha-error bound or universal CPU/GPU equivalence.
 
 Most checkpoints are tiny random test models. Before scaling to 50k, extend
-coverage to trained model families, pre-quantized repositories, adapter loading,
-and related checkpoint groups. No aspect-ratio correction or universal
-quality-score claim is introduced here.
+coverage to trained model families, additional quantization/adapter formats,
+and related checkpoint groups. Packed layers still require an explicitly
+validated reconstruction policy before full quantized coverage. No aspect-ratio
+correction or universal quality-score claim is introduced here.
 
 Definitions: [Clauset–Shalizi–Newman, §§3–4](https://arxiv.org/html/0706.1062v2),
 [SciPy KS statistic](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kstest.html),

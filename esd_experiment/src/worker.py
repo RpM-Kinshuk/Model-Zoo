@@ -6,6 +6,7 @@ This is called by the main experiment runner for each model.
 import sys
 import os
 import argparse
+import importlib.metadata
 import math
 import warnings
 import traceback
@@ -96,9 +97,16 @@ def runtime_provenance(model, args):
     config = getattr(model, "config", None)
     cuda_backend = getattr(getattr(torch, "backends", None), "cuda", None)
     matmul = getattr(cuda_backend, "matmul", None)
+    library_versions = {}
+    for package in ("transformers", "peft", "bitsandbytes", "gptqmodel", "compressed-tensors", "torchao", "optimum"):
+        try:
+            library_versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            library_versions[package] = None
     return {
         "model_class": f"{type(model).__module__}.{type(model).__name__}",
         "loading_info": getattr(model, "_model_zoo_loading_info", None),
+        "installed_loading_library_versions": library_versions,
         "model_config_commit_hash": getattr(config, "_commit_hash", None),
         "model_config_name_or_path": getattr(config, "_name_or_path", None),
         "torch_version": getattr(torch, "__version__", None),

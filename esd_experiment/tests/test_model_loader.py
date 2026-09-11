@@ -473,7 +473,7 @@ def test_load_model_prepares_compressed_tensors_backend_after_gptq_side_effect(
     assert mock_import_module.call_args_list[2].args == ("compressed_tensors",)
 
 
-@patch("model_loader_under_test.PeftModel.from_pretrained")
+@patch("model_loader_under_test._load_adapter_checked")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 @patch(
@@ -493,7 +493,7 @@ def test_load_model_remaps_gptq_adapter_base_to_dense_upstream_base(
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
     mock_from_pretrained.return_value = _loaded(base_model)
-    mock_peft_from_pretrained.return_value = peft_model
+    mock_peft_from_pretrained.return_value = peft_model, {"adapter_tensor_count": 2}
 
     model, is_adapter = load_model(
         "org/adapter",
@@ -592,7 +592,7 @@ def test_load_model_classifies_adapter_compressed_tensors_dependency_failure(
     assert mock_is_adapter.called
 
 
-@patch("model_loader_under_test.PeftModel.from_pretrained")
+@patch("model_loader_under_test._load_adapter_checked")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 @patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/model", None))
@@ -607,7 +607,7 @@ def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
     mock_from_pretrained.return_value = _loaded(base_model)
-    mock_peft_from_pretrained.return_value = peft_model
+    mock_peft_from_pretrained.return_value = peft_model, {"adapter_tensor_count": 2}
     with patch(
         "model_loader_under_test.PeftConfig.from_pretrained",
         return_value=Mock(task_type="SEQ_2_SEQ_LM", base_model_name_or_path="base/model"),
@@ -625,7 +625,7 @@ def test_load_model_uses_seq2seq_base_for_seq2seq_adapter(
     assert mock_is_adapter.called
 
 
-@patch("model_loader_under_test.PeftModel.from_pretrained")
+@patch("model_loader_under_test._load_adapter_checked")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 @patch("model_loader_under_test.ensure_optimum_gptq_backend_compat")
@@ -753,7 +753,7 @@ def test_load_model_retries_causal_after_multimodal_qwen2_misroute(mock_from_pre
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
 
 
-@patch("model_loader_under_test.PeftModel.from_pretrained")
+@patch("model_loader_under_test._load_adapter_checked")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
 @patch("model_loader_under_test.resolve_base_model_reference", return_value=("base/model", "base-rev"))
@@ -768,7 +768,7 @@ def test_load_model_uses_base_revision_from_adapter_metadata(
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
     mock_from_pretrained.return_value = _loaded(base_model)
-    mock_peft_from_pretrained.return_value = peft_model
+    mock_peft_from_pretrained.return_value = peft_model, {"adapter_tensor_count": 2}
 
     model, is_adapter = load_model(
         "org/adapter",
@@ -786,7 +786,7 @@ def test_load_model_uses_base_revision_from_adapter_metadata(
 
 
 @patch(
-    "model_loader_under_test.PeftModel.from_pretrained",
+    "model_loader_under_test._load_adapter_checked",
     side_effect=RuntimeError(
         "Error(s) in loading state_dict for PeftModelForCausalLM:\n"
         "\tsize mismatch for base_model.model.model.embed_tokens.weight: copying a param with shape "

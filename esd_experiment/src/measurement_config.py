@@ -9,7 +9,7 @@ NUMERICS_VERSION = "5"
 FORMAT_VERSION = "2.0"
 # Architecture selection / checkpoint-loading integrity is separate from the
 # spectral formulas. Older artifacts must not bypass the corrected loader.
-LOADER_VERSION = "1"
+LOADER_VERSION = "2"
 
 
 def measurement_config(args, *, model_id=None, revision="", source_model="",
