@@ -256,3 +256,63 @@ merging and FP4 partial coverage; they do not validate heterogeneous model
 quality or full quantized support. GPTQ still needs a healthy checkpoint and a
 consistent backend environment. One-off reports/checkpoint caches are disposable;
 keep production data under `analysis_runs/phase2/`.
+
+## Next: architecture coverage and fallbacks
+
+Planned work, not current guarantees. BERT and other common encoder families are
+core coverage for the heterogeneous dataset, not optional exceptions. Prioritize
+this before further scale-up; no 50k-model run is authorized.
+
+Keep the existing loader/worker flow, pinned inputs, strict weight checks and
+canonical storage. Use small readable helpers and existing provenance/coverage
+records, not a separate scouting service, plugin registry or new report format.
+
+- [ ] **Inspect the checkpoint before choosing a fallback.** Start with pinned
+  config and declared architecture. When metadata is missing or inconsistent,
+  inspect checkpoint tensor names, shapes and dtypes, including all shards.
+  Prefer safetensors headers and the existing HF cache; bound metadata requests,
+  header sizes and retries. For supported legacy state dictionaries, investigate
+  restricted, metadata-only PyTorch inspection; never enable unrestricted pickle
+  loading or remote code just to improve coverage. Keep preparation metadata-only;
+  any necessary weight download belongs to the existing bounded loading stage.
+- [ ] **Select a supported class using evidence.** Use installed Transformers
+  config/class mappings to narrow candidates, starting with the pilot's missing-
+  metadata BERT checkpoint. Account for backbone and task-head weights, shapes,
+  documented key conversions, tied weights and buffers without loading multiple
+  full models. Do not default every unknown family to causal LM or repeatedly
+  try classes until one loads. Key/shape agreement alone cannot recover forward
+  semantics: ambiguous matches or contradictory declarations need a clear
+  diagnostic and, where appropriate, one explicit recorded architecture override.
+  Do not silently replace a declared architecture or discard a trained head.
+- [ ] **Check the loaded model against that evidence.** Preserve the existing
+  loading-integrity gate; inspect named modules, parameters and relevant buffers
+  to account for checkpoint weights and shared aliases. Record the chosen class,
+  selection reason and any override in existing provenance. Use existing coverage
+  records for analyzed/unsupported weights and reasons. A successful load and a
+  complete ESD analysis remain separate outcomes; inspecting only the loaded model
+  cannot reveal checkpoint weights already discarded by loading.
+- [ ] **Verify common architectures, then broaden the same path.** Cover BERT
+  base, pretraining, masked-LM, classification and QA heads; missing/wrong metadata;
+  incomplete checkpoints; tied weights; sharded files; and ambiguous matches.
+  Run a bounded public-checkpoint pilot across BERT, RoBERTa, DistilBERT, ALBERT
+  and DeBERTa, retaining decoder, encoder-decoder and CNN regression controls.
+  Quantized, custom-code and composite repositories need explicit separate
+  coverage evidence, not success inferred from their backbone alone.
+
+Acceptance: the original BERT pilot preserves its trained weights and completes
+ESD/storage; the family controls select the intended classes; malformed and
+ambiguous controls still fail clearly. Check artifact alignment and skipped
+weight accounting, not merely finite fits. Report coverage by family and bound
+extra loading time/memory. Any override must participate in resume compatibility;
+changes to loading policy require a loader-version bump and fresh pilot outputs.
+
+Then finish the corrected CPU/GPU pilot on an idle authorized GPU (3–7), followed
+by the broader stratified measurement/coverage pilot. Aspect-ratio correction and
+predictive validation remain separate research questions; loader success does
+not establish either.
+
+Inspection references: [safetensors metadata](https://huggingface.co/docs/safetensors/metadata_parsing)
+supports reading tensor descriptions without full weight downloads;
+[PyTorch serialization](https://docs.pytorch.org/docs/main/notes/serialization.html)
+documents `FakeTensorMode` inspection and the restrictions of `weights_only`.
+Verify these paths against the installed versions before choosing an implementation.
