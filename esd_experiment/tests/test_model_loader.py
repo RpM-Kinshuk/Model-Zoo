@@ -10,6 +10,7 @@ SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT.parent))
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
 def _raise_runtime_error(message: str):
@@ -60,6 +61,9 @@ fake_transformers.AutoConfig = type(
     (),
     {"from_pretrained": classmethod(lambda cls, *args, **kwargs: _raise_runtime_error("no config"))},
 )
+fake_transformers.PretrainedConfig = type(
+    "PretrainedConfig", (), {"get_config_dict": classmethod(lambda cls, *args, **kwargs: ({}, {}))},
+)
 
 fake_peft = ModuleType("peft")
 fake_peft.PeftModel = type(
@@ -105,7 +109,6 @@ hf_from_pretrained = model_loader.hf_from_pretrained
 load_model = model_loader.load_model
 resolve_adapter_effective_loader = model_loader.resolve_adapter_effective_loader
 resolve_effective_loader_for_repo = model_loader.resolve_effective_loader_for_repo
-resolve_dense_upstream_base_reference = model_loader.resolve_dense_upstream_base_reference
 
 
 def test_classify_loader_scenario_support_rejects_quantized_alt_format():
@@ -143,8 +146,9 @@ def test_classify_loader_scenario_support_accepts_current_policy_allowlist(scena
 
 def test_resolve_effective_loader_for_repo_prefers_auto_config_t5_seq2seq():
     config = Mock(model_type="t5", architectures=["T5ForConditionalGeneration"])
-    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config):
+    with patch("model_loader_under_test.AutoConfig.from_pretrained", return_value=config) as probe:
         assert resolve_effective_loader_for_repo("org/t5-model", loader_scenario="standard_transformers") == "seq2seq"
+    assert probe.call_args.kwargs["trust_remote_code"] is False
 
 
 def test_resolve_effective_loader_for_repo_prefers_auto_config_sequence_classification():
@@ -291,7 +295,8 @@ def test_load_model_uses_sequence_classification_auto_class(mock_from_pretrained
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSequenceClassification
 
 
-def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkeypatch):
+@pytest.mark.parametrize("trust_remote_code", [False, True])
+def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkeypatch, trust_remote_code):
     fallback_model = Mock()
     auto_model_cls = type("AutoModel", (), {})
     calls = []
@@ -313,6 +318,7 @@ def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkey
     model, is_adapter = load_model(
         "org/non-head-model",
         loader_scenario="standard_transformers",
+        trust_remote_code=trust_remote_code,
     )
 
     assert model is fallback_model
@@ -321,6 +327,7 @@ def test_load_model_falls_back_to_automodel_for_supported_non_head_config(monkey
         model_loader.AutoModelForCausalLM,
         auto_model_cls,
     ]
+    assert all(call[2]["trust_remote_code"] is trust_remote_code for call in calls)
 
 
 @patch("model_loader_under_test.hf_from_pretrained", side_effect=RuntimeError("Loading an AWQ quantized model requires gptqmodel. Please install it."))
@@ -408,22 +415,9 @@ def test_resolve_adapter_task_loader_prefers_explicit_source_model_over_peft_bas
         )
 
 
-def test_resolve_dense_upstream_base_reference_uses_hub_base_model_tag():
-    model_info = Mock(tags=["gptq", "base_model:mistralai/Mistral-7B-Instruct-v0.2"])
-    api = Mock()
-    api.model_info.return_value = model_info
-    with patch("model_loader_under_test.HfApi", return_value=api):
-        base_repo, base_revision = resolve_dense_upstream_base_reference(
-            "TheBloke/Mistral-7B-Instruct-v0.2-GPTQ"
-        )
-
-    assert base_repo == "mistralai/Mistral-7B-Instruct-v0.2"
-    assert base_revision is None
-
-
 @patch("model_loader_under_test.load_and_merge_adapter", return_value=Mock())
 @patch("model_loader_under_test._resolve_adapter_task_loader", return_value="gptq")
-def test_load_model_allows_adapter_gptq_base(
+def test_load_model_defers_adapter_task_routing_until_base_is_resolved(
     mock_resolve_adapter_task_loader,
     mock_load_and_merge_adapter,
 ):
@@ -436,10 +430,10 @@ def test_load_model_allows_adapter_gptq_base(
 
     assert is_adapter is True
     assert model is mock_load_and_merge_adapter.return_value
-    assert mock_resolve_adapter_task_loader.called
+    assert not mock_resolve_adapter_task_loader.called
     assert mock_load_and_merge_adapter.called
-    assert mock_load_and_merge_adapter.call_args.kwargs["effective_loader"] == "gptq"
     assert mock_load_and_merge_adapter.call_args.kwargs["loader_scenario"] == "adapter_requires_base"
+    assert mock_load_and_merge_adapter.call_args.kwargs["trust_remote_code"] is False
 
 
 @patch("model_loader_under_test.importlib.import_module")
@@ -476,19 +470,17 @@ def test_load_model_prepares_compressed_tensors_backend_after_gptq_side_effect(
 @patch("model_loader_under_test._load_adapter_checked")
 @patch("model_loader_under_test.hf_from_pretrained")
 @patch("model_loader_under_test.is_adapter_model", return_value=True)
-@patch(
-    "model_loader_under_test.resolve_dense_upstream_base_reference",
-    return_value=("mistralai/Mistral-7B-Instruct-v0.2", None),
-)
-@patch("model_loader_under_test._resolve_adapter_task_loader", side_effect=["gptq", "gptq", "standard_causal"])
-def test_load_model_remaps_gptq_adapter_base_to_dense_upstream_base(
+@patch("model_loader_under_test.ensure_optimum_gptq_backend_compat")
+@patch("model_loader_under_test._resolve_adapter_task_loader", return_value="gptq")
+def test_load_model_keeps_requested_quantized_adapter_base(
     mock_resolve_adapter_task_loader,
-    mock_resolve_dense_upstream_base_reference,
+    mock_backend_compat,
     mock_is_adapter,
     mock_from_pretrained,
     mock_peft_from_pretrained,
 ):
     base_model = Mock()
+    base_model.dequantize.return_value = base_model
     merged_model = Mock()
     peft_model = Mock()
     peft_model.merge_and_unload.return_value = merged_model
@@ -505,9 +497,9 @@ def test_load_model_remaps_gptq_adapter_base_to_dense_upstream_base(
     assert model is merged_model
     assert is_adapter is True
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForCausalLM
-    assert mock_from_pretrained.call_args.args[1] == "mistralai/Mistral-7B-Instruct-v0.2"
-    assert mock_resolve_dense_upstream_base_reference.called
-    assert mock_resolve_adapter_task_loader.call_count == 2
+    assert mock_from_pretrained.call_args.args[1] == "TheBloke/Mistral-7B-Instruct-v0.2-GPTQ"
+    assert mock_backend_compat.called
+    assert mock_resolve_adapter_task_loader.call_count == 1
     assert mock_is_adapter.called
 
 
@@ -703,10 +695,12 @@ def test_hf_from_pretrained_retries_without_low_cpu_mem_usage_on_meta_tensor_err
     assert len(_FakeAutoModel.calls) == 2
     assert _FakeAutoModel.calls[0]["low_cpu_mem_usage"] is True
     assert _FakeAutoModel.calls[1]["low_cpu_mem_usage"] is False
+    assert all(call["trust_remote_code"] is False for call in _FakeAutoModel.calls)
 
 
+@pytest.mark.parametrize("trust_remote_code", [False, True])
 @patch("model_loader_under_test.hf_from_pretrained")
-def test_load_model_retries_seq2seq_after_multimodal_t5_misroute(mock_from_pretrained):
+def test_load_model_retries_seq2seq_after_multimodal_t5_misroute(mock_from_pretrained, trust_remote_code):
     mock_model = Mock()
 
     def _side_effect(auto_model_cls, *args, **kwargs):
@@ -722,11 +716,13 @@ def test_load_model_retries_seq2seq_after_multimodal_t5_misroute(mock_from_pretr
     model, is_adapter = load_model(
         "org/misrouted-t5-model",
         loader_scenario="multimodal_transformers",
+        trust_remote_code=trust_remote_code,
     )
 
     assert model is mock_model
     assert is_adapter is False
     assert mock_from_pretrained.call_args.args[0] is model_loader.AutoModelForSeq2SeqLM
+    assert all(call.kwargs["trust_remote_code"] is trust_remote_code for call in mock_from_pretrained.call_args_list)
 
 
 @patch("model_loader_under_test.hf_from_pretrained")
@@ -818,3 +814,91 @@ def test_load_model_classifies_adapter_checkpoint_mismatch(
     assert mock_peft_from_pretrained.called
     assert mock_resolve_base_model_reference.called
     assert mock_is_adapter.called
+
+
+@pytest.mark.parametrize("reference", ["modeling.CustomModel", "org/model--modeling.CustomModel"])
+def test_remote_code_opt_in_reads_pinned_config_without_executing_it(reference):
+    commit = "a" * 40
+    model_cls = Mock()
+    with patch(
+        "model_loader_under_test.PretrainedConfig.get_config_dict",
+        return_value=({"auto_map": {"AutoModel": reference}}, {}),
+    ) as config_probe:
+        hf_from_pretrained(model_cls, "org/model", revision=commit, trust_remote_code=True)
+    assert config_probe.call_args.kwargs["revision"] == commit
+    assert "trust_remote_code" not in config_probe.call_args.kwargs
+    assert model_cls.from_pretrained.call_args.kwargs["trust_remote_code"] is True
+    assert model_cls.from_pretrained.call_args.kwargs["revision"] == commit
+
+
+@pytest.mark.parametrize("revision", [None, "main", "v1", "abcdef"])
+def test_remote_code_rejects_mutable_revision_before_loading(revision):
+    model_cls = Mock()
+    with patch("model_loader_under_test.PretrainedConfig.get_config_dict") as config_probe:
+        with pytest.raises(LoaderFailure) as exc:
+            hf_from_pretrained(model_cls, "org/model", revision=revision, trust_remote_code=True)
+    assert exc.value.reason == "remote_code_revision_unpinned"
+    config_probe.assert_not_called()
+    model_cls.from_pretrained.assert_not_called()
+
+
+@pytest.mark.parametrize("reference", ["other/code--modeling.CustomModel", [None, "other/code--tokenizer.Tokenizer"]])
+def test_remote_code_rejects_unpinned_cross_repository_code(reference):
+    model_cls = Mock()
+    with patch(
+        "model_loader_under_test.PretrainedConfig.get_config_dict",
+        return_value=({"auto_map": {"AutoModel": reference}}, {}),
+    ):
+        with pytest.raises(LoaderFailure) as exc:
+            hf_from_pretrained(model_cls, "org/model", revision="a" * 40, trust_remote_code=True)
+    assert exc.value.reason == "unsupported_remote_code"
+    model_cls.from_pretrained.assert_not_called()
+
+
+@pytest.mark.parametrize("source_model", ["base/model", "base/model@main", "base/model@abcdef"])
+def test_pinned_adapter_rejects_unpinned_base_before_task_or_model_load(source_model):
+    with patch("model_loader_under_test._resolve_adapter_task_loader") as task_probe, patch(
+        "model_loader_under_test.hf_from_pretrained",
+    ) as model_load:
+        with pytest.raises(LoaderFailure) as exc:
+            load_model(
+                "org/adapter", base_model_relation="adapter", source_model=source_model,
+                revision="a" * 40,
+            )
+    assert exc.value.reason == "adapter_base_revision_unpinned"
+    task_probe.assert_not_called()
+    model_load.assert_not_called()
+
+
+def test_pinned_adapter_forwards_base_pin_and_remote_code_choice():
+    base = Mock()
+    adapter = Mock()
+    with patch("model_loader_under_test.hf_from_pretrained", return_value=_loaded(base)) as load, patch(
+        "model_loader_under_test._load_adapter_checked", return_value=(adapter, {}),
+    ) as load_adapter:
+        model_loader.load_and_merge_adapter(
+            "org/adapter", base_repo="base/model@" + "b" * 40, revision="a" * 40,
+            effective_loader="standard_causal", trust_remote_code=True,
+        )
+    assert load.call_args.kwargs["revision"] == "b" * 40
+    assert load.call_args.kwargs["trust_remote_code"] is True
+    assert load_adapter.call_args.kwargs["revision"] == "a" * 40
+
+
+def test_adapter_detection_probes_requested_revision_only():
+    commit = "a" * 40
+    with patch(
+        "model_loader_under_test.PeftConfig.from_pretrained", side_effect=RuntimeError("no adapter config"),
+    ) as config_probe, patch("model_loader_under_test.HfApi.list_repo_files", return_value=[]) as files_probe:
+        assert not model_loader.is_adapter_model("org/model", revision=commit)
+    assert config_probe.call_args.kwargs["revision"] == commit
+    assert all(call.kwargs["revision"] == commit for call in files_probe.call_args_list)
+
+
+def test_base_reference_fallback_does_not_execute_remote_code():
+    with patch(
+        "model_loader_under_test.AutoConfig.from_pretrained",
+        return_value=Mock(base_model_name_or_path="base/model"),
+    ) as config_probe, pytest.warns(UserWarning, match="Could not load PeftConfig"):
+        assert model_loader.resolve_base_model_reference("org/adapter") == ("base/model", None)
+    assert config_probe.call_args.kwargs["trust_remote_code"] is False

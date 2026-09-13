@@ -4,12 +4,38 @@ import csv
 import json
 import math
 from pathlib import Path
+import re
 
 NUMERICS_VERSION = "5"
 FORMAT_VERSION = "2.0"
-# Architecture selection / checkpoint-loading integrity is separate from the
-# spectral formulas. Older artifacts must not bypass the corrected loader.
-LOADER_VERSION = "2"
+# Loading policy is separate from the spectral formulas. Version 3 pins inputs,
+# records remote-code permission and removes implicit adapter-base substitution.
+LOADER_VERSION = "3"
+
+
+def is_commit_sha(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def validate_model_pin(model_id, revision="", source_model="", base_model_relation="", loader_scenario=""):
+    """Require explicit HF revisions before dispatch or standalone loading."""
+    from huggingface_hub.utils import validate_repo_id
+
+    for reference in (model_id, source_model):
+        if reference:
+            repo_id = reference.partition("@")[0]
+            validate_repo_id(repo_id)
+            if Path(repo_id).is_dir():
+                raise ValueError(f"{repo_id}: a local directory would override the pinned HF repository")
+    _, _, embedded_revision = model_id.partition("@")
+    if not is_commit_sha(revision or embedded_revision):
+        raise ValueError(f"{model_id}: a full commit SHA is required; prepare the model list with --prepare_only first")
+    if source_model:
+        _, _, base_revision = source_model.partition("@")
+        if not is_commit_sha(base_revision):
+            raise ValueError(f"{model_id}: source_model must be repo@<full commit SHA>")
+    elif base_model_relation.lower() in {"adapter", "lora", "peft"} or loader_scenario == "adapter_requires_base":
+        raise ValueError(f"{model_id}: adapters require a pinned source_model; use --prepare_only to resolve it")
 
 
 def measurement_config(args, *, model_id=None, revision="", source_model="",
@@ -27,6 +53,7 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
         "save_eigs": bool(getattr(args, "save_eigs", True)),
         "load_dtype": getattr(args, "load_dtype", "auto"),
         "compute_dtype": getattr(args, "compute_dtype", "float32"),
+        "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
         "xmin_pos": 2,
         "conv_norm": 0.5,
         "filter_type": True,

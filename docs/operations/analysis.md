@@ -1,16 +1,53 @@
 # ESD analysis
 
-Run from the repository root with a curated model list and a fresh output directory:
+From the repository root, first prepare a small, pinned model list in a fresh
+output directory. This contacts HF for metadata and adapter JSON, not weights:
 
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list data/curated/model_zoo_phase2.csv \
+  --output_dir analysis_runs/phase2/my_run --limit 20 --prepare_only
+```
+
+Review `analysis_runs/phase2/my_run/models.csv`, then launch exactly that list:
+
+```bash
+python esd_experiment/run_experiment.py \
+  --model_list analysis_runs/phase2/my_run/models.csv \
   --output_dir analysis_runs/phase2/my_run \
   --gpus 5 6 7 --num_gpus_per_job 1
 ```
 
 `run_script.sh` is the local HPC wrapper; check its paths and flags before use.
 Eigenvalues are saved by default. Use `--no-save_eigs` for scalar-only outputs.
+
+## Pinned inputs and remote code
+
+Preparation fills `revision_norm` with a full commit SHA and pins each
+`source_model` as `repo@SHA`. It uses `revision_norm` first, then a revision in
+`model_id`, then a full `Modelsha` from metadata, otherwise resolves `main`.
+Adapter bases come from an explicit `source_model` or the pinned adapter config.
+Repeated bases share one resolution within preparation. `revision_requested`
+and `source_model_requested` preserve the references used to obtain the pins.
+Resolving an unspecified base revision today does not recover its historical
+training revision.
+
+`pin_status=error` rows keep their `pin_error`; preparation exits nonzero if any
+fail. Fix or explicitly remove those rows before launching. Duplicate output
+identities are rejected. An existing `models.csv` is never replaced, even with
+`--overwrite`: keep it for resume, or prepare another directory for new pins.
+You can also supply a manually pinned CSV. Runner and standalone worker require
+full model/base SHAs before starting; they do not resolve moving branches during
+launch or resume.
+
+Remote Python code is off by default, including metadata probes. Only add
+`--trust_remote_code` when launching a list whose code you have reviewed; the
+choice is recorded in the measurement configuration and checked by resume.
+Same-repository custom code uses the model's pinned revision. Cross-repository
+`auto_map` references are rejected because that SHA does not pin the other repo.
+This is not a sandbox: explicitly trusted code can still execute arbitrary
+Python and fetch its own dependencies. See HF's [custom-code guidance](https://huggingface.co/docs/transformers/models#custom-models)
+and [revision metadata API](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api#huggingface_hub.HfApi.model_info).
 
 ## Measurement settings
 
@@ -60,15 +97,16 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **5**, loader **2**, HDF5 format **2.0**.
+Current output versions are numerics **5**, loader **3**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
-Pin HF commit SHAs, including adapter bases. Offline resume does not re-resolve
-moving `main` branches. Incompatible/incomplete artifacts stop the run without
-deletion. Prefer a fresh directory; explicit `--overwrite` deletes the selected
+Loader 3 records the explicit remote-code policy and no longer substitutes
+adapter bases. Older loader outputs need a fresh run. Incompatible/incomplete
+artifacts stop the run without deletion. Prefer a fresh directory; explicit
+`--overwrite` deletes the selected
 models' previous outputs before loading. `summary.csv` alone is not completion.
 
 ## Reading a run
@@ -122,10 +160,10 @@ these checks.
 DoRA, other PEFT types, `bias="lora_only"`, embedding/convolution LoRA,
 unconfigured embedding dumps and unvalidated topology/initializer variants fail
 explicitly. Adapter validation covers materialized CPU/GPU bases, not Accelerate
-CPU/disk offloading or meta tensors. Existing quantized-to-dense upstream
-substitution is recorded and must not be interpreted as quantized measurement
-equivalence. Custom repositories may execute remote code; inspect them before
-allowing execution.
+CPU/disk offloading or meta tensors. Quantized adapter bases are never silently
+replaced with a dense upstream model. If a dense base is scientifically intended,
+select it explicitly in `source_model` before preparation; this is not quantized
+measurement equivalence.
 
 Supported dense weights include Linear subclasses, embeddings, Conv1d/2d/3d
 and HF Conv1D projections. Packed/custom representations are skipped with

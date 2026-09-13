@@ -48,7 +48,7 @@ export HF_TOKEN="<your-token>"
 
 ### 2 · List the models
 
-The smallest valid CSV has one column:
+The smallest input CSV for preparation has one column:
 
 ```csv
 model_id
@@ -65,18 +65,30 @@ org/my-lora,adapter,org/base-model
 
 Model revisions work as `org/model@revision` or through the optional `revision_norm` column. Curated tables may also carry loader, architecture, file, pipeline, and hub-availability hints for better preflight decisions.
 
-### 3 · Run
+### 3 · Pin, review, run
 
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list models.csv \
+  --output_dir analysis_runs/my_run --limit 5 --prepare_only
+```
+
+Preparation fetches metadata and adapter config JSON, not weights. Review the
+generated `models.csv`; fix or remove rows marked `pin_status=error`, then launch:
+
+```bash
+python esd_experiment/run_experiment.py \
+  --model_list analysis_runs/my_run/models.csv \
   --output_dir analysis_runs/my_run \
   --gpus 0 1 2 3 \
   --num_gpus_per_job 1 \
   --max_concurrent_jobs 3
 ```
 
-Use `--limit 5` for a smoke run. For the curated workflow, use `data/curated/model_zoo_phase2.csv`.
+The prepared list pins full model and adapter-base commit SHAs. Keep it for
+resume; preparation never overwrites it. Remote code is off by default—only use
+`--trust_remote_code` for repositories you reviewed. For the curated workflow,
+prepare from `data/curated/model_zoo_phase2.csv`; see the [analysis guide](docs/operations/analysis.md).
 
 > [!TIP]
 > `run_script.sh` is the HPC-oriented launch template. Adapt its paths, GPU list, and scheduler policy for your cluster.
@@ -219,7 +231,7 @@ It atomically reserves `--num_gpus_per_job` devices, exposes only those devices 
 ```bash
 # Two concurrent models, two GPUs available to each model
 python esd_experiment/run_experiment.py \
-  --model_list models.csv \
+  --model_list analysis_runs/my_run/models.csv \
   --output_dir analysis_runs/my_run \
   --gpus 0 1 2 3 \
   --num_gpus_per_job 2 \

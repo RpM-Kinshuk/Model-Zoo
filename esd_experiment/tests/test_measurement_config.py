@@ -41,7 +41,7 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
 
 
-@pytest.mark.parametrize("stored_version", [None, "1", "older"])
+@pytest.mark.parametrize("stored_version", [None, "1", "2", "older"])
 def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
     assert expected["loader_version"] == LOADER_VERSION
@@ -72,7 +72,7 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     ("load_dtype", "float16"), ("compute_dtype", "float64"),
     ("evals_thresh", 0.001), ("filter_zeros", False), ("use_svd", False),
     ("fix_fingers", "DKS"), ("save_eigs", False), ("requested_revision", "other"),
-    ("source_model", "org/other"),
+    ("source_model", "org/other"), ("trust_remote_code", True),
 ])
 def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
@@ -133,19 +133,22 @@ def test_runner_and_worker_share_defaults_and_explicit_negative_flags(monkeypatc
 
     monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path)])
     runner_args = runner.parse_args()
-    monkeypatch.setattr(sys, "argv", ["worker", "--model_id", "org/model", "--output_dir", str(tmp_path)])
+    monkeypatch.setattr(sys, "argv", ["worker", "--model_id", "org/model", "--revision", "a" * 40, "--output_dir", str(tmp_path)])
     worker_args = worker.parse_args()
     assert measurement_config(runner_args) == measurement_config(worker_args)
     assert runner_args.load_dtype == "auto"
     assert runner_args.use_svd is True
+    assert runner_args.trust_remote_code is False
 
     runner_args.filter_zeros = runner_args.use_svd = runner_args.parallel_esd = False
     runner_args.load_dtype, runner_args.compute_dtype = "bfloat16", "float64"
-    df = pd.DataFrame([{"model_id": "org/model", "base_model_relation": "", "source_model": ""}])
+    runner_args.trust_remote_code = True
+    df = pd.DataFrame([{"model_id": "org/model", "revision_norm": "a" * 40, "base_model_relation": "", "source_model": ""}])
     command = shlex.split(runner.generate_commands(df, tmp_path, runner_args)[0])
     monkeypatch.setattr(sys, "argv", command[1:])
     worker_args = worker.parse_args()
     assert not worker_args.filter_zeros and not worker_args.use_svd and not worker_args.parallel_esd
+    assert worker_args.trust_remote_code is True
     assert measurement_config(runner_args) == measurement_config(worker_args)
 
 

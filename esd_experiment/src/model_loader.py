@@ -13,7 +13,8 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, PretrainedConfig
+from measurement_config import is_commit_sha
 try:
     from transformers import AutoModelForSeq2SeqLM
 except ImportError:  # pragma: no cover - depends on transformers version
@@ -59,8 +60,29 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
     Handles both token= and use_auth_token= for compatibility.
     """
     token = get_hf_token()
-    kwargs.setdefault("trust_remote_code", True)
+    kwargs.setdefault("trust_remote_code", False)
     kwargs.setdefault("low_cpu_mem_usage", True)
+    if kwargs["trust_remote_code"]:
+        revision = kwargs.get("revision")
+        if not Path(repo_id).is_dir() and not is_commit_sha(revision):
+            raise LoaderFailure(
+                "load", "remote_code_revision_unpinned",
+                "Remote code requires a full commit SHA, not a mutable branch or tag",
+            )
+        # Read JSON without importing checkpoint code. Transformers uses the
+        # model revision for same-repository code, but not for external code.
+        config, _ = PretrainedConfig.get_config_dict(repo_id, token=token, revision=revision)
+        auto_map = config.get("auto_map") or {}
+        if not isinstance(auto_map, dict):
+            raise LoaderFailure("load", "unsupported_remote_code", "Checkpoint auto_map must be a mapping")
+        for references in auto_map.values():
+            for reference in references if isinstance(references, (list, tuple)) else [references]:
+                if isinstance(reference, str) and "--" in reference and reference.split("--", 1)[0] != repo_id:
+                    raise LoaderFailure(
+                        "load", "unsupported_remote_code",
+                        "Cross-repository auto_map code is not pinned by this model's revision; "
+                        "only same-repository custom code is supported",
+                    )
 
     def _call(load_kwargs):
         if token:
@@ -346,7 +368,7 @@ def resolve_effective_loader_for_repo(
             repo_id,
             token=get_hf_token(),
             revision=revision,
-            trust_remote_code=True,
+            trust_remote_code=False,
         )
     except Exception:
         config = None
@@ -399,43 +421,6 @@ def resolve_adapter_effective_loader(
     if "multimodal" in candidates:
         return "multimodal"
     return "standard_causal"
-
-
-def resolve_dense_upstream_base_reference(
-    repo_id: str,
-    revision: Optional[str] = None,
-) -> Optional[Tuple[str, Optional[str]]]:
-    api = HfApi()
-    try:
-        info = api.model_info(
-            repo_id=repo_id,
-            revision=revision,
-            token=get_hf_token(),
-        )
-    except Exception:
-        return None
-
-    tags = getattr(info, "tags", None) or []
-    for tag in tags:
-        text = str(tag or "").strip()
-        if not text.startswith("base_model:") or text.startswith("base_model:quantized:"):
-            continue
-        return parse_model_string(text[len("base_model:"):])
-
-    card_data = getattr(info, "cardData", None)
-    if isinstance(card_data, dict):
-        base_model = card_data.get("base_model")
-    else:
-        base_model = getattr(card_data, "base_model", None)
-    if base_model:
-        candidates = base_model if isinstance(base_model, (list, tuple)) else [base_model]
-        for candidate in candidates:
-            text = str(candidate or "").strip()
-            if not text or text.lower().startswith("quantized:"):
-                continue
-            return parse_model_string(text)
-
-    return None
 
 
 def _resolve_adapter_task_loader(
@@ -550,12 +535,12 @@ def _fallback_auto_model_cls(current_loader: str, error: Exception):
     return AutoModel
 
 
-def hf_repo_has_prefix(repo_id: str, prefix: str) -> bool:
+def hf_repo_has_prefix(repo_id: str, prefix: str, revision: Optional[str] = None) -> bool:
     """Check if HuggingFace repo has files with given prefix."""
     api = HfApi()
     try:
         token = get_hf_token()
-        files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token)
+        files = api.list_repo_files(repo_id=repo_id, repo_type="model", token=token, revision=revision)
         bnames = [Path(p).name.lower() for p in files]
         return any(name.startswith(prefix) and name.endswith(".safetensors") for name in bnames)
     except Exception as e:
@@ -570,7 +555,8 @@ def _normalize_optional_revision(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
-def is_adapter_model(repo_id: str, base_model_relation: Optional[str] = None) -> bool:
+def is_adapter_model(repo_id: str, base_model_relation: Optional[str] = None,
+                     revision: Optional[str] = None) -> bool:
     """
     Determine if a model is a PEFT adapter.
     
@@ -590,13 +576,13 @@ def is_adapter_model(repo_id: str, base_model_relation: Optional[str] = None) ->
     # Check for adapter config
     try:
         token = get_hf_token()
-        PeftConfig.from_pretrained(repo_id, token=token)
+        PeftConfig.from_pretrained(repo_id, token=token, revision=revision)
         return True
     except Exception:
         pass
     
     # Check file structure: has adapter*.safetensors but no model*.safetensors
-    if hf_repo_has_prefix(repo_id, "adapter") and not hf_repo_has_prefix(repo_id, "model"):
+    if hf_repo_has_prefix(repo_id, "adapter", revision) and not hf_repo_has_prefix(repo_id, "model", revision):
         return True
     
     return False
@@ -638,7 +624,7 @@ def resolve_base_model_reference(
             adapter_repo,
             token=token,
             revision=adapter_revision,
-            trust_remote_code=True,
+            trust_remote_code=False,
         )
         for key in ["base_model_name_or_path", "base_model", "model_name", "parent_model_name_or_path"]:
             if hasattr(cfg, key) and getattr(cfg, key):
@@ -786,6 +772,7 @@ def load_and_merge_adapter(
     revision: Optional[str] = None,
     loader_scenario: Optional[str] = None,
     effective_loader: Optional[str] = None,
+    trust_remote_code: bool = False,
 ) -> torch.nn.Module:
     """
     Load base model and merge PEFT adapter weights.
@@ -813,6 +800,11 @@ def load_and_merge_adapter(
         base_repo, parsed_revision = parse_model_string(base_repo)
         base_revision = parsed_revision
     requested_base_repo, requested_base_revision = base_repo, base_revision
+    if is_commit_sha(revision) and not is_commit_sha(base_revision):
+        raise LoaderFailure(
+            "load", "adapter_base_revision_unpinned",
+            "Pinned adapters require a pinned base: set source_model to repo_id@<full commit SHA>",
+        )
     
     effective_loader = effective_loader or _resolve_adapter_task_loader(
         adapter_repo,
@@ -820,22 +812,6 @@ def load_and_merge_adapter(
         loader_scenario=loader_scenario,
         revision=revision,
     )
-    if effective_loader in {"gptq", "awq", "gguf", "compressed_tensors"}:
-        dense_base_reference = resolve_dense_upstream_base_reference(
-            base_repo,
-            revision=base_revision,
-        )
-        if dense_base_reference is not None:
-            dense_base_repo, dense_base_revision = dense_base_reference
-            if dense_base_repo != base_repo or dense_base_revision != base_revision:
-                base_repo = dense_base_repo
-                base_revision = dense_base_revision
-                effective_loader = _resolve_adapter_task_loader(
-                    adapter_repo,
-                    source_model=base_repo,
-                    loader_scenario=loader_scenario,
-                    revision=revision,
-                )
     auto_model_cls = _select_auto_model_cls(effective_loader)
     if effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}:
         auto_model_cls = _declared_checkpoint_model_cls(base_repo, base_revision) or auto_model_cls
@@ -858,6 +834,7 @@ def load_and_merge_adapter(
             device_map=device_map,
             torch_dtype=torch_dtype,
             revision=base_revision,
+            trust_remote_code=trust_remote_code,
         )
     except LoaderFailure:
         raise
@@ -936,6 +913,7 @@ def load_model(
     torch_dtype = torch.float16,
     revision: Optional[str] = None,
     loader_scenario: Optional[str] = None,
+    trust_remote_code: bool = False,
 ) -> Tuple[torch.nn.Module, bool]:
     """
     Load a model, handling both regular models and PEFT adapters.
@@ -947,6 +925,7 @@ def load_model(
         device_map: Device map for model loading
         torch_dtype: Data type for model
         revision: Optional git revision/commit to load
+        trust_remote_code: Explicit permission to execute same-repository checkpoint code
     
     Returns:
         Tuple of (model, is_adapter)
@@ -956,13 +935,7 @@ def load_model(
         raise scenario_failure
 
     # Check if this is an adapter
-    if is_adapter_model(repo_id, base_model_relation):
-        effective_loader = _resolve_adapter_task_loader(
-            repo_id,
-            source_model=source_model,
-            loader_scenario=loader_scenario,
-            revision=revision,
-        )
+    if is_adapter_model(repo_id, base_model_relation, revision=revision):
         print(f"[ADAPTER] Loading adapter model: {repo_id}")
         model = load_and_merge_adapter(
             adapter_repo=repo_id,
@@ -971,7 +944,7 @@ def load_model(
             torch_dtype=torch_dtype,
             revision=revision,
             loader_scenario=loader_scenario,
-            effective_loader=effective_loader,
+            trust_remote_code=trust_remote_code,
         )
         return model, True
     else:
@@ -993,6 +966,7 @@ def load_model(
             "device_map": device_map,
             "torch_dtype": torch_dtype,
             "revision": revision,
+            "trust_remote_code": trust_remote_code,
         }
         if effective_loader == "gguf":
             load_kwargs["gguf_file"] = resolve_gguf_filename(repo_id, revision=revision)
@@ -1017,6 +991,7 @@ def load_model(
                     device_map=device_map,
                     torch_dtype=torch_dtype,
                     revision=revision,
+                    trust_remote_code=trust_remote_code,
                 )
             else:
                 fallback_cls = _fallback_auto_model_cls(effective_loader, exc)

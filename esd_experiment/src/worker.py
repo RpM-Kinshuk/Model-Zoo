@@ -35,6 +35,7 @@ from model_loader import LoaderFailure, load_model, parse_model_string, safe_fil
 from measurement_config import (
     FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
     measurement_config as build_measurement_config,
+    validate_model_pin,
 )
 from net_esd import net_esd_estimator
 
@@ -68,11 +69,13 @@ def parse_args():
     
     # Model loading
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute (off by default)")
     parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
     
     args = parser.parse_args()
     try:
         build_measurement_config(args)
+        validate_model_pin(args.model_id, args.revision, args.source_model, args.base_model_relation, args.loader_scenario)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -791,6 +794,7 @@ def main():
                     device_map=args.device_map,
                     torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
                     revision=revision,
+                    trust_remote_code=measurement["trust_remote_code"],
                     loader_scenario=args.loader_scenario if args.loader_scenario else None,
                 )
             except LoaderFailure as exc:

@@ -1,4 +1,5 @@
 import sys
+import shlex
 import importlib.util
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -162,7 +163,7 @@ def test_eigenvalue_storage_default_and_opt_out_reach_worker(monkeypatch, tmp_pa
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
         monkeypatch.setattr(sys, "argv", ["worker.py", "--model_id", "org/model",
-                                        "--output_dir", str(tmp_path), *flags])
+                                        "--revision", "a" * 40, "--output_dir", str(tmp_path), *flags])
         assert worker.parse_args().save_eigs is expected
 
 
@@ -462,9 +463,10 @@ def test_generate_commands_passes_curated_loader_fields(tmp_path: Path):
 
     commands = generate_commands(df, tmp_path, args)
 
-    assert "--revision 'rev-a'" in commands[0]
-    assert "--loader_scenario 'adapter_requires_base'" in commands[0]
-    assert "--primary_type_bucket 'adapter'" in commands[0]
+    tokens = shlex.split(commands[0])
+    assert tokens[tokens.index("--revision") + 1] == "rev-a"
+    assert tokens[tokens.index("--loader_scenario") + 1] == "adapter_requires_base"
+    assert tokens[tokens.index("--primary_type_bucket") + 1] == "adapter"
 
 
 def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_path: Path):
@@ -493,8 +495,9 @@ def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_p
 
     commands = generate_commands(df, tmp_path, args)
 
-    assert "--loader_scenario 'seq2seq'" in commands[0]
-    assert "--loader_scenario 'multimodal_transformers'" not in commands[0]
+    tokens = shlex.split(commands[0])
+    assert tokens[tokens.index("--loader_scenario") + 1] == "seq2seq"
+    assert "multimodal_transformers" not in tokens
 
 
 

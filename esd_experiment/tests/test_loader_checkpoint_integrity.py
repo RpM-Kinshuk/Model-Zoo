@@ -14,6 +14,7 @@ from net_esd.utils import iter_eligible_layers
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "model_loader.py"
+sys.path.insert(0, str(SOURCE.parent))
 SPEC = importlib.util.spec_from_file_location("checkpoint_integrity_loader", SOURCE)
 loader = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = loader

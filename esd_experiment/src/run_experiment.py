@@ -19,11 +19,13 @@ import itertools
 import json
 import os
 import pandas as pd
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 from dataclasses import dataclass
 from typing import FrozenSet, Optional, Tuple
+from tempfile import NamedTemporaryFile
 
 # Add shells directory to path for gputracker
 SCRIPT_DIR = Path(__file__).parent
@@ -35,8 +37,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
 from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, WorkerJob
 from model_preflight import classify_row_preflight
-from model_loader import safe_filename
-from measurement_config import artifact_compatibility, measurement_config
+from model_loader import get_hf_token, safe_filename
+from measurement_config import artifact_compatibility, is_commit_sha, measurement_config, validate_model_pin
 
 
 BACKEND_PROBE_TIMEOUT_SECONDS = 30
@@ -270,9 +272,9 @@ def parse_args():
         description="Run large-scale ESD analysis with GPU resource management",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-        Supported model list CSV formats:
+        Input CSV formats for --prepare_only (branches and tags are allowed):
 
-        Minimal / legacy:
+        Minimal:
             model_id,base_model_relation,source_model
             meta-llama/Llama-2-7b-hf,,
             some/adapter-model,adapter,meta-llama/Llama-2-7b-hf
@@ -288,7 +290,7 @@ def parse_args():
             - model_id: HuggingFace repo ID (required)
             - revision_norm: explicit revision override (optional)
             - base_model_relation: lineage / adapter relation (optional)
-            - source_model: base model for adapters (optional, inferred when possible)
+            - source_model: base model for adapters (inferred during preparation when absent)
             - loader_scenario: curated loader hint such as standard_transformers or adapter_requires_base (optional)
             - primary_type_bucket: curated type bucket for logging / analysis (optional)
             - files / repo_files / file_names: optional artifact hints used by preflight for adapters and gguf
@@ -296,6 +298,8 @@ def parse_args():
             - Available on the hub: optional curated availability gate
 
         Notes:
+            - Prepare first, review output_dir/models.csv, then launch that file without --prepare_only.
+            - Launch requires full model/base commit SHAs; remote code is off unless explicitly enabled.
             - Preflight may replace loader_scenario with a more specific effective loader before dispatch.
             - Quantized-native rows are only backend-gated when they resolve to an explicit gptq or awq path.
         """
@@ -304,6 +308,8 @@ def parse_args():
     # Required arguments
     parser.add_argument("--model_list", type=str, required=True, help="Path to CSV file with model list (must have 'model_id' column)")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save results")
+    parser.add_argument("--prepare_only", action="store_true", help="Resolve HF model/base revisions into output_dir/models.csv, then stop without loading weights or using GPUs")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute in workers (off by default)")
     
     # GPU configuration
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
@@ -335,7 +341,7 @@ def parse_args():
     # Experiment control
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
     parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
-    parser.add_argument("--skip_failed", action="store_true", default=False, help="Skip models that previously failed (default: True)")
+    parser.add_argument("--skip_failed", action="store_true", default=False, help="Skip models that previously failed (default: False)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
     parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
@@ -398,7 +404,7 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
     Returns:
         DataFrame with model information
     """
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
     
     # Validate required columns
     if "model_id" not in df.columns:
@@ -431,8 +437,108 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
     # Apply limit
     if limit is not None and limit > 0:
         df = df.head(limit)
+
+    # Distinct metadata rows must not dispatch workers to the same artifact path.
+    filenames = df["model_id"].map(safe_filename)
+    if filenames.duplicated().any():
+        duplicates = df.loc[filenames.duplicated(keep=False), "model_id"].tolist()
+        raise ValueError(f"Model rows share an output filename: {duplicates[:5]}")
     
     return df
+
+
+def pin_model_revisions(model_df):
+    """Resolve a plain CSV using Hub metadata and adapter JSON, never model code.
+
+    Reuse resolutions of shared bases within this preparation. Keep failed rows
+    in the CSV so the user can fix or explicitly exclude them before launching.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    token = get_hf_token()
+    api = HfApi(token=token)
+    resolved = {}
+
+    def resolve_revision(repo_id, revision):
+        key = (repo_id, revision)
+        if key not in resolved:
+            info = api.model_info(repo_id, revision=revision, timeout=30, expand=["sha", "siblings"])
+            if not is_commit_sha(info.sha):
+                raise ValueError(f"Hub returned no full commit SHA for {repo_id}@{revision}")
+            if is_commit_sha(revision) and info.sha.lower() != revision.lower():
+                raise ValueError(f"Hub commit differs from requested pin for {repo_id}")
+            has_adapter = any(item.rfilename == "adapter_config.json" for item in info.siblings or [])
+            # Keep only small facts, not every repository's file list/metadata.
+            resolved[key] = (info.sha, has_adapter)
+            resolved[(repo_id, info.sha)] = resolved[key]
+        return resolved[key]
+
+    rows = []
+    for _, row in model_df.iterrows():
+        pinned = row.to_dict()
+        model_id = _normalize_text(row["model_id"])
+        repo_id, _, embedded_revision = model_id.partition("@")
+        metadata_sha = _normalize_text(row.get("Modelsha", ""))
+        revision = (_normalize_text(row.get("revision_norm", "")) or embedded_revision
+                    or (metadata_sha if is_commit_sha(metadata_sha) else "main"))
+        source_model = _normalize_text(row.get("source_model", ""))
+        pinned["revision_requested"] = revision
+        pinned["source_model_requested"] = source_model
+        try:
+            model_sha, has_adapter = resolve_revision(repo_id, revision)
+            pinned["revision_norm"] = model_sha
+            is_adapter = (has_adapter
+                          or _normalize_text(row.get("base_model_relation", "")).lower() in {"adapter", "lora", "peft"}
+                          or _normalize_text(row.get("loader_scenario", "")) == "adapter_requires_base")
+            if is_adapter:
+                config_path = hf_hub_download(repo_id, "adapter_config.json", revision=model_sha, token=token)
+                config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+                if not source_model:
+                    base_repo, _, base_revision = str(config.get("base_model_name_or_path") or "").partition("@")
+                    base_revision = config.get("revision") or base_revision or "main"
+                    if not base_repo:
+                        raise ValueError("Adapter config has no base model; supply source_model explicitly")
+                    source_model = f"{base_repo}@{base_revision}"
+                pinned["base_model_relation"] = "adapter"
+            if source_model:
+                pinned["source_model_requested"] = pinned["source_model_requested"] or source_model
+                base_repo, _, base_revision = source_model.partition("@")
+                base_sha, _ = resolve_revision(base_repo, base_revision or "main")
+                pinned["source_model"] = f"{base_repo}@{base_sha}"
+            validate_model_pin(model_id, pinned["revision_norm"], pinned.get("source_model", ""),
+                               pinned.get("base_model_relation", ""))
+            pinned.update(pin_status="pinned", pin_error="")
+        except Exception as error:
+            pinned.update(pin_status="error", pin_error=f"{type(error).__name__}: {error}")
+        rows.append(pinned)
+        if len(rows) % 100 == 0:
+            print(f"Resolved {len(rows)}/{len(model_df)} model rows", flush=True)
+    return pd.DataFrame(rows)
+
+
+def write_pinned_model_list(model_df, output_path):
+    """Publish a complete CSV without replacing an existing run's pins."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=output_path.parent,
+                                prefix=".models.", suffix=".tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            model_df.to_csv(handle, index=False)
+        # Unlike replace(), link() fails if another preparation published first.
+        os.link(temporary_path, output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def validate_model_list_pins(model_df):
+    if "pin_status" in model_df and not model_df["pin_status"].eq("pinned").all():
+        raise ValueError("Model list contains unresolved rows. Fix or remove the pin_status=error rows before launching.")
+    for _, row in model_df.iterrows():
+        validate_model_pin(_normalize_text(row["model_id"]), _normalize_text(row.get("revision_norm", "")),
+                           _normalize_text(row.get("source_model", "")), _normalize_text(row.get("base_model_relation", "")),
+                           _normalize_text(row.get("loader_scenario", "")))
 
 
 def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
@@ -450,7 +556,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     commands = []
     worker_script = SCRIPT_DIR / "worker.py"
     
-    for idx, row in model_df.iterrows():
+    for _, row in model_df.iterrows():
         model_id = _normalize_text(row["model_id"])
         base_relation = _normalize_text(row["base_model_relation"])
         source_model = _normalize_text(row["source_model"])
@@ -462,30 +568,31 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         
         # Build command
         cmd_parts = [
-            "python",
+            sys.executable,
             str(worker_script),
-            f"--model_id '{model_id}'",
-            f"--output_dir '{output_dir}'",
-            f"--fix_fingers {args.fix_fingers}",
-            f"--evals_thresh {args.evals_thresh}",
-            f"--bins {args.bins}",
+            "--model_id", model_id,
+            "--output_dir", str(output_dir),
+            "--fix_fingers", args.fix_fingers,
+            "--evals_thresh", str(args.evals_thresh),
+            "--bins", str(args.bins),
         ]
 
         cmd_parts.append("--filter_zeros" if args.filter_zeros else "--no-filter_zeros")
         cmd_parts.append("--use_svd" if args.use_svd else "--no-use_svd")
         cmd_parts.append("--parallel_esd" if args.parallel_esd else "--no-parallel_esd")
-        cmd_parts.append(f"--load_dtype {getattr(args, 'load_dtype', 'auto')}")
-        cmd_parts.append(f"--compute_dtype {getattr(args, 'compute_dtype', 'float32')}")
+        cmd_parts.extend(["--load_dtype", getattr(args, "load_dtype", "auto")])
+        cmd_parts.extend(["--compute_dtype", getattr(args, "compute_dtype", "float32")])
         cmd_parts.append("--save_eigs" if getattr(args, "save_eigs", True) else "--no-save_eigs")
         if args.overwrite: cmd_parts.append("--overwrite")
-        if revision_norm: cmd_parts.append(f"--revision '{revision_norm}'")
-        if loader_scenario: cmd_parts.append(f"--loader_scenario '{loader_scenario}'")
-        if primary_type_bucket: cmd_parts.append(f"--primary_type_bucket '{primary_type_bucket}'")
-        if base_relation: cmd_parts.append(f"--base_model_relation '{base_relation}'")
-        if source_model: cmd_parts.append(f"--source_model '{source_model}'")
+        if getattr(args, "trust_remote_code", False): cmd_parts.append("--trust_remote_code")
+        if revision_norm: cmd_parts.extend(["--revision", revision_norm])
+        if loader_scenario: cmd_parts.extend(["--loader_scenario", loader_scenario])
+        if primary_type_bucket: cmd_parts.extend(["--primary_type_bucket", primary_type_bucket])
+        if base_relation: cmd_parts.extend(["--base_model_relation", base_relation])
+        if source_model: cmd_parts.extend(["--source_model", source_model])
         
         # Join command parts
-        cmd = " ".join(cmd_parts)
+        cmd = shlex.join(cmd_parts)
         commands.append(cmd)
     
     return commands
@@ -625,9 +732,32 @@ def create_runtime_config(args, config_path):
 def main():
     """Main experiment runner."""
     args = parse_args()
+
+    # Preparation stops before GPU configuration, backend probes or dispatch.
+    output_dir = Path(args.output_dir).resolve()
+    try:
+        model_df = load_model_list(args.model_list, limit=args.limit)
+        if model_df.empty:
+            raise ValueError("No models selected")
+        if args.prepare_only:
+            manifest_path = output_dir / "models.csv"
+            if manifest_path.exists():
+                raise ValueError(f"{manifest_path} already exists; use those pins or prepare in a fresh directory")
+            print(f"Resolving {len(model_df)} model rows (metadata/config only; no weights)", flush=True)
+            pinned = pin_model_revisions(model_df)
+            write_pinned_model_list(pinned, manifest_path)
+            errors = int(pinned["pin_status"].eq("error").sum())
+            print(f"Saved {len(pinned) - errors} pinned models and {errors} unresolved rows to {manifest_path}")
+            print("Review this CSV, then pass it as --model_list without --prepare_only to launch.")
+            if errors:
+                raise SystemExit(1)
+            return
+        validate_model_list_pins(model_df)
+    except (OSError, ValueError) as exc:
+        print(f"Cannot prepare or launch: {exc}")
+        raise SystemExit(2) from exc
     
     # Setup directories
-    output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(args.log_dir) if args.log_dir else output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -656,8 +786,6 @@ def main():
     logger.info("=" * 80)
     
     # Load model list
-    logger.info("Loading model list...")
-    model_df = load_model_list(args.model_list, limit=args.limit)
     logger.info(f"Loaded {len(model_df)} models from CSV")
     
     model_df, blocked_df = apply_preflight(model_df)
