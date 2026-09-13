@@ -10,7 +10,16 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "clustering" / "unsupervised"))
-from alpha_cluster_dashboard.data import load_alpha_records, records_to_frame
+from alpha_cluster_dashboard.data import canonicalize_module_name, load_alpha_records, records_to_frame
+
+
+def test_generated_attention_fragments_are_not_given_qkv_roles():
+    for projection in ("qkv_proj", "k_proj", "v_proj"):
+        for suffix in ("q", "k", "v"):
+            name = f"self_attn.{projection}_{suffix}"
+            assert canonicalize_module_name(name) == f"other::{name}"
+    for role in ("q", "k", "v"):
+        assert canonicalize_module_name(f"self_attn.{role}_proj") == f"attn_{role}"
 
 
 def write_alpha(path, *, canonical=True, status="complete"):

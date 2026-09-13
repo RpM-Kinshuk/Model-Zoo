@@ -46,14 +46,15 @@ def iter_eligible_layers(
     filter_type: Optional[bool] = True,
     coverage: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[Tuple[str, torch.Tensor, int]]:
-    """Yield (name, weight_tensor_or_slice, params_count) for eligible layers.
+    """Yield (name, weight_tensor, params_count) for eligible layers.
 
     Supported layouts are dense Linear/Embedding matrices and Conv1d/2d/3d
     kernels, including subclasses and the declared Hugging Face Conv1D matrix
     layout. With filter_type=False, other ordinary dense 2D weights are an
     explicit opt-in; unknown higher-dimensional or quantized layouts are never
-    guessed. The legacy Linear aspect-ratio filter and name/shape-based QKV
-    split remain enabled for compatibility.
+    guessed. Each eligible matrix is measured whole, including fused attention
+    projections: names and aspect ratios do not establish a QKV packing layout.
+    The legacy Linear aspect-ratio filter remains enabled.
 
     When provided, coverage receives one record per weight-bearing module,
     including skipped candidates. Known packed attributes and direct matrix
@@ -172,37 +173,15 @@ def iter_eligible_layers(
                 record["reason"] = "linear_aspect_ratio_at_least_8"
                 continue
 
-        name_l = name.lower()
         bias = getattr(module, "bias", None)
         bias_params = bias.numel() if isinstance(bias, torch.Tensor) and bias.requires_grad else 0
-        slices = [(name, weight, "", weight.numel() + bias_params)]
-
-        if ("attn" in name_l or "attention" in name_l) and weight.ndim == 2 and not isinstance(module, nn.Embedding):
-            m, n = weight.shape
-            if n == 3 * m:
-                dim = m
-                slices = [
-                    (f"{name}_q", weight[:, :dim], "q", m * m),
-                    (f"{name}_k", weight[:, dim:2*dim], "k", m * m),
-                    (f"{name}_v", weight[:, 2*dim:], "v", m * m),
-                ]
-            elif m == 3 * n:
-                dim = n
-                slices = [
-                    (f"{name}_q", weight[:dim, :], "q", n * n),
-                    (f"{name}_k", weight[dim:2*dim, :], "k", n * n),
-                    (f"{name}_v", weight[2*dim:, :], "v", n * n),
-                ]
-
-        for measurement_name, _, _, _ in slices:
-            if measurement_name in emitted_names:
-                raise ValueError(f"Duplicate ESD measurement name: {measurement_name!r}")
-            emitted_names.add(measurement_name)
+        if name in emitted_names:
+            raise ValueError(f"Duplicate ESD measurement name: {name!r}")
+        emitted_names.add(name)
         record["status"] = "eligible"
-        record["measurement_names"] = [item[0] for item in slices]
-        record["measurement_slices"] = [item[2] for item in slices]
-        for measurement_name, slice_weight, _, params in slices:
-            yield measurement_name, slice_weight, params
+        record["measurement_names"] = [name]
+        record["measurement_slices"] = [""]
+        yield name, weight, weight.numel() + bias_params
 
 
 def estimate_compute_cost(weight: torch.Tensor, use_svd: bool) -> int:

@@ -239,8 +239,6 @@ def net_esd_estimator(
             }
             if len(analyzed) == len(names):
                 record["status"] = "analyzed"
-            elif analyzed:
-                record["status"], record["reason"] = "partially_analyzed", "no_spectrum_for_some_slices"
             else:
                 record["status"], record["reason"] = "skipped", "no_spectrum"
     return results

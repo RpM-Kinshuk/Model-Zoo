@@ -62,6 +62,14 @@ def hf_from_pretrained(AutoModelCls, repo_id: str, **kwargs):
     token = get_hf_token()
     kwargs.setdefault("trust_remote_code", False)
     kwargs.setdefault("low_cpu_mem_usage", True)
+    # Transformers probes for adapters separately; its model commit hash only
+    # pins cache lookups, so uncached probes also need an explicit revision.
+    adapter_kwargs = dict(kwargs.get("adapter_kwargs") or {})
+    adapter_kwargs["revision"] = kwargs.get("revision")
+    for name in ("cache_dir", "force_download", "local_files_only", "proxies", "subfolder"):
+        if name in kwargs:
+            adapter_kwargs[name] = kwargs[name]
+    kwargs["adapter_kwargs"] = adapter_kwargs
     if kwargs["trust_remote_code"]:
         revision = kwargs.get("revision")
         if not Path(repo_id).is_dir() and not is_commit_sha(revision):

@@ -441,9 +441,8 @@ flowchart TB
         direction LR
         LAYERS["Linear · Embedding<br/>Conv1d/2d/3d · HF Conv1D"]
         FILTER["skip unsupported weights<br/>and Linear aspect ratio ≥ 8"]
-        SPLIT["split fused attention<br/>Q · K · V"]
-        MATRIX["2D weight matrix<br/>or batched conv matrices"]
-        LAYERS --> FILTER --> SPLIT --> MATRIX
+        MATRIX["whole 2D weight matrix<br/>or batched conv matrices"]
+        LAYERS --> FILTER --> MATRIX
     end
 
     subgraph SOLVE["②  COMPUTE THE SPECTRUM"]

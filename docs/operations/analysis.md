@@ -39,6 +39,8 @@ identities are rejected. An existing `models.csv` is never replaced, even with
 You can also supply a manually pinned CSV. Runner and standalone worker require
 full model/base SHAs before starting; they do not resolve moving branches during
 launch or resume.
+Transformers' implicit adapter-config probes use the same pinned revision as
+the requested model, including when loading an adapter's base.
 
 Remote Python code is off by default, including metadata probes. Only add
 `--trust_remote_code` when launching a list whose code you have reviewed; the
@@ -71,8 +73,9 @@ default. Gram jitter/fallback is not recorded per layer.
 Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
 
 - `/layers/longname` is the canonical identity; every scalar metric is aligned
-  with it. `/layers/module_name` and `/layers/slice` identify original modules
-  and Q/K/V slices. Arbitrary names and missing fits remain present.
+  with it. `/layers/module_name` identifies the original module; `/layers/slice`
+  is empty for whole-weight measurements. Arbitrary names and missing fits
+  remain present.
 - `/eigs[i]` is the full spectrum for `/layers/longname[i]`, unless saving was
   disabled. Float32/float64 spectra retain their computed dtype. CSV contains
   scalars, not duplicated eigenvalue strings.
@@ -97,14 +100,14 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **5**, loader **3**, HDF5 format **2.0**.
+Current output versions are numerics **6**, loader **4**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
-Loader 3 records the explicit remote-code policy and no longer substitutes
-adapter bases. Older loader outputs need a fresh run. Incompatible/incomplete
+Numerics 6 removes heuristic QKV splitting; loader 4 pins implicit adapter-config
+probes as well as explicit loads. Older outputs need a fresh run. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
 models' previous outputs before loading. `summary.csv` alone is not completion.
@@ -122,7 +125,7 @@ This writes `summary.csv`: one row per CSV/HDF5 pair, with artifact paths,
 measurement settings, fitted/missing measurement counts, module coverage and
 scalar summaries. It validates current artifacts and reads canonical `/layers`
 one model at a time; it does not load eigenvalues or use the derived `/alpha`
-view. Q/K/V slices count as separate measurements, not separate modules or depth.
+view. Measurement counts are not model depth.
 Alpha and other fit-derived summaries include only finite fitted `alpha > 1`;
 other metrics use their finite values across all measured rows.
 
@@ -168,8 +171,10 @@ measurement equivalence.
 Supported dense weights include Linear subclasses, embeddings, Conv1d/2d/3d
 and HF Conv1D projections. Packed/custom representations are skipped with
 reasons, including packed recurrent weights. There is no automatic quantized
-reconstruction. The existing Linear aspect-ratio skip and name/shape-based QKV
-split remain measurement conventions.
+reconstruction. Each eligible matrix is measured whole, including fused QKV
+projections. Names and a 3:1 shape do not establish the packing layout: separate
+grouped-query key/value projections can have that shape too. The existing
+Linear aspect-ratio skip remains a measurement convention.
 
 ## Interpreting the metrics
 

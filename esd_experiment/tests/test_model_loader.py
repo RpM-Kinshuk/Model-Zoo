@@ -678,6 +678,43 @@ def test_resolve_gguf_filename_wraps_repo_inspection_failure():
     assert exc.value.reason == "repo_inaccessible"
 
 
+@pytest.mark.parametrize("revision", [None, "a" * 40])
+@pytest.mark.parametrize("adapter_revision", [None, "main", "b" * 40])
+def test_hf_from_pretrained_adapter_probe_uses_model_revision(revision, adapter_revision):
+    adapter_kwargs = {} if adapter_revision is None else {"revision": adapter_revision}
+    original = adapter_kwargs.copy()
+    model_cls = Mock()
+
+    hf_from_pretrained(model_cls, "org/model", revision=revision, adapter_kwargs=adapter_kwargs)
+
+    load_kwargs = model_cls.from_pretrained.call_args.kwargs
+    assert load_kwargs["revision"] == revision
+    assert load_kwargs["adapter_kwargs"]["revision"] == revision
+    assert load_kwargs["adapter_kwargs"] is not adapter_kwargs
+    assert adapter_kwargs == original
+
+
+def test_hf_from_pretrained_adapter_probe_preserves_cache_and_offline_options():
+    adapter_kwargs = {"revision": "main", "local_files_only": False, "custom_option": "keep"}
+    original = adapter_kwargs.copy()
+    options = {
+        "revision": "a" * 40,
+        "cache_dir": "/tmp/model-cache",
+        "force_download": False,
+        "local_files_only": True,
+        "proxies": {"https": "http://proxy.invalid"},
+        "subfolder": "weights",
+    }
+    model_cls = Mock()
+
+    hf_from_pretrained(model_cls, "org/model", adapter_kwargs=adapter_kwargs, **options)
+
+    load_kwargs = model_cls.from_pretrained.call_args.kwargs
+    assert load_kwargs["adapter_kwargs"] == {**options, "custom_option": "keep"}
+    assert all(load_kwargs[name] == value for name, value in options.items())
+    assert adapter_kwargs == original
+
+
 def test_hf_from_pretrained_retries_without_low_cpu_mem_usage_on_meta_tensor_error():
     class _FakeAutoModel:
         calls = []
@@ -689,13 +726,15 @@ def test_hf_from_pretrained_retries_without_low_cpu_mem_usage_on_meta_tensor_err
                 raise RuntimeError("Cannot copy out of meta tensor; no data!")
             return "ok"
 
-    result = hf_from_pretrained(_FakeAutoModel, "org/model")
+    result = hf_from_pretrained(_FakeAutoModel, "org/model", revision="a" * 40, local_files_only=True)
 
     assert result == "ok"
     assert len(_FakeAutoModel.calls) == 2
     assert _FakeAutoModel.calls[0]["low_cpu_mem_usage"] is True
     assert _FakeAutoModel.calls[1]["low_cpu_mem_usage"] is False
     assert all(call["trust_remote_code"] is False for call in _FakeAutoModel.calls)
+    assert all(call["adapter_kwargs"] == {"revision": "a" * 40, "local_files_only": True}
+               for call in _FakeAutoModel.calls)
 
 
 @pytest.mark.parametrize("trust_remote_code", [False, True])

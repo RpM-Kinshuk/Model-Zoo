@@ -478,7 +478,7 @@ def test_worker_saves_real_cpu_spectra_with_missing_fits(tmp_path, monkeypatch, 
     else:
         assert saved["fit_xmin"].isna().all()
     with worker.h5py.File(tmp_path / "metrics" / "test--local-model.h5", "r") as h5:
-        assert h5.attrs["numerics_version"] == "5"
+        assert h5.attrs["numerics_version"] == worker.NUMERICS_VERSION
         assert h5["alpha"].shape == (3, 1)
         worker.np.testing.assert_allclose(h5["alpha"][:, 0], saved["alpha"], equal_nan=True)
         assert h5["eigs"][1].tolist() == [0.0, 0.0, 0.0, 4.0]

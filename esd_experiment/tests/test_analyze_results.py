@@ -95,10 +95,10 @@ def test_reader_uses_all_canonical_records_without_reading_spectra(tmp_path, mon
         assert summary[name] is None
 
 
-def test_summary_distinguishes_qkv_measurements_and_valid_fits():
+def test_summary_distinguishes_measured_modules_and_valid_fits():
     frame = pd.DataFrame({
-        "longname": ["attention_q", "attention_k", "attention_v", "head", "other", "last"],
-        "module_name": ["attention"] * 3 + ["head", "other", "last"],
+        "longname": ["attention.q_proj", "attention.k_proj", "attention.v_proj", "head", "other", "last"],
+        "module_name": ["attention.q_proj", "attention.k_proj", "attention.v_proj", "head", "other", "last"],
         "fit_status": ["fitted", "fitted", "constant_spectrum", "fitted", "fitted", "fitted"],
         "alpha": [2., 4., 100., np.inf, 1., np.nan],
         "alpha_weighted": [3., 5., 100., 100., 100., 100.],
@@ -107,7 +107,7 @@ def test_summary_distinguishes_qkv_measurements_and_valid_fits():
     })
     summary = analyze_results.compute_model_summary(frame)
     assert summary["analyzed_measurements"] == 6
-    assert summary["measured_modules"] == 4
+    assert summary["measured_modules"] == 6
     assert summary["fitted_measurements"] == 2
     assert summary["missing_fit_measurements"] == 4
     assert summary["alpha_mean"] == summary["alpha_median"] == 3

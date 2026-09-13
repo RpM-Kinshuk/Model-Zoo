@@ -6,11 +6,11 @@ import math
 from pathlib import Path
 import re
 
-NUMERICS_VERSION = "5"
+NUMERICS_VERSION = "6"
 FORMAT_VERSION = "2.0"
-# Loading policy is separate from the spectral formulas. Version 3 pins inputs,
-# records remote-code permission and removes implicit adapter-base substitution.
-LOADER_VERSION = "3"
+# Loading policy is separate from the spectral formulas. Version 4 also pins
+# Transformers' implicit adapter-config probes to the requested model revision.
+LOADER_VERSION = "4"
 
 
 def is_commit_sha(value):

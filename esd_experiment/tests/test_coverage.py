@@ -232,22 +232,34 @@ def test_standard_weight_selection_is_unchanged_when_packed_metadata_exists():
     assert "unsupported_weight_attributes" not in coverage[""]
 
 
-def test_legacy_qkv_slices_keep_canonical_module_identity():
-    model = nn.ModuleDict({"attn": nn.Linear(4, 12, bias=False)})
+@pytest.mark.parametrize("shape", [(4, 12), (12, 4)])
+@pytest.mark.parametrize("name", ["k_proj", "v_proj", "qkv", "c_attn"])
+def test_attention_matrices_are_measured_whole(name, shape):
+    # GQA key/value projections can be 3:1 without containing fused QKV.
+    # Fused projections also remain whole; their packing is not inferred.
+    torch.manual_seed(0)
+    layer = nn.Linear(shape[1], shape[0], bias=False)
+    model = nn.ModuleDict({"self_attn": nn.ModuleDict({name: layer})})
     coverage = []
 
-    results = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+    results = net_esd.net_esd_estimator(
+        model, parallel=False, coverage=coverage, compute_dtype="float64",
+    )
 
-    assert results["longname"] == ["attn_q", "attn_k", "attn_v"]
-    assert results["module_name"] == ["attn"] * 3
-    assert results["slice"] == ["q", "k", "v"]
+    assert results["longname"] == [f"self_attn.{name}"]
+    assert results["module_name"] == results["longname"]
+    assert results["slice"] == [""]
+    assert results["M"] == [shape[0]]
+    assert results["N"] == [shape[1]]
+    expected = torch.linalg.svdvals(layer.weight.detach().double()).square().sort().values
+    torch.testing.assert_close(torch.as_tensor(results["eigs"][0]), expected)
     assert coverage[0]["measurement_names"] == results["longname"]
     assert coverage[0]["measurement_slices"] == results["slice"]
     assert coverage[0]["status"] == "analyzed"
     assert len({len(column) for column in results.values()}) == 1
 
 
-def test_qkv_split_requires_exact_three_to_one_shape_and_not_an_embedding():
+def test_attention_names_do_not_change_weight_selection():
     model = nn.ModuleDict({
         "attn_uneven": nn.Linear(7, 2),
         "attention_embedding": nn.Embedding(12, 4),
@@ -259,11 +271,21 @@ def test_qkv_split_requires_exact_three_to_one_shape_and_not_an_embedding():
     assert all(record["measurement_slices"] == [""] for record in coverage.values())
 
 
-def test_emitted_name_collision_is_rejected_before_computing(monkeypatch):
+def test_attention_projection_names_do_not_create_synthetic_collisions():
     model = nn.ModuleDict({"attn": nn.Linear(4, 12), "attn_q": nn.Linear(4, 4)})
+
+    result = net_esd.net_esd_estimator(model, parallel=False)
+
+    assert result["longname"] == ["attn", "attn_q"]
+    assert result["module_name"] == result["longname"]
+
+
+def test_emitted_name_collision_is_rejected_before_computing(monkeypatch):
+    model = nn.Linear(4, 4)
+    monkeypatch.setattr(model, "named_modules", lambda: iter([("same", model), ("same", model)]))
     monkeypatch.setattr(net_esd, "compute_esd_for_weight", lambda *args: pytest.fail("Must reject names before computation"))
 
-    with pytest.raises(ValueError, match="Duplicate ESD measurement name: 'attn_q'"):
+    with pytest.raises(ValueError, match="Duplicate ESD measurement name: 'same'"):
         net_esd.net_esd_estimator(model, parallel=False)
 
 
@@ -332,18 +354,21 @@ def test_empty_spectrum_return_is_reported_as_skipped(monkeypatch):
     assert coverage[0]["reason"] == "no_spectrum"
 
 
-def test_partial_slice_coverage_is_explicit(monkeypatch):
+def test_missing_spectrum_does_not_hide_other_attention_modules(monkeypatch):
     def compute(name, *args):
         return None if name.endswith("_v") else {"longname": name, "fit_status": "fitted"}
 
     monkeypatch.setattr(net_esd, "compute_esd_for_weight", compute)
     coverage = []
 
-    result = net_esd.net_esd_estimator(nn.ModuleDict({"attn": nn.Linear(4, 12)}), parallel=False, coverage=coverage)
+    model = nn.ModuleDict({"attn_k": nn.Linear(12, 4), "attn_v": nn.Linear(12, 4)})
+    result = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
 
-    assert result["slice"] == ["q", "k"]
-    assert coverage[0]["status"] == "partially_analyzed"
-    assert coverage[0]["reason"] == "no_spectrum_for_some_slices"
+    assert result["longname"] == ["attn_k"]
+    assert result["slice"] == [""]
+    assert coverage[0]["status"] == "analyzed"
+    assert coverage[1]["status"] == "skipped"
+    assert coverage[1]["reason"] == "no_spectrum"
 
 
 def test_thread_backend_preserves_order_identity_and_precision(monkeypatch):

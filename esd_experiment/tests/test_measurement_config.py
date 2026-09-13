@@ -41,7 +41,7 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
 
 
-@pytest.mark.parametrize("stored_version", [None, "1", "2", "older"])
+@pytest.mark.parametrize("stored_version", [None, "1", "2", "3", "older"])
 def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
     assert expected["loader_version"] == LOADER_VERSION
@@ -54,6 +54,16 @@ def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored
     compatible, reason = artifact_compatibility(csv_path, h5_path, expected)
     assert not compatible
     assert "loader_version" in reason
+    assert not artifact_compatibility(csv_path, h5_path)[0]
+
+
+def test_artifacts_with_heuristic_qkv_splitting_cannot_resume(tmp_path):
+    expected = measurement_config(SimpleNamespace())
+    csv_path, h5_path = write_pair(tmp_path, dict(expected, numerics_version="5"))
+    with h5py.File(h5_path, "a") as h5:
+        h5.attrs["numerics_version"] = "5"
+
+    assert not artifact_compatibility(csv_path, h5_path, expected)[0]
     assert not artifact_compatibility(csv_path, h5_path)[0]
 
 
