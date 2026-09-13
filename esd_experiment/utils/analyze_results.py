@@ -1,261 +1,220 @@
 #!/usr/bin/env python3
-"""
-Analyze and summarize results from ESD experiment.
+"""Summarize a run's canonical layer records without loading its eigenvalues.
 
-This script:
-1. Reads all per-model CSV files from results directory
-2. Computes model-level summary statistics
-3. Generates visualizations and reports
+summary.csv doubles as a small results index: one row per artifact pair, with
+measurement settings, coverage, scalar summaries and paths back to the data.
 """
 import argparse
-import warnings
+import json
 from pathlib import Path
-from typing import List, Dict, Optional
+import sys
+from tempfile import NamedTemporaryFile
+from types import SimpleNamespace
+import warnings
 
-import pandas as pd
+import h5py
 import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from measurement_config import artifact_compatibility, measurement_config
+
+# Use the same convention fields as the worker and resume checks.
+MEASUREMENT_FIELDS = tuple(measurement_config(SimpleNamespace()))
+MODULE_COUNTS = ("candidate_modules", "analyzed_modules",
+                 "partially_analyzed_modules", "skipped_modules")
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Analyze ESD experiment results")
-    parser.add_argument(
-        "--results_dir",
-        type=str,
-        required=True,
-        help="Directory containing result CSV files"
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--results_dir", type=Path, required=True,
+                        help="Run directory containing stats/ and metrics/")
+    parser.add_argument("--output", type=Path,
+                        help="Summary CSV path (default: results_dir/summary.csv)")
+    parser.add_argument("--verbose", action="store_true", help="Show the first 20 valid model summaries")
+    return parser.parse_args(argv)
+
+
+def compute_model_summary(layers):
+    """Summarize measurements, not architectural depth or unique parameters."""
+    alpha = pd.to_numeric(layers["alpha"], errors="raise")
+    fitted = layers["fit_status"].eq("fitted") & np.isfinite(alpha) & (alpha > 1)
+    summary = {
+        "analyzed_measurements": len(layers),
+        "measured_modules": layers["module_name"].nunique(),
+        "fitted_measurements": int(fitted.sum()),
+        "missing_fit_measurements": int((~fitted).sum()),
+    }
+    alpha_values = alpha[fitted]
+    summary.update(
+        alpha_mean=alpha_values.mean(), alpha_median=alpha_values.median(),
+        alpha_std=alpha_values.std(), alpha_min=alpha_values.min(),
+        alpha_max=alpha_values.max(), alpha_q25=alpha_values.quantile(.25),
+        alpha_q75=alpha_values.quantile(.75),
     )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output file for summary (default: results_dir/summary.csv)"
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print detailed statistics"
-    )
-    return parser.parse_args()
-
-
-def load_all_results(results_dir: Path) -> List[pd.DataFrame]:
-    """Load all result CSV files."""
-    csv_files = list(results_dir.glob("*.csv"))
-    
-    # Filter out special files
-    csv_files = [
-        f for f in csv_files
-        if f.name not in ["summary.csv", "batch_meta.csv", "failed_models.txt"]
-    ]
-    
-    if not csv_files:
-        print(f"No result files found in {results_dir}")
-        return []
-    
-    print(f"Found {len(csv_files)} result files")
-    
-    results = []
-    for csv_file in csv_files:
-        try:
-            df = pd.read_csv(csv_file)
-            if len(df) > 0:
-                results.append(df)
-        except Exception as e:
-            warnings.warn(f"Could not load {csv_file.name}: {e}")
-    
-    print(f"Successfully loaded {len(results)} result files")
-    return results
-
-
-def compute_model_summary(df: pd.DataFrame) -> Dict:
-    """Compute summary statistics for a single model."""
-    summary = {}
-    
-    # Basic info
-    if "model_id" in df.columns:
-        summary["model_id"] = df["model_id"].iloc[0] if len(df) > 0 else "unknown"
-    
-    if "is_adapter" in df.columns:
-        summary["is_adapter"] = df["is_adapter"].iloc[0] if len(df) > 0 else False
-    
-    if "source_model" in df.columns and "is_adapter" in df.columns:
-        if df["is_adapter"].iloc[0]:
-            summary["source_model"] = df["source_model"].iloc[0] if len(df) > 0 else ""
-    
-    # Count layers
-    summary["num_layers"] = len(df)
-    
-    # Alpha statistics
-    if "alpha" in df.columns:
-        alpha_values = df["alpha"].dropna()
-        if len(alpha_values) > 0:
-            summary["alpha_mean"] = alpha_values.mean()
-            summary["alpha_median"] = alpha_values.median()
-            summary["alpha_std"] = alpha_values.std()
-            summary["alpha_min"] = alpha_values.min()
-            summary["alpha_max"] = alpha_values.max()
-            summary["alpha_q25"] = alpha_values.quantile(0.25)
-            summary["alpha_q75"] = alpha_values.quantile(0.75)
-        else:
-            summary["alpha_mean"] = np.nan
-            summary["alpha_median"] = np.nan
-            summary["alpha_std"] = np.nan
-            summary["alpha_min"] = np.nan
-            summary["alpha_max"] = np.nan
-            summary["alpha_q25"] = np.nan
-            summary["alpha_q75"] = np.nan
-    
-    # Alpha weighted statistics
-    if "alpha_weighted" in df.columns:
-        aw_values = df["alpha_weighted"].dropna()
-        if len(aw_values) > 0:
-            summary["alpha_weighted_mean"] = aw_values.mean()
-            summary["alpha_weighted_median"] = aw_values.median()
-    
-    # Spectral norm statistics
-    if "spectral_norm" in df.columns:
-        sn_values = df["spectral_norm"].dropna()
-        if len(sn_values) > 0:
-            summary["spectral_norm_mean"] = sn_values.mean()
-            summary["spectral_norm_max"] = sn_values.max()
-    
-    # Log spectral norm
-    if "log_spectral_norm" in df.columns:
-        lsn_values = df["log_spectral_norm"].dropna()
-        if len(lsn_values) > 0:
-            summary["log_spectral_norm_mean"] = lsn_values.mean()
-    
-    # Stable rank statistics
-    if "stable_rank" in df.columns:
-        sr_values = df["stable_rank"].dropna()
-        if len(sr_values) > 0:
-            summary["stable_rank_mean"] = sr_values.mean()
-            summary["stable_rank_median"] = sr_values.median()
-    
-    # Entropy statistics
-    if "entropy" in df.columns:
-        ent_values = df["entropy"].dropna()
-        if len(ent_values) > 0:
-            summary["entropy_mean"] = ent_values.mean()
-            summary["entropy_median"] = ent_values.median()
-    
-    # Parameter count
-    if "params" in df.columns:
-        params = df["params"].dropna()
-        if len(params) > 0:
-            summary["total_params"] = params.sum()
-    
+    for metric, statistics in {
+        "alpha_weighted": ("mean", "median"),
+        "log_alpha_norm": ("mean", "median"),
+        "D": ("median", "max"),
+        "n_tail": ("min", "median"),
+        "spectral_norm": ("mean", "max"),
+        "log_spectral_norm": ("mean",),
+        "stable_rank": ("mean", "median"),
+        "entropy": ("mean", "median"),
+    }.items():
+        if metric not in layers:
+            continue
+        values = pd.to_numeric(layers[metric], errors="raise")
+        if metric in ("alpha_weighted", "log_alpha_norm", "D", "n_tail"):
+            values = values[fitted]
+        values = values[np.isfinite(values)]
+        for statistic in statistics:
+            summary[f"{metric}_{statistic}"] = getattr(values, statistic)()
+    # Per-measurement params can omit biases or repeat tied weights. Summing
+    # them would not give the model's unique parameter count.
     return summary
 
 
-def print_model_stats(summary_df: pd.DataFrame, verbose: bool = False):
-    """Print summary statistics."""
-    print("\n" + "=" * 80)
-    print("EXPERIMENT SUMMARY")
-    print("=" * 80)
-    
-    print(f"\nTotal models analyzed: {len(summary_df)}")
-    
-    if "is_adapter" in summary_df.columns:
-        num_adapters = summary_df["is_adapter"].sum()
-        num_base = len(summary_df) - num_adapters
-        print(f"  - Base models: {num_base}")
-        print(f"  - Adapter models: {num_adapters}")
-    
-    if "num_layers" in summary_df.columns:
-        print(f"\nLayers per model:")
-        print(f"  Mean: {summary_df['num_layers'].mean():.1f}")
-        print(f"  Median: {summary_df['num_layers'].median():.0f}")
-        print(f"  Range: [{summary_df['num_layers'].min():.0f}, {summary_df['num_layers'].max():.0f}]")
-    
-    if "alpha_mean" in summary_df.columns:
-        print(f"\nAlpha (model averages):")
-        alpha_means = summary_df["alpha_mean"].dropna()
-        if len(alpha_means) > 0:
-            print(f"  Mean: {alpha_means.mean():.4f}")
-            print(f"  Median: {alpha_means.median():.4f}")
-            print(f"  Std: {alpha_means.std():.4f}")
-            print(f"  Range: [{alpha_means.min():.4f}, {alpha_means.max():.4f}]")
-    
-    if "alpha_weighted_mean" in summary_df.columns:
-        print(f"\nAlpha Weighted (model averages):")
-        aw_means = summary_df["alpha_weighted_mean"].dropna()
-        if len(aw_means) > 0:
-            print(f"  Mean: {aw_means.mean():.4f}")
-            print(f"  Median: {aw_means.median():.4f}")
-    
-    if "stable_rank_mean" in summary_df.columns:
-        print(f"\nStable Rank (model averages):")
-        sr_means = summary_df["stable_rank_mean"].dropna()
-        if len(sr_means) > 0:
-            print(f"  Mean: {sr_means.mean():.2f}")
-            print(f"  Median: {sr_means.median():.2f}")
-    
-    if verbose and "model_id" in summary_df.columns:
-        print("\n" + "=" * 80)
-        print("TOP 10 MODELS BY ALPHA (LOWEST)")
-        print("=" * 80)
-        top_low = summary_df.nsmallest(10, "alpha_mean")[["model_id", "alpha_mean", "num_layers"]]
-        print(top_low.to_string(index=False))
-        
-        print("\n" + "=" * 80)
-        print("TOP 10 MODELS BY ALPHA (HIGHEST)")
-        print("=" * 80)
-        top_high = summary_df.nlargest(10, "alpha_mean")[["model_id", "alpha_mean", "num_layers"]]
-        print(top_high.to_string(index=False))
-    
-    print("\n" + "=" * 80)
+def read_model_summary(csv_path, h5_path):
+    """Validate one pair and read its canonical scalars; never read /eigs or /alpha."""
+    compatible, reason = artifact_compatibility(csv_path, h5_path)
+    if not compatible:
+        raise ValueError(reason)
+    with h5py.File(h5_path, "r") as h5:
+        config = json.loads(h5.attrs["measurement_config_json"])
+        settings = {name: config[name] for name in MEASUREMENT_FIELDS}
+        json.dumps(settings, allow_nan=False)
+        model_id = h5.attrs["full_name"]
+        if isinstance(model_id, bytes):
+            model_id = model_id.decode("utf-8")
+        if not model_id or model_id.partition("@")[0] != config["repo_id"]:
+            raise ValueError("Model identity disagrees with measurement configuration")
+        layer_records = h5["layers"]
+        required = {"longname", "module_name", "fit_status", "alpha"}
+        if not required.issubset(layer_records):
+            raise ValueError("Missing canonical identity or fit-status fields")
+        layers = pd.DataFrame({
+            name: dataset.asstr()[:] if h5py.check_string_dtype(dataset.dtype) else dataset[:]
+            for name, dataset in layer_records.items()
+        })
+        summary = compute_model_summary(layers)
+        runtime = config.get("runtime") or {}
+        loading_info = runtime.get("loading_info") or {}
+        summary.update(
+            model_id=model_id, repo_id=config["repo_id"],
+            requested_revision=config["requested_revision"],
+            source_model=config.get("source_model", ""),
+            base_model_relation=config.get("base_model_relation", ""),
+            model_class=runtime.get("model_class"),
+            model_config_commit_hash=runtime.get("model_config_commit_hash"),
+            base_repo_loaded=loading_info.get("base_repo_loaded"),
+            base_revision_loaded=loading_info.get("base_revision_loaded"),
+            base_resolved_commit_hash=loading_info.get("base_resolved_commit_hash"),
+            csv_path=str(csv_path.resolve()), h5_path=str(h5_path.resolve()),
+            coverage_status="unknown", **settings,
+        )
+        summary.update({name: None for name in MODULE_COUNTS})
+        if "coverage" in h5:
+            coverage = json.loads(h5["coverage"].asstr()[()])
+            counts = coverage["counts"]
+            for name in (*MODULE_COUNTS, "analyzed_measurements", "fitted_measurements"):
+                if type(counts.get(name)) is not int or counts[name] < 0:
+                    raise ValueError(f"Invalid coverage count: {name}")
+            for name in ("analyzed_measurements", "fitted_measurements"):
+                if counts[name] != summary[name]:
+                    raise ValueError(f"Coverage disagrees with canonical records: {name}")
+            if counts["candidate_modules"] != sum(counts[name] for name in MODULE_COUNTS[1:]):
+                raise ValueError("Coverage module counts do not add up")
+            if counts["analyzed_modules"] + counts["partially_analyzed_modules"] != summary["measured_modules"]:
+                raise ValueError("Coverage disagrees with measured module identities")
+            summary.update({name: counts[name] for name in MODULE_COUNTS})
+            summary["coverage_status"] = "recorded"
+    return summary
 
 
-def main():
-    """Main analysis function."""
-    args = parse_args()
-    
-    results_dir = Path(args.results_dir)
-    if not results_dir.exists():
-        print(f"Error: Results directory not found: {results_dir}")
+def print_model_stats(summary, verbose=False, mixed_settings=False):
+    valid = summary.loc[summary["artifact_status"] == "valid"]
+    print(f"Valid artifact pairs: {len(valid)}; invalid/incomplete pairs: {len(summary) - len(valid)}")
+    if valid.empty:
+        return
+    print(f"Measurements: {valid['analyzed_measurements'].sum():.0f}; "
+          f"fitted: {valid['fitted_measurements'].sum():.0f}; "
+          f"missing fits: {valid['missing_fit_measurements'].sum():.0f}")
+    unknown = (valid["coverage_status"] == "unknown").sum()
+    if unknown:
+        print(f"Module coverage is unknown for {unknown} models.")
+    if mixed_settings:
+        warnings.warn("Mixed measurement settings: filter summary.csv by settings before comparing models. "
+                      "Pooled metric statistics are not shown.")
+        return
+    alpha = valid["alpha_mean"].dropna()
+    if not alpha.empty:
+        print(f"Mean of model fitted-alpha means: {alpha.mean():.4f}")
+    if verbose:
+        print("First 20 valid models (not a model-quality ranking):")
+        print(valid[["model_id", "analyzed_measurements", "fitted_measurements",
+                     "alpha_mean", "coverage_status", "skipped_modules"]].head(20).to_string(index=False))
+
+
+def write_summary(summary, output_path):
+    """Replace a previous summary only after the new CSV is fully written."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=output_path.parent,
+                                prefix=f".{output_path.name}.", suffix=".tmp", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            summary.to_csv(handle, index=False)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    results_dir = args.results_dir.resolve()
+    stats_dir, metrics_dir = results_dir / "stats", results_dir / "metrics"
+    output_path = (args.output or results_dir / "summary.csv").resolve()
+    if not stats_dir.is_dir() and not metrics_dir.is_dir():
+        print("No stats/ or metrics/ directory found. Pass the run root as --results_dir.")
         return 1
-    
-    # Load all results
-    print(f"Loading results from: {results_dir}")
-    all_results = load_all_results(results_dir)
-    
-    if not all_results:
-        print("No results to analyze")
+    if output_path.suffix.lower() != ".csv" or any(
+        output_path.is_relative_to(directory.resolve()) for directory in (stats_dir, metrics_dir)
+    ):
+        print("Summary output must be a .csv outside the input stats/ and metrics/ directories.")
         return 1
-    
-    # Compute summaries
-    print("\nComputing summary statistics...")
-    summaries = []
-    for df in all_results:
+    model_names = sorted({
+        path.stem for directory, suffix in ((stats_dir, "*.csv"), (metrics_dir, "*.h5"))
+        for path in directory.glob(suffix) if path.is_file() and not path.name.startswith(".")
+    })
+    if not model_names:
+        print("No model artifacts found; existing summary left unchanged.")
+        return 1
+
+    summaries, measurement_settings = [], set()
+    for name in model_names:
+        csv_path, h5_path = stats_dir / f"{name}.csv", metrics_dir / f"{name}.h5"
         try:
-            summary = compute_model_summary(df)
-            summaries.append(summary)
-        except Exception as e:
-            warnings.warn(f"Could not compute summary: {e}")
-    
-    if not summaries:
-        print("Could not compute any summaries")
-        return 1
-    
-    # Create summary DataFrame
-    summary_df = pd.DataFrame(summaries)
-    
-    # Sort by model_id
-    if "model_id" in summary_df.columns:
-        summary_df = summary_df.sort_values("model_id").reset_index(drop=True)
-    
-    # Save summary
-    output_path = Path(args.output) if args.output else results_dir / "summary.csv"
-    summary_df.to_csv(output_path, index=False)
-    print(f"\nSaved summary to: {output_path}")
-    
-    # Print statistics
-    print_model_stats(summary_df, verbose=args.verbose)
-    
-    return 0
+            summary = read_model_summary(csv_path, h5_path)
+            measurement_settings.add(json.dumps({key: summary[key] for key in MEASUREMENT_FIELDS}, sort_keys=True))
+            summary.update(artifact_status="valid", artifact_error="")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            warnings.warn(f"{name}: {error}")
+            summary = {"model_id": "", "csv_path": str(csv_path), "h5_path": str(h5_path),
+                       "artifact_status": "invalid", "artifact_error": str(error)}
+        summaries.append(summary)
+
+    # Only small per-model rows accumulate; layer tables are released after
+    # each model, and eigenvalues remain in their original HDF5 files.
+    summary = pd.DataFrame(summaries)
+    first_columns = ["model_id", "artifact_status", "artifact_error", "csv_path", "h5_path"]
+    summary = summary[first_columns + [name for name in summary if name not in first_columns]]
+    write_summary(summary, output_path)
+    print(f"Saved summary to: {output_path}")
+    print_model_stats(summary, args.verbose, mixed_settings=len(measurement_settings) > 1)
+    return int((summary["artifact_status"] != "valid").any())
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())

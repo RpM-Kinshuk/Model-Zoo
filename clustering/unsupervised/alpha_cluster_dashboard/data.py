@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Iterable
+import warnings
 
 import h5py
 import numpy as np
@@ -98,6 +99,7 @@ class AlphaRecord:
     num_layers: int
     raw_modules: tuple[str, ...]
     alpha: np.ndarray
+    view_status: str = "legacy"
 
     @property
     def common_schema(self) -> bool:
@@ -117,16 +119,52 @@ def list_metric_files(metrics_dir: str | Path) -> list[Path]:
 
 
 def load_alpha_records(metrics_dir: str | Path) -> list[AlphaRecord]:
+    """Read complete depth views, not arbitrary canonical layer collections.
+
+    Older root-only files remain usable, but their layer coverage is unknown.
+    This structural check does not validate historical numerical conventions.
+    """
     records: list[AlphaRecord] = []
     for path in list_metric_files(metrics_dir):
-        with h5py.File(path, "r") as handle:
-            if "alpha" not in handle:
-                continue
-            dataset = handle["alpha"]
-            modules = tuple(json.loads(dataset.attrs["module_names_json"]))
-            num_layers = int(dataset.attrs["num_layers"])
-            alpha = np.asarray(dataset[:], dtype=float)
-            alpha[~np.isfinite(alpha)] = np.nan
+        try:
+            with h5py.File(path, "r") as handle:
+                dataset = handle.get("alpha")
+                if not isinstance(dataset, h5py.Dataset):
+                    raise ValueError("missing /alpha dataset")
+                view_status = dataset.attrs.get("view_status")
+                if isinstance(view_status, bytes):
+                    view_status = view_status.decode("utf-8")
+                canonical = ("layers" in handle or "canonical_records" in dataset.attrs
+                             or str(handle.attrs.get("format_version", "")) == "2.0")
+                if canonical:
+                    if not isinstance(handle.get("layers"), h5py.Group):
+                        raise ValueError("missing canonical /layers records")
+                    if view_status != "complete":
+                        raise ValueError(f"/alpha view_status is {view_status or 'missing'}")
+                    if int(dataset.attrs.get("unmapped_layer_count", 0)) != 0:
+                        raise ValueError("/alpha omits canonical layers")
+                elif view_status not in (None, "complete"):
+                    raise ValueError(f"/alpha view_status is {view_status}")
+                else:
+                    view_status = "legacy"
+                modules = json.loads(dataset.attrs["module_names_json"])
+                if (not isinstance(modules, list)
+                        or not all(isinstance(module, str) for module in modules)
+                        or len(set(modules)) != len(modules)):
+                    raise ValueError("invalid or duplicate /alpha module names")
+                num_layers = int(dataset.attrs["num_layers"])
+                if num_layers <= 0 or not modules or dataset.shape != (num_layers, len(modules)):
+                    raise ValueError("/alpha shape does not match its layer/module labels")
+                modules = tuple(modules)
+                alpha = np.asarray(dataset[:], dtype=float)
+                alpha[~np.isfinite(alpha)] = np.nan
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            warnings.warn(
+                f"Skipping {path.name}: {exc}. The dashboard requires a complete "
+                "depth-by-module /alpha view; use canonical /layers for general analysis.",
+                stacklevel=2,
+            )
+            continue
         stem = path.stem
         records.append(
             AlphaRecord(
@@ -136,7 +174,15 @@ def load_alpha_records(metrics_dir: str | Path) -> list[AlphaRecord]:
                 num_layers=num_layers,
                 raw_modules=modules,
                 alpha=alpha,
+                view_status=view_status,
             )
+        )
+    legacy_count = sum(record.view_status == "legacy" for record in records)
+    if legacy_count:
+        warnings.warn(
+            f"Loaded {legacy_count} legacy root-only alpha views. Their layer identity, "
+            "coverage and numerical conventions are unverified (view_status='legacy').",
+            stacklevel=2,
         )
     return records
 
@@ -161,6 +207,7 @@ def records_to_frame(records: Iterable[AlphaRecord]) -> pd.DataFrame:
                 "raw_modules": ", ".join(record.raw_modules),
                 "common_schema": record.common_schema,
                 "schema_name": schema_name(record),
+                "view_status": record.view_status,
             }
         )
     return pd.DataFrame(rows)

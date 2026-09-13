@@ -13,6 +13,13 @@ Eigenvalues are saved by default; use `--no-save_eigs` for scalar-only output.
 Results are per-layer CSV and canonical HDF5 records with spectra, missing-fit
 status and coverage. Use a fresh output directory when settings change.
 
+Refresh `summary.csv`, the per-model index of metrics, settings, coverage and
+artifact paths, without loading spectra:
+
+```bash
+python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/my_run
+```
+
 See the [analysis guide](../docs/operations/analysis.md) for measurement
 definitions, supported loaders, output layout, resume rules and GPU supervision.
 `run_script.sh` at the repository root is the local HPC wrapper.
@@ -24,6 +31,7 @@ definitions, supported loaders, output layout, resume rules and GPU supervision.
 - `gputracker/`: GPU scheduling, runtime config reload, worker supervision and cleanup.
 - `src/worker.py`: one-model load/analyze/save lifecycle and terminal status.
 - `src/model_loader.py`: checkpoint routing and integrity checks.
+- `utils/analyze_results.py`: canonical result reader and per-model summary.
 - `../net_esd/`: reusable spectral-analysis core.
 - `tests/`: offline regression tests and separate installation/GPU smoke checks.
 - `scripts/backend_pilot.py`: repeatable, download-free CPU/GPU numerical check.

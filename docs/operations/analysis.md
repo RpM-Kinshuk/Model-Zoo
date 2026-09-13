@@ -71,6 +71,38 @@ moving `main` branches. Incompatible/incomplete artifacts stop the run without
 deletion. Prefer a fresh directory; explicit `--overwrite` deletes the selected
 models' previous outputs before loading. `summary.csv` alone is not completion.
 
+## Reading a run
+
+Build or refresh the existing per-model summary from the run root:
+
+```bash
+python esd_experiment/analyze_results.py \
+  --results_dir analysis_runs/phase2/my_run
+```
+
+This writes `summary.csv`: one row per CSV/HDF5 pair, with artifact paths,
+measurement settings, fitted/missing measurement counts, module coverage and
+scalar summaries. It validates current artifacts and reads canonical `/layers`
+one model at a time; it does not load eigenvalues or use the derived `/alpha`
+view. Q/K/V slices count as separate measurements, not separate modules or depth.
+Alpha and other fit-derived summaries include only finite fitted `alpha > 1`;
+other metrics use their finite values across all measured rows.
+
+Incomplete or incompatible pairs remain as `artifact_status=invalid` rows with
+an `artifact_error`, and the command exits nonzero. Missing coverage is
+`coverage_status=unknown`, never assumed complete. Mixed measurement settings
+produce a warning and suppress pooled metric statistics; filter by settings
+before comparing rows. Requested revisions and `model_config_commit_hash` are
+separate fields; the latter is not proof that every checkpoint dependency was
+pinned. Recorded adapter-base repository, revision and resolved commit are
+included separately from the requested `source_model`. Full runtime provenance
+remains in HDF5.
+
+The summary is an artifact index, not a ledger of every attempted model: failures
+that produced no pair remain in the runner's logs. The depth-only clustering
+dashboard accepts complete `/alpha` views and warns when skipping partial or
+unavailable views; arbitrary model structures remain accessible through `/layers`.
+
 ## Loading and coverage
 
 Ordinary Transformers loads preserve the checkpoint's compatible built-in
