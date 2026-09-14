@@ -24,6 +24,12 @@ status and coverage. Use a fresh output directory when settings change.
 Model and adapter-base revisions must be full commit SHAs. Remote code is off;
 use `--trust_remote_code` only for reviewed repositories.
 
+For architecture-independent stored-matrix analysis, add
+`--analysis_source checkpoint` in a fresh output directory. It streams ordinary
+2D safetensors through the same core, without constructing a model. Unknown
+layouts remain skipped; results describe checkpoint tensors, not verified model
+layers. See the [scope and limits](../docs/operations/analysis.md#architecture-independent-checkpoint-matrices).
+
 Refresh `summary.csv`, the per-model index of metrics, settings, coverage and
 artifact paths, without loading spectra:
 
@@ -42,6 +48,7 @@ definitions, supported loaders, output layout, resume rules and GPU supervision.
 - `gputracker/`: GPU scheduling, runtime config reload, worker supervision and cleanup.
 - `src/worker.py`: one-model load/analyze/save lifecycle and terminal status.
 - `src/model_loader.py`: checkpoint routing and integrity checks.
+- `src/checkpoint_tensors.py`: explicit, streaming safetensors matrix analysis.
 - `utils/analyze_results.py`: canonical result reader and per-model summary.
 - `../net_esd/`: reusable spectral-analysis core.
 - `tests/`: offline regression tests and separate installation/GPU smoke checks.

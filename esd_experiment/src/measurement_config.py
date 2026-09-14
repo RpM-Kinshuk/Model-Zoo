@@ -9,9 +9,9 @@ import re
 # Version 7 adds declared MultiheadAttention matrices to the measured set.
 NUMERICS_VERSION = "7"
 FORMAT_VERSION = "2.0"
-# Version 6 extends checkpoint-shape selection to the tested encoder families.
+# Version 7 distinguishes model loading from explicit checkpoint-tensor analysis.
 # Loading policy is separate from the spectral formulas.
-LOADER_VERSION = "6"
+LOADER_VERSION = "7"
 
 
 def is_commit_sha(value):
@@ -45,6 +45,7 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
     config = {
         "numerics_version": NUMERICS_VERSION,
         "loader_version": LOADER_VERSION,
+        "analysis_source": getattr(args, "analysis_source", "model"),
         "fix_fingers": getattr(args, "fix_fingers", "xmin_mid") or "DKS",
         "evals_thresh": float(getattr(args, "evals_thresh", 1e-5)),
         "bins": int(getattr(args, "bins", 100)),
@@ -60,6 +61,12 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
         "filter_type": bool(getattr(args, "filter_type", True)),
         "spectrum_storage": "full",
     }
+    if config["analysis_source"] not in {"model", "checkpoint"}:
+        raise ValueError("analysis_source must be model or checkpoint")
+    if config["analysis_source"] == "checkpoint":
+        if config["trust_remote_code"]:
+            raise ValueError("Checkpoint mode does not execute model code; omit --trust_remote_code")
+        config["filter_type"] = False  # All stored floating matrices, no module/aspect-ratio filter.
     if not math.isfinite(config["evals_thresh"]) or config["evals_thresh"] < 0:
         raise ValueError("evals_thresh must be finite and >= 0")
     if config["bins"] < 1:
@@ -99,6 +106,8 @@ def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
                 return False, "missing measurement configuration"
             if config.get("loader_version") != LOADER_VERSION:
                 return False, "different or missing loader_version"
+            if config.get("analysis_source") not in {"model", "checkpoint"}:
+                return False, "unknown or missing analysis_source"
             for key, value in (expected or {}).items():
                 if config.get(key) != value:
                     return False, f"measurement setting differs: {key}"

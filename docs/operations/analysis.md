@@ -55,6 +55,7 @@ and [revision metadata API](https://huggingface.co/docs/huggingface_hub/package_
 
 | Setting | Default | Meaning |
 |---|---|---|
+| `--analysis_source` | `model` | Strict model loading; `checkpoint` measures stored safetensors matrices without model construction. |
 | `--save_eigs` | on | Store full computed spectra in HDF5, including zeros and filtered values. |
 | `--load_dtype` | `auto` | Checkpoint/framework-selected precision; not a guarantee of mixed-dtype preservation. |
 | `--compute_dtype` | `float32` | SVD/Gram precision; use `float64` for reference checks. |
@@ -103,15 +104,15 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **7**, loader **6**, HDF5 format **2.0**.
+Current output versions are numerics **7**, loader **7**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
 Numerics 7 adds declared MultiheadAttention projection matrices, measured whole,
-and records their weight attributes. Loader 6 covers checkpoint-shape selection
-for the tested encoder families, retaining pinned adapter probes. Older outputs
+and records their weight attributes. Loader 7 adds explicit checkpoint-tensor
+analysis, retaining encoder selection and pinned adapter probes. Older outputs
 need a fresh run. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
@@ -245,6 +246,60 @@ does not unpack them or prove that all checkpoint weights survived loading.
 The loader's integrity gate remains separate and required. See
 [PyTorch's named tensor traversal](https://docs.pytorch.org/docs/2.11/generated/torch.nn.Module.html#torch.nn.Module.named_parameters)
 for alias enumeration with `remove_duplicate=False`.
+
+### Architecture-independent checkpoint matrices
+
+Add `--analysis_source checkpoint` to a runner or worker command, using a fresh
+output directory. Model mode remains the default. This is an explicit alternative,
+not automatic recovery from a failed or partially loaded model.
+
+Checkpoint mode reads pinned `model.safetensors` or `model.safetensors.index.json`
+and validates all shard keys/shapes. It needs no recognized architecture, model
+construction or repository Python. Missing/unknown architecture metadata is fine;
+malformed files still fail. There is no pickle or arbitrary-file fallback.
+Known adapter/quantization config and packed-weight markers are rejected; use
+the supported model-loading path to merge or interpret those representations.
+
+Every stored floating 2D tensor (float16, bfloat16, float32, float64) is eligible,
+including direct parameters and possible buffers. Other ranks, empty tensors and
+unsupported dtypes are recorded as skipped. Higher-dimensional tensors are not
+reshaped or assumed to be convolution kernels. Unknown packing cannot be ruled
+out from dtype alone: these are **stored-matrix descriptors**, not a claim about
+effective model weights or universal model support.
+
+The same numerical core, CSV/HDF5 writer and dispatcher are used. Input tensors
+are read one at a time on one device per worker (`auto` selects the first assigned
+GPU, otherwise CPU). Use one GPU per job. Within-model parallelism is disabled;
+worker concurrency, load/analyze timeouts, signals, resume and ephemeral cache
+cleanup are unchanged. Disk still holds the downloaded checkpoint until worker
+cleanup; host memory retains accumulated spectra, not a constructed full model.
+`load_dtype=auto` preserves each stored tensor's dtype. `filter_type` is recorded
+as false: no module-class or legacy Linear aspect-ratio filter applies here.
+
+Exact checkpoint keys become `/layers/longname` and `weight_attribute`;
+`module_name` is empty, and the derived depth view is unavailable. `/coverage`
+has `scope=checkpoint_tensors` and one `tensors` record per stored key, with file,
+shape/dtype, measurement link or skip reason. The summary exposes stored/analyzed/
+skipped tensor counts; module and loaded-parameter coverage are not applicable.
+Aliases omitted during saving cannot be reconstructed, and equal stored tensors
+are not deduplicated. `params` is only the measured tensor's element count.
+Source mode, file inventory, config hash and observed execution are recorded;
+resume and summary comparison keep the two modes distinct.
+
+Offline controls cover streaming lifetime, mixed precision, exact names, shards,
+shared-key omissions, representation rejection and artifact/resume behavior.
+A sharded BERT control agrees exactly with model-mode spectra for the same
+matrices. Public CPU smoke checks used `hf-internal-testing/tiny-random-bert`
+at `f171d7baecaf37b5da5a3616d8833b9969753535` (39 matrices, 100 stored tensors)
+and `hf-internal-testing/tiny-random-gpt2` at
+`71034c5d8bde858ff824298bdedc65515b97d2b9` (22 matrices, 64 stored tensors).
+Every saved spectrum matched an independent CPU float64 SVD calculation;
+summary reading and resume passed. Temporary outputs/caches were removed.
+These random test checkpoints establish neither trained-model validity nor
+GPU equivalence; those remain pilot questions.
+
+This uses safetensors' [per-tensor reading API](https://huggingface.co/docs/safetensors/index);
+see also its [shared-tensor limitations](https://huggingface.co/docs/safetensors/torch_shared_tensors).
 
 ## Interpreting the metrics
 
@@ -412,18 +467,16 @@ effort. Each slice should have a concrete check and a small, understandable diff
   The explicit dense `.weight` fallback covers a limited subset of loaded-layer
   gaps. Declared MultiheadAttention projection attributes are now covered;
   arbitrary extra parameters and recovery of failed loads remain separate work.
-- [ ] **Decide when direct weight analysis is appropriate.** If instantiation
-  fails, evaluate using verified ordinary dense checkpoint tensors directly.
-  Do not salvage an unchecked partially loaded model or guess packed/quantized
-  layouts from shapes. A tensor-only route, if justified, must be explicitly
-  labelled in provenance and reuse the existing estimator/writer; it is not a
-  claim that the full model loaded or its architecture was recovered. Define its
-  eligibility, alias handling and partial-coverage rules before implementation.
-  Keep the strict gate for the existing model-loading route.
+- [x] **Explicit direct matrix analysis.** `--analysis_source checkpoint` streams
+  ordinary floating safetensors matrices through the existing core/writer, with
+  exact keys, complete stored-key accounting and separate summary/resume scope.
+  Eligibility and limits are defined above. This does not salvage partial model
+  loads, interpret unknown layouts or claim architectural recovery. Keep the
+  strict gate for model mode; expand formats/layouts only for demonstrated needs.
 - [ ] **Verify these paths with bounded controls.** Reuse current regression
   fixtures; add cases for each new fallback and for dropped/new weights, heads,
   shared aliases, unsupported layouts and partial coverage. Keep declared and
-  inferred loading, and any future tensor-only measurements, distinguishable in
+  inferred loading, and tensor-only measurements, distinguishable in
   summaries and resume checks. Only claimed-supported tensors should reach ESD.
 
 Acceptance before the next pilot: supported cases produce correctly identified

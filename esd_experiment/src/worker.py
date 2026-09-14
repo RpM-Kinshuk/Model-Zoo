@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 for reference checks")
     
     # Model loading
+    parser.add_argument("--analysis_source", choices=["model", "checkpoint"], default="model", help="model: strict architecture loading (default); checkpoint: stream stored safetensors matrices without constructing a model")
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
     parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute (off by default)")
     parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
@@ -80,6 +81,8 @@ def parse_args():
         validate_model_pin(args.model_id, args.revision, args.source_model, args.base_model_relation, args.loader_scenario)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.analysis_source == "checkpoint" and not re.fullmatch(r"auto|cpu|cuda(?::\d+)?", args.device_map):
+        parser.error("Checkpoint mode needs --device_map auto, cpu or cuda:<assigned device index>")
     return args
 
 
@@ -120,7 +123,7 @@ def runtime_provenance(model, args):
         except importlib.metadata.PackageNotFoundError:
             library_versions[package] = None
     return {
-        "model_class": f"{type(model).__module__}.{type(model).__name__}",
+        "model_class": f"{type(model).__module__}.{type(model).__name__}" if model is not None else None,
         "loading_info": getattr(model, "_model_zoo_loading_info", None),
         "installed_loading_library_versions": library_versions,
         "model_config_commit_hash": getattr(config, "_commit_hash", None),
@@ -130,7 +133,7 @@ def runtime_provenance(model, args):
         "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
         "device_map_requested": args.device_map,
         "parallel_esd": args.parallel_esd,
-        "loaded_parameter_dtypes": sorted({str(getattr(p, "dtype", "unknown")) for p in model.parameters()}),
+        "loaded_parameter_dtypes": sorted({str(getattr(p, "dtype", "unknown")) for p in model.parameters()}) if model is not None else [],
         "cuda_matmul_allow_tf32": getattr(matmul, "allow_tf32", None),
         "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
             if torch.cuda.is_available() else [],
@@ -391,7 +394,10 @@ def save_results(
     eigs = records.get("eigs") if save_eigs else None
     if save_eigs and eigs is None:
         raise ValueError("save_eigs requires eigenvalues aligned with layer records")
-    mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
+    if (measurement_config or {}).get("analysis_source") == "checkpoint":
+        mat, module_names, num_layers = np.empty((0, 0)), [], 0  # No inferred depth from checkpoint keys.
+    else:
+        mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
     df = pd.DataFrame({key: values for key, values in records.items() if key != "eigs"})
     df["alpha"] = pd.to_numeric(df["alpha"], errors="raise")
     
@@ -789,6 +795,7 @@ def main():
     success = False
     
     for attempt in range(1, args.max_retries + 2):
+        checkpoint = None
         current_stage = "load"
         heartbeat.update(stage=current_stage)
         try:
@@ -800,16 +807,24 @@ def main():
             source_model = args.source_model if args.source_model else None
             
             try:
-                model, is_adapter = load_model(
-                    repo_id=repo_id,
-                    base_model_relation=base_relation,
-                    source_model=source_model,
-                    device_map=args.device_map,
-                    torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
-                    revision=revision,
-                    trust_remote_code=measurement["trust_remote_code"],
-                    loader_scenario=args.loader_scenario if args.loader_scenario else None,
-                )
+                if measurement["analysis_source"] == "checkpoint":
+                    from checkpoint_tensors import inspect_checkpoint, analyze_checkpoint
+                    checkpoint = inspect_checkpoint(
+                        repo_id, revision, base_model_relation=base_relation or "",
+                        loader_scenario=args.loader_scenario or "",
+                    )
+                    is_adapter = False
+                else:
+                    model, is_adapter = load_model(
+                        repo_id=repo_id,
+                        base_model_relation=base_relation,
+                        source_model=source_model,
+                        device_map=args.device_map,
+                        torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
+                        revision=revision,
+                        trust_remote_code=measurement["trust_remote_code"],
+                        loader_scenario=args.loader_scenario if args.loader_scenario else None,
+                    )
             except LoaderFailure as exc:
                 raise exc
             except Exception as exc:
@@ -818,15 +833,15 @@ def main():
             
             current_stage = "analyze"
             heartbeat.update(stage=current_stage)
-            print(f"Model loaded successfully (adapter: {is_adapter})")
-            print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
             measurement["runtime"] = runtime_provenance(model, args)
-            
-            # Report which device the model is on
-            model_devices = set()
-            for param in model.parameters():
-                model_devices.add(str(param.device))
-            print(f"Model devices: {', '.join(sorted(model_devices))}")
+            if checkpoint is not None:
+                measurement["runtime"].update(checkpoint=checkpoint["provenance"], parallel_esd=False)
+                print(f"Checkpoint inspected: {len(checkpoint['tensors'])} stored tensors; no model constructed")
+            else:
+                print(f"Model loaded successfully (adapter: {is_adapter})")
+                print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+                model_devices = {str(param.device) for param in model.parameters()}
+                print(f"Model devices: {', '.join(sorted(model_devices))}")
             
             # Run ESD analysis
             print("\nRunning ESD analysis...")
@@ -834,30 +849,37 @@ def main():
             layer_coverage = []
             
             try:
-                metrics = net_esd_estimator(
-                    model,
-                    EVALS_THRESH=args.evals_thresh,
-                    bins=args.bins,
-                    fix_fingers=fix_fingers_value,
-                    filter_zeros=args.filter_zeros,
-                    filter_type=measurement["filter_type"],
-                    use_svd=args.use_svd,
-                    save_eigs=getattr(args, "save_eigs", True),
-                    parallel=args.parallel_esd,
-                    compute_dtype=measurement["compute_dtype"],
-                    coverage=layer_coverage,
-                )
+                if checkpoint is not None:
+                    device = args.device_map
+                    if device == "auto":
+                        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                    metrics, coverage = analyze_checkpoint(checkpoint, measurement, device=device)
+                else:
+                    metrics = net_esd_estimator(
+                        model,
+                        EVALS_THRESH=args.evals_thresh,
+                        bins=args.bins,
+                        fix_fingers=fix_fingers_value,
+                        filter_zeros=args.filter_zeros,
+                        filter_type=measurement["filter_type"],
+                        use_svd=args.use_svd,
+                        save_eigs=getattr(args, "save_eigs", True),
+                        parallel=args.parallel_esd,
+                        compute_dtype=measurement["compute_dtype"],
+                        coverage=layer_coverage,
+                    )
+                    coverage = coverage_report(layer_coverage, metrics)
+                    coverage["weight_usage"] = weight_usage_report(model, layer_coverage, metrics.get("longname", []))
             except Exception as exc:
                 stage, reason, message = classify_runtime_error("analyze", exc)
                 raise LoaderFailure(stage, reason, message) from exc
 
-            coverage = coverage_report(layer_coverage, metrics)
-            coverage["weight_usage"] = weight_usage_report(model, layer_coverage, metrics.get("longname", []))
             coverage.update(model_id=display_name, measurement_config=measurement)
             # Preserve missingness information even if every candidate is skipped.
             _write_json_atomic(output_dir / "logs" / "coverage" / f"{safe_filename(display_name)}.json", coverage)
             print(f"Coverage: {json.dumps(coverage['counts'], sort_keys=True)}")
-            print(f"Loaded weight usage: {json.dumps(coverage['weight_usage']['counts'], sort_keys=True)}")
+            if "weight_usage" in coverage:
+                print(f"Loaded weight usage: {json.dumps(coverage['weight_usage']['counts'], sort_keys=True)}")
             validation_failure = validate_metrics_output(metrics)
             if validation_failure is not None:
                 stage, reason = validation_failure

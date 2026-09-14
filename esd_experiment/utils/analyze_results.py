@@ -26,6 +26,7 @@ MODULE_COUNTS = ("candidate_modules", "analyzed_modules",
 WEIGHT_COUNTS = ("registered_tensors", "measured_tensors", "skipped_tensors",
                  "not_applicable_tensors", "unresolved_tensors", "shared_tensors",
                  "unmapped_measurements")
+CHECKPOINT_COUNTS = ("stored_tensors", "analyzed_tensors", "skipped_tensors")
 
 
 def parse_args(argv=None):
@@ -116,7 +117,26 @@ def read_model_summary(csv_path, h5_path):
             csv_path=str(csv_path.resolve()), h5_path=str(h5_path.resolve()),
             coverage_status="unknown", weight_usage_status="unknown", **settings,
         )
-        summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS)})
+        summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS, *CHECKPOINT_COUNTS)})
+        if config["analysis_source"] == "checkpoint":
+            summary["measured_modules"] = None
+            if "coverage" not in h5:
+                raise ValueError("Missing checkpoint-tensor coverage")
+            coverage = json.loads(h5["coverage"].asstr()[()])
+            if coverage.get("scope") != "checkpoint_tensors":
+                raise ValueError("Checkpoint mode requires checkpoint-tensor coverage")
+            counts = coverage["counts"]
+            for name in (*CHECKPOINT_COUNTS, "analyzed_measurements", "fitted_measurements"):
+                if type(counts.get(name)) is not int or counts[name] < 0:
+                    raise ValueError(f"Invalid checkpoint coverage count: {name}")
+            if counts["stored_tensors"] != counts["analyzed_tensors"] + counts["skipped_tensors"]:
+                raise ValueError("Checkpoint tensor counts do not add up")
+            if (counts["analyzed_tensors"] != summary["analyzed_measurements"]
+                    or any(counts[name] != summary[name] for name in ("analyzed_measurements", "fitted_measurements"))):
+                raise ValueError("Checkpoint coverage disagrees with canonical records")
+            summary.update({name: counts[name] for name in CHECKPOINT_COUNTS})
+            summary.update(coverage_status="checkpoint_tensors", weight_usage_status="not_applicable")
+            return summary
         if "coverage" in h5:
             coverage = json.loads(h5["coverage"].asstr()[()])
             counts = coverage["counts"]

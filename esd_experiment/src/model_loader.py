@@ -230,7 +230,7 @@ def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None,
     return candidates[0] if candidates else None
 
 
-def _checkpoint_tensor_shapes(repo_id, revision):
+def checkpoint_tensor_index(repo_id, revision):
     """Read safetensors headers, using the same pinned files/cache as loading.
 
     Missing-metadata encoder inspection currently requires safetensors. Downloads
@@ -257,7 +257,7 @@ def _checkpoint_tensor_shapes(repo_id, revision):
         else:
             index = resolve("model.safetensors.index.json")
             if not index:
-                raise ValueError("Missing-architecture inspection requires safetensors weights")
+                raise ValueError("Checkpoint inspection requires safetensors weights (model.safetensors or its shard index)")
             if Path(index).stat().st_size > 8 * 1024 * 1024:
                 raise ValueError("Safetensors index exceeds the 8 MiB inspection limit")
             with open(index) as handle:
@@ -271,22 +271,33 @@ def _checkpoint_tensor_shapes(repo_id, revision):
             ):
                 raise ValueError("Unsupported shard names or more than 256 shards")
             files = {name: resolve(name) for name in sorted(filenames)}
-        shapes, dtypes = {}, set()
+        tensors = {}
         for filename, path in files.items():
             if not path:
                 raise ValueError(f"Missing checkpoint shard: {filename}")
             with safe_open(path, framework="pt", device="cpu") as handle:
                 for name in handle.keys():
-                    if name in shapes or (weight_map is not None and weight_map.get(name) != filename):
+                    if not name or "\x00" in name:
+                        raise ValueError("Checkpoint tensor names must be nonempty and contain no NUL characters")
+                    if name in tensors or (weight_map is not None and weight_map.get(name) != filename):
                         raise ValueError(f"Duplicate or incorrectly indexed tensor: {name}")
                     tensor = handle.get_slice(name)
-                    shapes[name] = tuple(tensor.get_shape())
-                    dtypes.add(tensor.get_dtype())
-        if weight_map is not None and shapes.keys() != weight_map.keys():
+                    tensors[name] = {"shape": tuple(tensor.get_shape()),
+                                     "dtype": tensor.get_dtype(), "file": filename}
+        if weight_map is not None and tensors.keys() != weight_map.keys():
             raise ValueError("Safetensors index and shard tensors do not match")
-        return shapes, {"files": sorted(files), "tensor_count": len(shapes), "dtypes": sorted(dtypes)}
+        return {"files": files, "tensors": tensors}
     except Exception as exc:
         raise LoaderFailure("load", "checkpoint_inspection_failed", str(exc)) from exc
+
+
+def _checkpoint_tensor_shapes(repo_id, revision):
+    index = checkpoint_tensor_index(repo_id, revision)
+    tensors = index["tensors"]
+    return {name: entry["shape"] for name, entry in tensors.items()}, {
+        "files": sorted(index["files"]), "tensor_count": len(tensors),
+        "dtypes": sorted({entry["dtype"] for entry in tensors.values()}),
+    }
 
 
 def _matching_encoder_classes(config, shapes):

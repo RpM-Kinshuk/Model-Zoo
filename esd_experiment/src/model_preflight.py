@@ -209,6 +209,16 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             effective_loader=effective_loader,
         )
 
+    if _text(row.get("analysis_source")) == "checkpoint":
+        if (base_model_relation in {"adapter", "lora", "peft"} or _has_adapter_artifact(row)
+                or _text(row.get("loader_scenario")) == "quantized_transformers_native"
+                or effective_loader in {"adapter_requires_base", "gguf", "gptq", "awq",
+                                        "compressed_tensors", "quantized_alt_format"}):
+            return PreflightDecision(False, "unsupported_checkpoint_representation", "checkpoint_tensors")
+        # Architecture/backend dispatch is irrelevant here. The worker checks
+        # pinned files, config markers and tensor headers before measuring.
+        return PreflightDecision(True, "eligible", "checkpoint_tensors")
+
     if (
         base_model_relation in {"adapter", "lora", "peft"}
         and _has_explicit_repo_file_metadata(row)
