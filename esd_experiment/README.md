@@ -24,11 +24,12 @@ status and coverage. Use a fresh output directory when settings change.
 Model and adapter-base revisions must be full commit SHAs. Remote code is off;
 use `--trust_remote_code` only for reviewed repositories.
 
-For architecture-independent stored-matrix analysis, add
-`--analysis_source checkpoint` in a fresh output directory. It streams ordinary
-2D safetensors through the same core, without constructing a model. Unknown
-layouts remain skipped; results describe checkpoint tensors, not verified model
-layers. See the [scope and limits](../docs/operations/analysis.md#architecture-independent-checkpoint-matrices).
+`--analysis_source auto` is the default: strict model loading first, then stored
+safetensors matrices only for narrowly identified architecture-support failures.
+Use `model` to disable fallback or `checkpoint` for direct matrix analysis.
+Broken weights, OOM and network/backend errors are not fallback triggers.
+The summary records the actual source and fallback reason; tensor-only results
+are not verified model layers. See the [rules and limits](../docs/operations/analysis.md#architecture-independent-checkpoint-matrices).
 
 Refresh `summary.csv`, the per-model index of metrics, settings, coverage and
 artifact paths, without loading spectra:

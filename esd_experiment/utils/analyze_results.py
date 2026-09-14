@@ -111,6 +111,9 @@ def read_model_summary(csv_path, h5_path):
             base_model_relation=config.get("base_model_relation", ""),
             model_class=runtime.get("model_class"),
             model_config_commit_hash=runtime.get("model_config_commit_hash"),
+            analysis_source=runtime["analysis_source"],
+            effective_filter_type=runtime["filter_type"],
+            fallback_reason=(runtime.get("fallback") or {}).get("reason"),
             base_repo_loaded=loading_info.get("base_repo_loaded"),
             base_revision_loaded=loading_info.get("base_revision_loaded"),
             base_resolved_commit_hash=loading_info.get("base_resolved_commit_hash"),
@@ -118,7 +121,7 @@ def read_model_summary(csv_path, h5_path):
             coverage_status="unknown", weight_usage_status="unknown", **settings,
         )
         summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS, *CHECKPOINT_COUNTS)})
-        if config["analysis_source"] == "checkpoint":
+        if runtime["analysis_source"] == "checkpoint":
             summary["measured_modules"] = None
             if "coverage" not in h5:
                 raise ValueError("Missing checkpoint-tensor coverage")
@@ -242,7 +245,8 @@ def main(argv=None):
         csv_path, h5_path = stats_dir / f"{name}.csv", metrics_dir / f"{name}.h5"
         try:
             summary = read_model_summary(csv_path, h5_path)
-            measurement_settings.add(json.dumps({key: summary[key] for key in MEASUREMENT_FIELDS}, sort_keys=True))
+            comparison_fields = (*MEASUREMENT_FIELDS, "analysis_source", "effective_filter_type")
+            measurement_settings.add(json.dumps({key: summary[key] for key in comparison_fields}, sort_keys=True))
             summary.update(artifact_status="valid", artifact_error="")
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             warnings.warn(f"{name}: {error}")

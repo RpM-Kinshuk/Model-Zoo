@@ -209,7 +209,7 @@ def test_one_output_encoder_heads_require_metadata_when_ambiguous(tmp_path, fami
 
     with pytest.raises(loader.LoaderFailure) as exc:
         loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
-    assert exc.value.reason == "ambiguous_checkpoint_architecture"
+    assert exc.value.reason == "checkpoint_layout_ambiguous"
 
 
 @pytest.mark.parametrize("family", ["bert"] + ENCODER_FAMILIES)
@@ -334,7 +334,7 @@ def test_identical_classification_and_multiple_choice_layouts_are_ambiguous(tmp_
     with pytest.raises(loader.LoaderFailure, match="BertForMultipleChoice") as exc:
         loader.load_model(str(tmp_path), loader_scenario="standard_causal", torch_dtype="auto")
 
-    assert exc.value.reason == "ambiguous_checkpoint_architecture"
+    assert exc.value.reason == "checkpoint_layout_ambiguous"
 
 
 def test_declared_wrong_bert_architecture_is_not_silently_overridden(tmp_path, monkeypatch):

@@ -31,6 +31,7 @@ def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, 
     config = measurement_config(SimpleNamespace(), model_id=model_id)
     config.update(settings)
     config["runtime"] = {
+        "analysis_source": "model", "filter_type": config["filter_type"],
         "model_class": "example.EncoderDecoder",
         "model_config_commit_hash": "a" * 40,
         "loading_info": loading_info,
@@ -70,6 +71,27 @@ def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, 
             for name, count in counts.items():
                 h5.attrs[f"coverage_{name}"] = count
     return csv_path, h5_path
+
+
+def test_auto_results_from_different_sources_are_not_pooled(tmp_path):
+    write_pair(tmp_path, "org--loaded")
+    _, h5_path = write_pair(tmp_path, "org--tensors")
+    with h5py.File(h5_path, "a") as h5:
+        config = json.loads(h5.attrs["measurement_config_json"])
+        config["runtime"].update(analysis_source="checkpoint", filter_type=False, model_class=None,
+                                 fallback={"stage": "load", "reason": "checkpoint_config_unsupported"})
+        h5.attrs["measurement_config_json"] = json.dumps(config)
+        h5["layers/module_name"][:] = ["", "", ""]
+        h5["coverage"][()] = json.dumps({"scope": "checkpoint_tensors", "counts": {
+            "stored_tensors": 3, "analyzed_tensors": 3, "skipped_tensors": 0,
+            "analyzed_measurements": 3, "fitted_measurements": 2,
+        }})
+    with pytest.warns(UserWarning, match="Mixed measurement settings"):
+        assert analyze_results.main(["--results_dir", str(tmp_path)]) == 0
+    summary = pd.read_csv(tmp_path / "summary.csv")
+    assert summary["analysis_policy"].unique().tolist() == ["auto"]
+    assert set(summary["analysis_source"]) == {"model", "checkpoint"}
+
 
 
 def test_reader_uses_all_canonical_records_without_reading_spectra(tmp_path, monkeypatch):
@@ -164,6 +186,7 @@ def test_weight_usage_survives_real_spectra_writer_and_summary_round_trip(tmp_pa
     coverage["weight_usage"] = weight_usage_report(model, modules, metrics["longname"])
     csv_path, h5_path = tmp_path / "model.csv", tmp_path / "model.h5"
     config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
+    config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
     worker.save_results(metrics, csv_path, "org/model", False, h5_output_path=h5_path,
                         save_eigs=True, measurement_config=config, coverage=coverage)
@@ -201,6 +224,7 @@ def test_attention_records_and_partial_module_counts_survive_round_trip(tmp_path
     coverage["weight_usage"] = usage
     paths = tmp_path / "model.csv", tmp_path / "model.h5"
     config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
+    config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
     worker.save_results(metrics, paths[0], "org/model", False, h5_output_path=paths[1],
                         save_eigs=True, measurement_config=config, coverage=coverage)

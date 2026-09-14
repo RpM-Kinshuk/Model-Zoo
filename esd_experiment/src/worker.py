@@ -33,7 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_loader import LoaderFailure, load_model, parse_model_string, safe_filename
 from measurement_config import (
-    FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
+    FORMAT_VERSION, NUMERICS_VERSION, CHECKPOINT_FALLBACK_REASONS, artifact_compatibility,
     measurement_config as build_measurement_config,
     validate_model_pin,
 )
@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument("--compute_dtype", choices=["float32", "float64"], default="float32", help="SVD/Gram precision; float64 for reference checks")
     
     # Model loading
-    parser.add_argument("--analysis_source", choices=["model", "checkpoint"], default="model", help="model: strict architecture loading (default); checkpoint: stream stored safetensors matrices without constructing a model")
+    parser.add_argument("--analysis_source", choices=["auto", "model", "checkpoint"], default="auto", help="auto (default): strict model loading, then checkpoint matrices only for supported architecture failures; model: no tensor fallback; checkpoint: matrices only")
     parser.add_argument("--device_map", type=str, default="auto", help="Device map for loading (auto uses GPU when CUDA_VISIBLE_DEVICES is set)")
     parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute (off by default)")
     parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
@@ -81,8 +81,8 @@ def parse_args():
         validate_model_pin(args.model_id, args.revision, args.source_model, args.base_model_relation, args.loader_scenario)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.analysis_source == "checkpoint" and not re.fullmatch(r"auto|cpu|cuda(?::\d+)?", args.device_map):
-        parser.error("Checkpoint mode needs --device_map auto, cpu or cuda:<assigned device index>")
+    if args.analysis_source != "model" and not re.fullmatch(r"auto|cpu|cuda(?::\d+)?", args.device_map):
+        parser.error("Auto/checkpoint analysis needs --device_map auto, cpu or cuda:<assigned device index>; use --analysis_source model for other maps")
     return args
 
 
@@ -123,6 +123,8 @@ def runtime_provenance(model, args):
         except importlib.metadata.PackageNotFoundError:
             library_versions[package] = None
     return {
+        "analysis_source": "model" if model is not None else "checkpoint",
+        "filter_type": bool(getattr(args, "filter_type", True)) if model is not None else False,
         "model_class": f"{type(model).__module__}.{type(model).__name__}" if model is not None else None,
         "loading_info": getattr(model, "_model_zoo_loading_info", None),
         "installed_loading_library_versions": library_versions,
@@ -394,7 +396,7 @@ def save_results(
     eigs = records.get("eigs") if save_eigs else None
     if save_eigs and eigs is None:
         raise ValueError("save_eigs requires eigenvalues aligned with layer records")
-    if (measurement_config or {}).get("analysis_source") == "checkpoint":
+    if (measurement_config or {}).get("runtime", {}).get("analysis_source") == "checkpoint":
         mat, module_names, num_layers = np.empty((0, 0)), [], 0  # No inferred depth from checkpoint keys.
     else:
         mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
@@ -796,6 +798,7 @@ def main():
     
     for attempt in range(1, args.max_retries + 2):
         checkpoint = None
+        fallback = None
         current_stage = "load"
         heartbeat.update(stage=current_stage)
         try:
@@ -807,24 +810,35 @@ def main():
             source_model = args.source_model if args.source_model else None
             
             try:
-                if measurement["analysis_source"] == "checkpoint":
+                if measurement["analysis_policy"] != "checkpoint":
+                    try:
+                        model, is_adapter = load_model(
+                            repo_id=repo_id,
+                            base_model_relation=base_relation,
+                            source_model=source_model,
+                            device_map=args.device_map,
+                            torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
+                            revision=revision,
+                            trust_remote_code=measurement["trust_remote_code"],
+                            loader_scenario=args.loader_scenario if args.loader_scenario else None,
+                        )
+                    except LoaderFailure as exc:
+                        if (measurement["analysis_policy"] != "auto" or exc.stage != "load"
+                                or exc.reason not in CHECKPOINT_FALLBACK_REASONS
+                                or (base_relation or "").lower() in {"adapter", "lora", "peft"}
+                                or args.loader_scenario == "adapter_requires_base"):
+                            raise
+                        fallback = {"stage": exc.stage, "reason": exc.reason, "message": str(exc)}
+                        print(f"Model architecture unavailable ({exc.reason}); trying stored checkpoint matrices once")
+                if measurement["analysis_policy"] == "checkpoint" or fallback is not None:
                     from checkpoint_tensors import inspect_checkpoint, analyze_checkpoint
+                    # Stay in the same load stage and cache. Fallback does not
+                    # reset its timeout or start a new worker/download lifecycle.
                     checkpoint = inspect_checkpoint(
                         repo_id, revision, base_model_relation=base_relation or "",
                         loader_scenario=args.loader_scenario or "",
                     )
                     is_adapter = False
-                else:
-                    model, is_adapter = load_model(
-                        repo_id=repo_id,
-                        base_model_relation=base_relation,
-                        source_model=source_model,
-                        device_map=args.device_map,
-                        torch_dtype="auto" if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"]),
-                        revision=revision,
-                        trust_remote_code=measurement["trust_remote_code"],
-                        loader_scenario=args.loader_scenario if args.loader_scenario else None,
-                    )
             except LoaderFailure as exc:
                 raise exc
             except Exception as exc:
@@ -834,6 +848,7 @@ def main():
             current_stage = "analyze"
             heartbeat.update(stage=current_stage)
             measurement["runtime"] = runtime_provenance(model, args)
+            measurement["runtime"]["fallback"] = fallback
             if checkpoint is not None:
                 measurement["runtime"].update(checkpoint=checkpoint["provenance"], parallel_esd=False)
                 print(f"Checkpoint inspected: {len(checkpoint['tensors'])} stored tensors; no model constructed")
@@ -942,9 +957,11 @@ def main():
             
         except LoaderFailure as e:
             error_msg = str(e)
+            if fallback is not None:
+                error_msg += f"; automatic fallback followed {fallback['reason']}: {fallback['message']}"
             print(f"\nAttempt {attempt} failed: {error_msg}")
 
-            retryable = classify_retryable_failure(e.stage, e.reason)
+            retryable = fallback is None and classify_retryable_failure(e.stage, e.reason)
             if retryable and attempt <= args.max_retries:
                 print("Retrying...")
                 warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
@@ -969,7 +986,9 @@ def main():
             print(f"\nAttempt {attempt} failed: {error_msg}")
 
             stage, reason, message = classify_runtime_error(current_stage, e)
-            retryable = classify_retryable_failure(stage, reason)
+            if fallback is not None:
+                message += f"; automatic fallback followed {fallback['reason']}: {fallback['message']}"
+            retryable = fallback is None and classify_retryable_failure(stage, reason)
             if retryable and attempt <= args.max_retries:
                 print("Retrying...")
                 warnings.warn(f"Attempt {attempt} failed for {display_name}: {error_msg}")
@@ -992,6 +1011,7 @@ def main():
         
         finally:
             # Cleanup
+            model = None  # Release the caller's reference before clearing CUDA cache/retrying.
             cleanup_model(model)
     
     cleanup_temp_path(temp_output_file)

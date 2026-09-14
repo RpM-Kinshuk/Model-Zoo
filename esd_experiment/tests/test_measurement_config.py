@@ -18,6 +18,8 @@ from measurement_config import (
 
 
 def write_pair(tmp_path, config):
+    config = dict(config)
+    config.setdefault("runtime", {"analysis_source": "model", "filter_type": config["filter_type"]})
     csv_path = tmp_path / "stats" / "org--model.csv"
     h5_path = tmp_path / "metrics" / "org--model.h5"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +43,7 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
 
 
-@pytest.mark.parametrize("stored_version", [None, "1", "2", "3", "4", "5", "6", "older"])
+@pytest.mark.parametrize("stored_version", [None, "1", "2", "3", "4", "5", "6", "7", "older"])
 def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
     assert expected["loader_version"] == LOADER_VERSION
@@ -84,7 +86,7 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     ("evals_thresh", 0.001), ("filter_zeros", False), ("use_svd", False),
     ("fix_fingers", "DKS"), ("save_eigs", False), ("requested_revision", "other"),
     ("source_model", "org/other"), ("trust_remote_code", True),
-    ("filter_type", False), ("analysis_source", "checkpoint"),
+    ("filter_type", False), ("analysis_policy", "model"),
 ])
 def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
@@ -97,13 +99,31 @@ def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
 @pytest.mark.parametrize("source", [None, "unknown"])
 def test_analysis_source_is_required_even_without_requested_settings(tmp_path, source):
     config = measurement_config(SimpleNamespace())
-    if source is None:
-        del config["analysis_source"]
-    else:
-        config["analysis_source"] = source
+    config["runtime"] = {"analysis_source": source, "filter_type": config["filter_type"]}
     csv_path, h5_path = write_pair(tmp_path, config)
     compatible, reason = artifact_compatibility(csv_path, h5_path)
     assert not compatible and "analysis_source" in reason
+
+
+@pytest.mark.parametrize("defect", ["policy", "reason", "stage", "source", "filter"])
+def test_auto_artifacts_require_a_consistent_record_of_fallback(tmp_path, defect):
+    config = measurement_config(SimpleNamespace())
+    config["runtime"] = {
+        "analysis_source": "checkpoint", "filter_type": False,
+        "fallback": {"stage": "load", "reason": "checkpoint_config_unsupported", "message": "unknown config"},
+    }
+    csv_path, h5_path = write_pair(tmp_path, config)
+    assert artifact_compatibility(csv_path, h5_path)[0]
+    if defect == "policy":
+        config["analysis_policy"] = "model"
+    elif defect in {"reason", "stage"}:
+        config["runtime"]["fallback"][defect] = "unrecognized"
+    elif defect == "source":
+        config["runtime"]["analysis_source"] = "model"
+    else:
+        config["runtime"]["filter_type"] = True
+    write_pair(tmp_path, config)
+    assert not artifact_compatibility(csv_path, h5_path)[0]
 
 
 @pytest.mark.parametrize("mutation", ["legacy", "corrupt", "unaligned", "missing_config", "missing_eigs"])

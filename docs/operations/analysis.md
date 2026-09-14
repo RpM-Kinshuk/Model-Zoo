@@ -55,7 +55,7 @@ and [revision metadata API](https://huggingface.co/docs/huggingface_hub/package_
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `--analysis_source` | `model` | Strict model loading; `checkpoint` measures stored safetensors matrices without model construction. |
+| `--analysis_source` | `auto` | Model loading first, with narrow tensor fallback. `model` disables fallback; `checkpoint` directly measures stored matrices. |
 | `--save_eigs` | on | Store full computed spectra in HDF5, including zeros and filtered values. |
 | `--load_dtype` | `auto` | Checkpoint/framework-selected precision; not a guarantee of mixed-dtype preservation. |
 | `--compute_dtype` | `float32` | SVD/Gram precision; use `float64` for reference checks. |
@@ -104,15 +104,15 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **7**, loader **7**, HDF5 format **2.0**.
+Current output versions are numerics **7**, loader **8**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
 Numerics 7 adds declared MultiheadAttention projection matrices, measured whole,
-and records their weight attributes. Loader 7 adds explicit checkpoint-tensor
-analysis, retaining encoder selection and pinned adapter probes. Older outputs
+and records their weight attributes. Loader 8 adds narrowly triggered automatic
+fallback and separates requested policy from actual analysis source. Older outputs
 need a fresh run. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
@@ -249,9 +249,32 @@ for alias enumeration with `remove_duplicate=False`.
 
 ### Architecture-independent checkpoint matrices
 
-Add `--analysis_source checkpoint` to a runner or worker command, using a fresh
-output directory. Model mode remains the default. This is an explicit alternative,
-not automatic recovery from a failed or partially loaded model.
+The default `--analysis_source auto` first attempts strict model loading. It can
+fall back once to checkpoint matrices for three identified cases:
+
+- A valid config declares a `model_type` that the installed library does not support.
+- Resolving the config requires repository code that is disabled.
+- Multiple supported encoder architectures fully match the checkpoint keys/shapes.
+
+The last case differs from **no matching layout**, which may mean missing or
+incorrect weights and remains a failure. Conflicting architecture declarations,
+missing dependencies, integrity failures, quantization/adapter failures, OOM,
+network errors, timeouts and numerical/save errors do not trigger fallback.
+No skipped layers are filled in from raw tensors after a successful model load.
+Generic exception messages are never enough to trigger this route.
+
+Use `--analysis_source model` for strict model-only runs, or
+`--analysis_source checkpoint` to measure stored matrices directly. Explicit
+checkpoint analysis may describe tensors from a repository whose model cannot
+be validated; it still does not establish model completeness. Neither route
+uses a partially loaded model. Use a fresh output directory when policy changes.
+
+`analysis_policy` records the request (`auto`, `model` or `checkpoint`). Runtime
+provenance records actual `analysis_source`, effective `filter_type`, and the
+original fallback stage/reason/message. The summary exposes `analysis_policy`,
+`analysis_source`, `effective_filter_type` and `fallback_reason`; mixed actual
+sources are not pooled even when both requests were `auto`. Resume validates this
+record and does not try loading again to promote an existing tensor-only result.
 
 Checkpoint mode reads pinned `model.safetensors` or `model.safetensors.index.json`
 and validates all shard keys/shapes. It needs no recognized architecture, model
@@ -269,12 +292,19 @@ effective model weights or universal model support.
 
 The same numerical core, CSV/HDF5 writer and dispatcher are used. Input tensors
 are read one at a time on one device per worker (`auto` selects the first assigned
-GPU, otherwise CPU). Use one GPU per job. Within-model parallelism is disabled;
+GPU, otherwise CPU). Direct checkpoint mode requires one GPU per job. Automatic
+fallback uses the first assigned device even if the model requested several;
+it does not change reservations mid-job. Within-model parallelism is disabled;
 worker concurrency, load/analyze timeouts, signals, resume and ephemeral cache
-cleanup are unchanged. Disk still holds the downloaded checkpoint until worker
+cleanup are unchanged. Automatic fallback stays within the same load-stage
+timeout and cache; a failed fallback is not retried, even with `--max_retries`.
+Auto/checkpoint workers accept `--device_map auto`, `cpu` or `cuda:<index>`; use
+model-only policy for other model device maps.
+Disk still holds the downloaded checkpoint until worker
 cleanup; host memory retains accumulated spectra, not a constructed full model.
-`load_dtype=auto` preserves each stored tensor's dtype. `filter_type` is recorded
-as false: no module-class or legacy Linear aspect-ratio filter applies here.
+`load_dtype=auto` preserves each stored tensor's dtype. Actual `filter_type` is
+false: no module-class or legacy Linear aspect-ratio filter applies here. An
+automatic run retains its requested model filter separately in the config.
 
 Exact checkpoint keys become `/layers/longname` and `weight_attribute`;
 `module_name` is empty, and the derived depth view is unavailable. `/coverage`
@@ -288,8 +318,11 @@ resume and summary comparison keep the two modes distinct.
 
 Offline controls cover streaming lifetime, mixed precision, exact names, shards,
 shared-key omissions, representation rejection and artifact/resume behavior.
+Automatic-routing controls include unsupported/custom configs, ambiguous full
+layouts, broken/missing weights, partial model coverage, failure/retry boundaries
+and consistent source reporting. These tests use real tiny local checkpoints.
 A sharded BERT control agrees exactly with model-mode spectra for the same
-matrices. Public CPU smoke checks used `hf-internal-testing/tiny-random-bert`
+matrices. Earlier explicit-mode public CPU smoke checks used `hf-internal-testing/tiny-random-bert`
 at `f171d7baecaf37b5da5a3616d8833b9969753535` (39 matrices, 100 stored tensors)
 and `hf-internal-testing/tiny-random-gpt2` at
 `71034c5d8bde858ff824298bdedc65515b97d2b9` (22 matrices, 64 stored tensors).
@@ -466,13 +499,16 @@ effort. Each slice should have a concrete check and a small, understandable diff
   conversions, non-tensor packing and fallback eligibility remain to be checked.
   The explicit dense `.weight` fallback covers a limited subset of loaded-layer
   gaps. Declared MultiheadAttention projection attributes are now covered;
-  arbitrary extra parameters and recovery of failed loads remain separate work.
-- [x] **Explicit direct matrix analysis.** `--analysis_source checkpoint` streams
+  arbitrary extra loaded parameters remain open. Failed loads follow the narrow
+  automatic-fallback rules above; broader recovery needs pilot evidence.
+- [x] **Direct matrices and narrow automatic fallback.** `--analysis_source auto`
+  is the default; `model` and `checkpoint` remain explicit overrides. Tensor analysis streams
   ordinary floating safetensors matrices through the existing core/writer, with
   exact keys, complete stored-key accounting and separate summary/resume scope.
   Eligibility and limits are defined above. This does not salvage partial model
   loads, interpret unknown layouts or claim architectural recovery. Keep the
-  strict gate for model mode; expand formats/layouts only for demonstrated needs.
+  strict gate for model mode, preserve failure reasons and do not promote tensor
+  results on resume. Expand formats/layouts or triggers only for demonstrated needs.
 - [ ] **Verify these paths with bounded controls.** Reuse current regression
   fixtures; add cases for each new fallback and for dropped/new weights, heads,
   shared aliases, unsupported layouts and partial coverage. Keep declared and

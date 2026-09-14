@@ -234,14 +234,14 @@ def _row_backend_status(
     return ""
 
 
-def apply_preflight(model_df: pd.DataFrame, analysis_source="model") -> Tuple[pd.DataFrame, pd.DataFrame]:
+def apply_preflight(model_df: pd.DataFrame, analysis_source="auto") -> Tuple[pd.DataFrame, pd.DataFrame]:
     if model_df.empty:
         empty = model_df.iloc[0:0].copy()
         for column in ("preflight_eligible", "preflight_reason", "preflight_effective_loader"):
             empty[column] = []
         return empty, empty.copy()
 
-    available_backends = _available_backends() if analysis_source == "model" else set()
+    available_backends = _available_backends() if analysis_source != "checkpoint" else set()
     runnable_rows = []
     blocked_rows = []
 
@@ -329,7 +329,7 @@ def parse_args():
     )
     
     # ESD configuration
-    parser.add_argument("--analysis_source", choices=["model", "checkpoint"], default="model", help="model: strict architecture loading (default); checkpoint: stream stored safetensors matrices without constructing a model")
+    parser.add_argument("--analysis_source", choices=["auto", "model", "checkpoint"], default="auto", help="auto (default): strict model loading, then checkpoint matrices only for supported architecture failures; model: no tensor fallback; checkpoint: matrices only")
     parser.add_argument("--fix_fingers", type=str, default="xmin_mid", choices=["xmin_mid", "xmin_peak", "DKS"], help="Method to select xmin for power law fitting (default: xmin_mid)")
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
@@ -580,7 +580,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
             "--fix_fingers", args.fix_fingers,
             "--evals_thresh", str(args.evals_thresh),
             "--bins", str(args.bins),
-            "--analysis_source", getattr(args, "analysis_source", "model"),
+            "--analysis_source", getattr(args, "analysis_source", "auto"),
         ]
 
         cmd_parts.append("--filter_zeros" if args.filter_zeros else "--no-filter_zeros")
@@ -790,6 +790,7 @@ def main():
     logger.info(f"Stale worker action: {args.stale_process_action}; heartbeat timeout: {args.heartbeat_timeout_seconds}s; stage timeouts: {args.stage_timeout_seconds}")
     logger.info(f"Worker cache root: {args.worker_cache_root or 'disabled'}")
     logger.info(f"Fix fingers: {args.fix_fingers}")
+    logger.info(f"Analysis policy: {args.analysis_source}")
     logger.info("=" * 80)
     
     # Load model list

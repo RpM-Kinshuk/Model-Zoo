@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 import weakref
 
 import numpy as np
@@ -166,7 +167,8 @@ def test_checkpoint_worker_writer_summary_and_resume(tmp_path, monkeypatch):
         assert h5["alpha"].attrs["view_status"] == "unavailable"
         assert h5["alpha"].shape == (0, 0)
         config = json.loads(h5.attrs["measurement_config_json"])
-        assert config["analysis_source"] == "checkpoint"
+        assert config["analysis_policy"] == "checkpoint"
+        assert config["runtime"]["analysis_source"] == "checkpoint"
         assert config["filter_type"] is False
         assert config["runtime"]["model_class"] is None
         assert config["runtime"]["parallel_esd"] is False
@@ -305,3 +307,240 @@ def test_checkpoint_device_constraints_are_checked_before_launch(tmp_path, monke
                                     "--device_map", "balanced"])
     with pytest.raises(SystemExit):
         worker.parse_args()
+
+
+@pytest.fixture
+def auto_worker(tmp_path, monkeypatch):
+    """Exercise the real loader/core/writer; replace only remote file resolution."""
+    import net_esd
+    from net_esd.utils import weight_usage_report
+    loader = sys.modules[checkpoint.checkpoint_tensor_index.__module__]
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    output = tmp_path / "run"
+    worker = load_worker_module()
+    monkeypatch.setattr(worker, "torch", torch)
+    monkeypatch.setattr(worker, "LoaderFailure", loader.LoaderFailure)
+    monkeypatch.setattr(worker, "net_esd_estimator", net_esd.net_esd_estimator)
+    monkeypatch.setattr(worker, "weight_usage_report", weight_usage_report)
+    monkeypatch.setattr(loader, "hf_repo_has_prefix", lambda *args: False)
+
+    def local_load(repo_id, revision, **kwargs):
+        assert repo_id == "org/control" and revision == "a" * 40
+        return loader.load_model(str(weights), revision=revision, **kwargs)
+
+    inspect = checkpoint.inspect_checkpoint
+
+    def local_inspect(repo_id, revision, **kwargs):
+        assert repo_id == "org/control" and revision == "a" * 40
+        return inspect(str(weights), revision, **kwargs)
+
+    load = Mock(side_effect=local_load)
+    inspection = Mock(side_effect=local_inspect)
+    monkeypatch.setattr(worker, "load_model", load)
+    monkeypatch.setattr(checkpoint, "inspect_checkpoint", inspection)
+    arguments = ["worker.py", "--model_id", "org/control", "--revision", "a" * 40,
+                 "--output_dir", str(output), "--device_map", "cpu", "--compute_dtype", "float64"]
+    monkeypatch.setattr(sys, "argv", arguments)
+    return SimpleNamespace(worker=worker, weights=weights, output=output, arguments=arguments,
+                           load=load, inspection=inspection)
+
+
+def unknown_config(path, *, custom_code=False):
+    saved_tensors(path)
+    config = {"model_type": "not_an_installed_model", "architectures": ["UnknownModel"]}
+    if custom_code:
+        config["auto_map"] = {"AutoConfig": "custom.Config", "AutoModel": "custom.Model"}
+        (path / "custom.py").write_text("raise RuntimeError('Repository code must not execute')\n")
+    (path / "config.json").write_text(json.dumps(config))
+
+
+@pytest.mark.parametrize("kind,reason", [
+    ("unsupported", "checkpoint_config_unsupported"),
+    ("custom_code", "checkpoint_config_requires_code"),
+    ("ambiguous", "checkpoint_layout_ambiguous"),
+])
+def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_worker, monkeypatch, kind, reason):
+    from esd_experiment.utils.analyze_results import read_model_summary
+    case = auto_worker
+    if kind == "ambiguous":
+        import transformers
+        from test_loader_checkpoint_integrity import tiny_bert
+        config = tiny_bert().config
+        config.num_labels = 1
+        model = transformers.BertForSequenceClassification(config)
+        model.save_pretrained(case.weights)
+        config.architectures = None
+        config.save_pretrained(case.weights)
+    else:
+        unknown_config(case.weights, custom_code=kind == "custom_code")
+    assert case.worker.parse_args().analysis_source == "auto"
+    assert case.worker.main() == 0
+    csv_path, h5_path = case.output / "stats/org--control.csv", case.output / "metrics/org--control.h5"
+    with case.worker.h5py.File(h5_path) as h5:
+        config = json.loads(h5.attrs["measurement_config_json"])
+        assert config["analysis_policy"] == "auto" and config["filter_type"] is True
+        assert config["runtime"]["analysis_source"] == "checkpoint"
+        assert config["runtime"]["filter_type"] is False
+        assert config["runtime"]["model_class"] is None
+        assert config["runtime"]["fallback"]["reason"] == reason
+        assert h5["alpha"].attrs["view_status"] == "unavailable"
+    summary = read_model_summary(csv_path, h5_path)
+    assert summary["analysis_policy"] == "auto" and summary["analysis_source"] == "checkpoint"
+    assert summary["effective_filter_type"] is False and summary["fallback_reason"] == reason
+    assert case.load.call_count == case.inspection.call_count == 1
+    # A later environment capable of model loading must not promote old tensor results.
+    case.load.side_effect = lambda **kwargs: pytest.fail("Resume must not try a different source")
+    assert case.worker.main() == 0
+    before = [path.read_bytes() for path in (csv_path, h5_path)]
+    monkeypatch.setattr(sys, "argv", case.arguments + ["--analysis_source", "model"])
+    assert case.worker.main() == 1
+    assert [path.read_bytes() for path in (csv_path, h5_path)] == before
+    assert case.load.call_count == case.inspection.call_count == 1
+
+
+def test_explicit_model_mode_does_not_fall_back(auto_worker, monkeypatch):
+    case = auto_worker
+    unknown_config(case.weights)
+    monkeypatch.setattr(sys, "argv", case.arguments + ["--analysis_source", "model"])
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+
+
+def test_auto_uses_a_supported_model_without_inspecting_raw_tensors(auto_worker):
+    from test_loader_checkpoint_integrity import tiny_bert
+    case = auto_worker
+    tiny_bert().save_pretrained(case.weights)
+    assert case.worker.main() == 0
+    case.inspection.assert_not_called()
+    with case.worker.h5py.File(case.output / "metrics/org--control.h5") as h5:
+        config = json.loads(h5.attrs["measurement_config_json"])
+        assert config["analysis_policy"] == "auto"
+        assert config["runtime"]["analysis_source"] == "model"
+        assert config["runtime"]["fallback"] is None
+        assert config["runtime"]["loading_info"]["validated"]
+
+
+@pytest.mark.parametrize("declared", [True, False])
+@pytest.mark.parametrize("defect", ["missing", "unexpected", "shape"])
+def test_auto_never_salvages_broken_bert_weights(auto_worker, declared, defect):
+    from test_loader_checkpoint_integrity import tiny_bert
+    case = auto_worker
+    model = tiny_bert()
+    state = model.state_dict()
+    key = "encoder.layer.0.attention.self.query.weight"
+    if defect == "missing":
+        del state[key]
+    elif defect == "unexpected":
+        state["unexplained.weight"] = torch.ones(2, 2)
+    else:
+        state[key] = torch.ones(3, 3)
+    model.save_pretrained(case.weights, state_dict=state)
+    if not declared:
+        model.config.architectures = None
+        model.config.save_pretrained(case.weights)
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+    assert not list(case.output.glob("metrics/*.h5"))
+
+
+@pytest.mark.parametrize("failure", [
+    ("load", "checkpoint_architecture_unresolved"),
+    ("load", "ambiguous_checkpoint_architecture"),  # Conflicting declarations, not verified layouts.
+    ("load", "checkpoint_architecture_unavailable"),
+    ("load", "checkpoint_loading_info_missing"),
+    ("load", "checkpoint_weight_mismatch"),
+    ("load", "quantized_dependency_missing"),
+    ("load", "adapter_checkpoint_mismatch"),
+    ("load", "cuda_oom"),
+    ("analyze", "checkpoint_config_unsupported"),  # The allowed reason at the wrong stage.
+])
+def test_auto_only_handles_typed_architecture_failures_at_load(auto_worker, failure):
+    case = auto_worker
+    case.load.side_effect = checkpoint.LoaderFailure(*failure, "Control failure")
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [TimeoutError("config request timed out"), ConnectionError("unreachable"),
+                                   RuntimeError("CUDA out of memory"), ValueError("unsupported model type")])
+def test_auto_does_not_guess_from_generic_error_messages(auto_worker, error):
+    case = auto_worker
+    case.load.side_effect = error
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+
+
+@pytest.mark.parametrize("keep_standard", [True, False])
+def test_auto_does_not_fill_in_partial_or_empty_module_analysis(auto_worker, keep_standard):
+    case = auto_worker
+    model = torch.nn.Module()
+    model.unknown = torch.nn.Module()
+    model.unknown.weight = torch.nn.Parameter(torch.eye(4))
+    if keep_standard:
+        model.standard = torch.nn.Linear(4, 4)
+    case.load.side_effect = None
+    case.load.return_value = (model, False)
+    assert case.worker.main() == (0 if keep_standard else 1)
+    case.inspection.assert_not_called()
+    coverage = json.loads((case.output / "logs/coverage/org--control.json").read_text())
+    assert coverage["counts"]["skipped_modules"] == 1
+
+
+@pytest.mark.parametrize("defect", ["file", "quantization", "analysis"])
+def test_failed_fallback_is_attempted_once_and_keeps_original_reason(auto_worker, monkeypatch, defect):
+    case = auto_worker
+    unknown_config(case.weights)
+    if defect == "file":
+        (case.weights / "model.safetensors").write_bytes(b"truncated")
+        expected_reason = "checkpoint_inspection_failed"
+    elif defect == "quantization":
+        config_path = case.weights / "config.json"
+        config = json.loads(config_path.read_text())
+        config["quantization_config"] = {"quant_method": "unknown"}
+        config_path.write_text(json.dumps(config))
+        expected_reason = "unsupported_checkpoint_representation"
+    else:
+        def failed_analysis(*args, **kwargs):
+            raise RuntimeError("CUDA out of memory during ESD")
+        monkeypatch.setattr(checkpoint, "analyze_checkpoint", failed_analysis)
+        expected_reason = "cuda_oom"
+    monkeypatch.setattr(sys, "argv", case.arguments + ["--max_retries", "3"])
+    assert case.worker.main() == 1
+    assert case.load.call_count == case.inspection.call_count == 1
+    terminal = json.loads((case.output / "logs/terminal_status/org--control.json").read_text())
+    assert terminal["reason"] == expected_reason
+    assert "checkpoint_config_unsupported" in terminal["message"]
+    assert not list(case.output.glob("metrics/*.h5"))
+
+
+@pytest.mark.parametrize("contents", ["{broken-json", '{"model_type": ["bert"]}',
+                                     '{"model_type": "bert", "hidden_size": "not-a-number"}'])
+def test_bad_config_is_not_treated_as_missing_architecture_support(auto_worker, contents):
+    case = auto_worker
+    saved_tensors(case.weights)
+    (case.weights / "config.json").write_text(contents)
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+
+
+def test_new_config_probe_passes_the_requested_pin(monkeypatch):
+    loader = sys.modules[checkpoint.checkpoint_tensor_index.__module__]
+    calls = []
+
+    def no_config(*args, **kwargs):
+        raise ValueError("unrecognized config")
+
+    def config_dict(repo_id, **kwargs):
+        calls.append((repo_id, kwargs["revision"]))
+        return {"model_type": "not_an_installed_model"}, {}
+
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", no_config)
+    monkeypatch.setattr(loader.PretrainedConfig, "get_config_dict", config_dict)
+    with pytest.raises(loader.LoaderFailure) as exc:
+        loader._checkpoint_model_cls("org/control", "a" * 40)
+    assert exc.value.reason == "checkpoint_config_unsupported"
+    assert calls == [("org/control", "a" * 40)]
+    calls.clear()
+    assert loader._checkpoint_model_cls("org/control", "a" * 40, trust_remote_code=True) == (None, None)
+    assert not calls  # Explicitly trusted custom config can reach the normal code-loading path.

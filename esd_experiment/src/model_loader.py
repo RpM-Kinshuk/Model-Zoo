@@ -340,12 +340,30 @@ def _matching_encoder_classes(config, shapes):
     return matches
 
 
-def _checkpoint_model_cls(repo_id, revision=None):
+def _checkpoint_model_cls(repo_id, revision=None, *, trust_remote_code=False):
     """Declared architecture first; inspect supported unlabelled encoders."""
     try:
         config = AutoConfig.from_pretrained(
             repo_id, token=get_hf_token(), revision=revision, trust_remote_code=False,
         )
+    except ValueError as exc:
+        # Classify only config-resolution failures, before model construction.
+        # Re-read pinned JSON to distinguish an unsupported config type from
+        # malformed metadata. Never classify by a broad exception-message match.
+        if not trust_remote_code:
+            from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+            raw_config, _ = PretrainedConfig.get_config_dict(repo_id, token=get_hf_token(), revision=revision)
+            model_type = raw_config.get("model_type")
+            auto_map = raw_config.get("auto_map")
+            custom_config = isinstance(auto_map, dict) and isinstance(auto_map.get("AutoConfig"), str)
+            unsupported_type = isinstance(model_type, str) and model_type not in CONFIG_MAPPING
+            if custom_config and (model_type is None or unsupported_type):
+                raise LoaderFailure("load", "checkpoint_config_requires_code",
+                                    "Checkpoint config requires repository code, which is disabled") from exc
+            if unsupported_type:
+                raise LoaderFailure("load", "checkpoint_config_unsupported",
+                                    f"No installed config class supports model_type={model_type!r}") from exc
+        return None, None
     except Exception:
         return None, None
     declared = _declared_checkpoint_model_cls(repo_id, revision, config=config)
@@ -362,7 +380,7 @@ def _checkpoint_model_cls(repo_id, revision=None):
     if len(matches) != 1:
         names = ", ".join(model_cls.__name__ for model_cls in matches) or "none"
         raise LoaderFailure(
-            "load", "ambiguous_checkpoint_architecture" if matches else "checkpoint_architecture_unresolved",
+            "load", "checkpoint_layout_ambiguous" if matches else "checkpoint_architecture_unresolved",
             f"{family} checkpoint matches {names}; refusing to guess an architecture or discard weights",
         )
     selected = matches[0]
@@ -1122,7 +1140,7 @@ def load_model(
         architecture_selection = None
         if (effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}
                 and (loader_scenario or "").strip().lower() != "quantized_transformers_native"):
-            selected, architecture_selection = _checkpoint_model_cls(repo_id, revision)
+            selected, architecture_selection = _checkpoint_model_cls(repo_id, revision, trust_remote_code=trust_remote_code)
             auto_model_cls = selected or auto_model_cls
         if effective_loader == "gptq":
             ensure_optimum_gptq_backend_compat()

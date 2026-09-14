@@ -30,6 +30,8 @@ collect_run_outcomes = run_experiment.collect_run_outcomes
 def _write_compatible_h5(path, config=None):
     import h5py
     from measurement_config import FORMAT_VERSION, NUMERICS_VERSION
+    config = dict(config or run_experiment.measurement_config(SimpleNamespace()))
+    config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
     csv_path = path.parent.parent / "stats" / f"{path.stem}.csv"
     csv_path.write_text("longname,alpha\nmodel.layers.0.proj,2\n")
@@ -37,7 +39,7 @@ def _write_compatible_h5(path, config=None):
         h5.attrs["format_version"] = FORMAT_VERSION
         h5.attrs["numerics_version"] = NUMERICS_VERSION
         h5.attrs["measurement_config_json"] = run_experiment.json.dumps(
-            config or run_experiment.measurement_config(SimpleNamespace())
+            config
         )
         h5.create_dataset("layers/longname", data=["model.layers.0.proj"], dtype=h5py.string_dtype())
         h5.create_dataset("layers/alpha", data=[2.0])
