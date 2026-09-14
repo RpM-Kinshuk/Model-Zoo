@@ -57,11 +57,12 @@ def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored
     assert not artifact_compatibility(csv_path, h5_path)[0]
 
 
-def test_artifacts_with_heuristic_qkv_splitting_cannot_resume(tmp_path):
+@pytest.mark.parametrize("old_version", ["5", "6"])
+def test_artifacts_with_older_attention_selection_cannot_resume(tmp_path, old_version):
     expected = measurement_config(SimpleNamespace())
-    csv_path, h5_path = write_pair(tmp_path, dict(expected, numerics_version="5"))
+    csv_path, h5_path = write_pair(tmp_path, dict(expected, numerics_version=old_version))
     with h5py.File(h5_path, "a") as h5:
-        h5.attrs["numerics_version"] = "5"
+        h5.attrs["numerics_version"] = old_version
 
     assert not artifact_compatibility(csv_path, h5_path, expected)[0]
     assert not artifact_compatibility(csv_path, h5_path)[0]

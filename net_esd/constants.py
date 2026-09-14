@@ -14,5 +14,5 @@ RESULT_KEYS = [
     'n_tail', 'params', 'eigs', 'fit_status', 'raw_num_evals', 'raw_norm',
     'raw_spectral_norm', 'raw_matrix_rank', 'raw_entropy', 'evals_thresh',
     'filter_zeros', 'source_dtype', 'compute_dtype', 'weight_layout',
-    'module_name', 'slice', 'compute_device'
+    'module_name', 'weight_attribute', 'slice', 'compute_device'
 ]

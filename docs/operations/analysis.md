@@ -73,15 +73,18 @@ default. Gram jitter/fallback is not recorded per layer.
 Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
 
 - `/layers/longname` is the canonical identity; every scalar metric is aligned
-  with it. `/layers/module_name` identifies the original module; `/layers/slice`
-  is empty for whole-weight measurements. Arbitrary names and missing fits
-  remain present.
+  with it. `/layers/module_name` identifies the original module and
+  `/layers/weight_attribute` its stored weight. `/layers/slice` is empty for
+  whole-weight measurements. Arbitrary names and missing fits remain present.
 - `/eigs[i]` is the full spectrum for `/layers/longname[i]`, unless saving was
   disabled. Float32/float64 spectra retain their computed dtype. CSV contains
   scalars, not duplicated eigenvalue strings.
-- `/coverage` records candidate modules, analyzed/skipped status and reasons.
-  Candidate counts differ from measurement and finite-fit counts. A completed
-  model can have partial coverage; inspect it before cross-model comparisons.
+- `/coverage` records analyzed/skipped status and reasons. Its `modules` table
+  has one entry per candidate weight (or an unsupported attribute group), so
+  `module_name` can repeat. Counts group these entries by physical module; a
+  module with both measured and skipped weights is partially analyzed.
+  Module, measurement and finite-fit counts differ. A completed model can have
+  partial coverage; inspect it before cross-model comparisons.
 - Root `/alpha` is a derived depth-by-module view, **not** canonical storage.
   Its `view_status` is `complete`, `partial`, or `unavailable`; omitted names
   appear in `/alpha_unmapped_longname`. Large/unrecognized layouts do not block
@@ -100,14 +103,15 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **6**, loader **6**, HDF5 format **2.0**.
+Current output versions are numerics **7**, loader **6**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
-Numerics 6 removes heuristic QKV splitting; loader 6 extends checkpoint-shape
-selection to the tested encoder families, retaining pinned adapter probes. Older outputs
+Numerics 7 adds declared MultiheadAttention projection matrices, measured whole,
+and records their weight attributes. Loader 6 covers checkpoint-shape selection
+for the tested encoder families, retaining pinned adapter probes. Older outputs
 need a fresh run. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
@@ -202,13 +206,26 @@ projections. Names and a 3:1 shape do not establish the packing layout: separate
 grouped-query key/value projections can have that shape too. The existing
 Linear aspect-ratio skip remains a measurement convention.
 
+The built-in `torch.nn.MultiheadAttention` is supported by default: its fused
+`in_proj_weight` is one whole matrix, or its separate `q_proj_weight`,
+`k_proj_weight` and `v_proj_weight` are measured individually when key/value
+dimensions differ. `out_proj` remains its own Linear module. For example,
+`attention.k_proj_weight` names a measurement whose module is `attention` and
+weight attribute is `k_proj_weight`; no synthetic QKV split is made.
+Shapes must agree with the declared dimensions, and an unsupported projection
+does not hide valid siblings. Quantizable/custom MHA subclasses are not granted
+this layout automatically: they may retain unused base-class parameters while
+performing projections elsewhere. Optional `bias_k`/`bias_v` vectors are not
+projection matrices; they remain visible as unresolved in loaded-tensor usage.
+The layout follows [PyTorch's implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/torch/nn/modules/activation.py).
+
 For an explicit broader pass over a successfully loaded model, add
 `--no-filter_type` to the runner or worker command in a fresh output directory.
 This exposes the estimator's existing dense-matrix fallback: other ordinary
 floating, dense 2D `.weight` tensors become eligible, and the legacy Linear
 aspect-ratio skip is disabled. Standard convolution layouts remain supported;
 unknown higher-dimensional layouts, packed/quantized representations and
-nonstandard attributes such as `in_proj_weight` are still skipped. This is not
+undeclared nonstandard attributes are still skipped. This is not
 architecture recovery or permission to use a partially loaded checkpoint.
 Inspect coverage and weight-usage records for remaining gaps. `filter_type` is
 stored in HDF5 and the summary, and must match on resume; the default remains
@@ -360,6 +377,8 @@ and records shared aliases and measurement links. It reuses coverage JSON/HDF5
 and the summary reader without a new storage layer.
 The existing dense 2D `.weight` fallback is now accessible from the runner and
 worker with `--no-filter_type`, under recorded settings and unchanged defaults.
+Declared PyTorch MultiheadAttention projections now use the same estimator and
+writer, with per-weight identities and module-grouped coverage counts.
 
 ### 1. Now: small correctness and operability steps
 
@@ -391,7 +410,8 @@ effort. Each slice should have a concrete check and a small, understandable diff
   The loaded registered-tensor portion is implemented; broader checkpoint-name
   conversions, non-tensor packing and fallback eligibility remain to be checked.
   The explicit dense `.weight` fallback covers a limited subset of loaded-layer
-  gaps; it does not yet handle extra named parameters or recover failed loads.
+  gaps. Declared MultiheadAttention projection attributes are now covered;
+  arbitrary extra parameters and recovery of failed loads remain separate work.
 - [ ] **Decide when direct weight analysis is appropriate.** If instantiation
   fails, evaluate using verified ordinary dense checkpoint tensors directly.
   Do not salvage an unchecked partially loaded model or guess packed/quantized

@@ -41,6 +41,41 @@ def matrix_entropy_torch(evals: torch.Tensor, rank: torch.Tensor) -> torch.Tenso
     return -torch.special.xlogy(p, p).sum() / math.log(numerical_rank)
 
 
+def _weight_record(name, module, attribute, weight):
+    module_class = type(module)
+    return {
+        "module_name": name,
+        "module_type": f"{module_class.__module__}.{module_class.__qualname__}",
+        "weight_attribute": attribute,
+        "weight_shape": list(weight.shape) if isinstance(weight, torch.Tensor) and not nn.parameter.is_lazy(weight) else None,
+        "weight_dtype": str(getattr(weight, "dtype", "unknown")).removeprefix("torch."),
+        "weight_layout": "unknown", "status": "skipped", "reason": "",
+        "measurement_names": [], "measurement_slices": [],
+    }
+
+
+def _weight_skip_reason(weight):
+    """Common materialization/representation checks, before interpreting layout."""
+    if nn.parameter.is_lazy(weight):
+        return "uninitialized_weight"
+    if not isinstance(weight, torch.Tensor):
+        return "weight_is_not_a_tensor"
+    # Tensor subclasses can advertise floating dtype while storing packed data.
+    if type(weight) not in (torch.Tensor, nn.Parameter) or weight.is_quantized:
+        return "unsupported_weight_representation"
+    if not weight.is_floating_point():
+        return "non_floating_weight"
+    if weight.layout != torch.strided:
+        return "non_dense_weight"
+    if weight.device.type == "meta":
+        return "meta_weight"
+    if weight.ndim <= 1:
+        return "weight_has_fewer_than_two_dimensions"
+    if weight.numel() == 0:
+        return "empty_weight"
+    return ""
+
+
 def iter_eligible_layers(
     net: nn.Module,
     filter_type: Optional[bool] = True,
@@ -50,14 +85,17 @@ def iter_eligible_layers(
 
     Supported layouts are dense Linear/Embedding matrices and Conv1d/2d/3d
     kernels, including subclasses and the declared Hugging Face Conv1D matrix
-    layout. With filter_type=False, other ordinary dense 2D weights are an
+    layout, plus the built-in MultiheadAttention's declared projection matrices.
+    With filter_type=False, other ordinary dense 2D weights are an
     explicit opt-in; unknown higher-dimensional or quantized layouts are never
     guessed. Each eligible matrix is measured whole, including fused attention
     projections: names and aspect ratios do not establish a QKV packing layout.
     The legacy Linear aspect-ratio filter remains enabled.
 
-    When provided, coverage receives one record per weight-bearing module,
-    including skipped candidates. Known packed attributes and direct matrix
+    When provided, coverage receives records identified by module and weight
+    attribute, including skipped candidates. MultiheadAttention can have several
+    weight records in one module; module counts must group by module_name.
+    Known packed attributes and other direct matrix
     parameters with nonstandard names are recorded, but never unpacked or
     interpreted as supported layouts. Packed recurrent weights are recorded at
     their owning module, not again at each storage helper. Arbitrary buffers
@@ -66,6 +104,38 @@ def iter_eligible_layers(
     """
     emitted_names = set()
     for name, module in net.named_modules():
+        # Only this declared implementation is covered. Quantizable/custom MHA
+        # subclasses can replace the forward projections but retain unused
+        # dense parameters from the base class; do not infer their layout.
+        if type(module) is nn.MultiheadAttention:
+            if module._qkv_same_embed_dim:
+                shapes = {"in_proj_weight": (3 * module.embed_dim, module.embed_dim)}
+            else:
+                shapes = {"q_proj_weight": (module.embed_dim, module.embed_dim),
+                          "k_proj_weight": (module.embed_dim, module.kdim),
+                          "v_proj_weight": (module.embed_dim, module.vdim)}
+            for attribute, shape in shapes.items():
+                weight = getattr(module, attribute, None)
+                record = _weight_record(name, module, attribute, weight)
+                record["weight_layout"] = "matrix"
+                if coverage is not None:
+                    coverage.append(record)
+                record["reason"] = _weight_skip_reason(weight)
+                if not record["reason"] and tuple(weight.shape) != shape:
+                    record["reason"] = "unsupported_weight_shape"
+                if record["reason"]:
+                    continue
+                measurement_name = f"{name}.{attribute}" if name else attribute
+                if measurement_name in emitted_names:
+                    raise ValueError(f"Duplicate ESD measurement name: {measurement_name!r}")
+                emitted_names.add(measurement_name)
+                record.update(status="eligible", measurement_names=[measurement_name], measurement_slices=[""])
+                bias = module.in_proj_bias
+                bias_params = bias.numel() if isinstance(bias, torch.Tensor) and bias.requires_grad else 0
+                if attribute != "in_proj_weight":
+                    bias_params //= 3  # One declared bias vector per Q/K/V projection.
+                yield measurement_name, weight.detach(), weight.numel() + bias_params
+            continue  # out_proj is visited independently through named_modules.
         weight_attribute = "weight"
         unsupported_attributes = []
         if not hasattr(module, "weight"):
@@ -92,56 +162,17 @@ def iter_eligible_layers(
             weight_attribute = unsupported_attributes[0]
         weight_param = getattr(module, weight_attribute, None)
         module_class = type(module)
-        record: Dict[str, Any] = {
-            "module_name": name,
-            "module_type": f"{module_class.__module__}.{module_class.__qualname__}",
-            "weight_attribute": weight_attribute,
-            "weight_shape": None,
-            "weight_dtype": str(getattr(weight_param, "dtype", "unknown")).removeprefix("torch."),
-            "weight_layout": "unknown",
-            "status": "skipped",
-            "reason": "",
-            "measurement_names": [],
-            "measurement_slices": [],
-        }
+        record = _weight_record(name, module, weight_attribute, weight_param)
         if coverage is not None:
             coverage.append(record)
         if unsupported_attributes:
             record["unsupported_weight_attributes"] = unsupported_attributes
-            if isinstance(weight_param, torch.Tensor) and not isinstance(
-                weight_param, torch.nn.parameter.UninitializedParameter
-            ):
-                record["weight_shape"] = list(weight_param.shape)
             record["reason"] = "unsupported_weight_attribute"
             continue
-        if isinstance(weight_param, torch.nn.parameter.UninitializedParameter):
-            record["reason"] = "uninitialized_weight"
-            continue
-        if not isinstance(weight_param, torch.Tensor):
-            record["reason"] = "weight_is_not_a_tensor"
-            continue
-        record["weight_shape"] = list(weight_param.shape)
-        # Quantized tensor subclasses can advertise a floating dtype while
-        # storing a packed representation. Do not interpret their raw storage.
-        if type(weight_param) not in (torch.Tensor, torch.nn.Parameter) or weight_param.is_quantized:
-            record["reason"] = "unsupported_weight_representation"
-            continue
-        if not weight_param.is_floating_point():
-            record["reason"] = "non_floating_weight"
-            continue
-        if weight_param.layout != torch.strided:
-            record["reason"] = "non_dense_weight"
-            continue
-        if weight_param.device.type == "meta":
-            record["reason"] = "meta_weight"
+        record["reason"] = _weight_skip_reason(weight_param)
+        if record["reason"]:
             continue
         weight: torch.Tensor = weight_param.detach()
-        if weight.ndim <= 1:
-            record["reason"] = "weight_has_fewer_than_two_dimensions"
-            continue
-        if weight.numel() == 0:
-            record["reason"] = "empty_weight"
-            continue
 
         # HF's historically named Conv1D is a transposed dense projection, not
         # a torch Conv1d kernel. Match its declaration without importing HF.

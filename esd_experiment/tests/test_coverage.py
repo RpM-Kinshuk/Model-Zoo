@@ -203,21 +203,102 @@ def test_custom_kernel_parameters_are_reported_but_arbitrary_buffers_are_not():
     assert coverage["custom"]["reason"] == "unsupported_weight_attribute"
 
 
-@pytest.mark.parametrize("kdim,attributes", [
-    (None, ["in_proj_weight"]),
-    (4, ["q_proj_weight", "k_proj_weight", "v_proj_weight"]),
+@pytest.mark.parametrize("kdim,vdim,attributes", [
+    (None, None, ["in_proj_weight"]),
+    (4, None, ["q_proj_weight", "k_proj_weight", "v_proj_weight"]),
+    (None, 6, ["q_proj_weight", "k_proj_weight", "v_proj_weight"]),
+    (4, 6, ["q_proj_weight", "k_proj_weight", "v_proj_weight"]),
 ])
-def test_multihead_attention_projection_missingness_is_explicit(kdim, attributes):
-    module = nn.MultiheadAttention(8, 2, kdim=kdim)
+@pytest.mark.parametrize("filter_type", [True, False])
+def test_multihead_attention_measures_declared_stored_matrices(kdim, vdim, attributes, filter_type):
+    torch.manual_seed(3)
+    module = nn.MultiheadAttention(8, 2, kdim=kdim, vdim=vdim).double()
+    before = {name: tensor.clone() for name, tensor in module.state_dict().items()}
+    coverage = []
 
-    layers, coverage = describe(module)
+    metrics = net_esd.net_esd_estimator(module, parallel=False, filter_type=filter_type,
+                                       compute_dtype="float64", fix_fingers="xmin_mid", coverage=coverage)
+    usage = weight_usage_report(module, coverage, metrics["longname"])
 
-    assert [name for name, _, _ in layers] == ["out_proj"]
-    assert list(coverage) == ["", "out_proj"]
+    assert metrics["longname"] == attributes + ["out_proj"]
+    assert metrics["module_name"] == [""] * len(attributes) + ["out_proj"]
+    assert metrics["weight_attribute"] == attributes + ["weight"]
+    assert metrics["slice"] == [""] * (len(attributes) + 1)
+    assert all(record["status"] == "analyzed" for record in coverage)
+    for index, attribute in enumerate(attributes + ["out_proj.weight"]):
+        weight = before[attribute]
+        reference = torch.linalg.svdvals(weight).square().sort().values
+        torch.testing.assert_close(torch.as_tensor(metrics["eigs"][index]), reference)
+        assert (metrics["M"][index], metrics["N"][index]) == tuple(weight.shape)
+        linked = next(record for record in usage["tensors"] if record["name"] == attribute)
+        assert linked["measurement_names"] == [metrics["longname"][index]]
+        assert linked["status"] == "measured"
+    assert usage["counts"]["unresolved_tensors"] == usage["counts"]["unmapped_measurements"] == 0
+    for name, tensor in module.state_dict().items():
+        torch.testing.assert_close(tensor, before[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("defect,reason", [
+    ("shape", "unsupported_weight_shape"), ("meta", "meta_weight"),
+    ("missing", "weight_is_not_a_tensor"), ("lazy", "uninitialized_weight"),
+    ("integer", "non_floating_weight"), ("packed", "unsupported_weight_representation"),
+])
+def test_bad_attention_projection_does_not_hide_other_weights(defect, reason):
+    module = nn.MultiheadAttention(8, 2, kdim=4)
+    class PackedParameter(nn.Parameter):
+        pass
+    replacements = {
+        "shape": nn.Parameter(torch.ones(8, 5)),
+        "meta": nn.Parameter(torch.empty(8, 4, device="meta")), "missing": None,
+        "lazy": nn.parameter.UninitializedParameter(),
+        "integer": nn.Parameter(torch.ones(8, 4, dtype=torch.int8), requires_grad=False),
+        "packed": PackedParameter(torch.ones(8, 4)),
+    }
+    module.k_proj_weight = replacements[defect]
+    coverage = []
+
+    metrics = net_esd.net_esd_estimator(module, parallel=False, coverage=coverage)
+
+    assert metrics["longname"] == ["q_proj_weight", "v_proj_weight", "out_proj"]
+    skipped = next(record for record in coverage if record["weight_attribute"] == "k_proj_weight")
+    assert skipped["status"] == "skipped" and skipped["reason"] == reason
+    usage = weight_usage_report(module, coverage, metrics["longname"])
+    for record in usage["tensors"]:
+        if record["name"] == "k_proj_weight":
+            assert record["status"] == "skipped" and record["measurement_names"] == []
+
+
+@pytest.mark.parametrize("module_cls", [nn.quantizable.MultiheadAttention,
+                                       type("CustomAttention", (nn.MultiheadAttention,), {})])
+def test_mha_subclasses_do_not_inherit_an_unverified_projection_layout(module_cls):
+    model = module_cls(8, 2)
+    coverage = []
+
+    layers = list(iter_eligible_layers(model, coverage=coverage, filter_type=False))
+
+    assert all(name != "in_proj_weight" for name, _, _ in layers)
+    original_projection = next(record for record in coverage if record["module_name"] == "")
+    assert original_projection["reason"] == "unsupported_weight_attribute"
+
+
+def test_attention_weight_attribute_names_alone_do_not_enable_selection():
+    model = nn.Module()
+    model.in_proj_weight = nn.Parameter(torch.ones(24, 8))
+    layers, coverage = describe(model, filter_type=False)
+    assert layers == []
     assert coverage[""]["reason"] == "unsupported_weight_attribute"
-    assert coverage[""]["unsupported_weight_attributes"] == attributes
-    assert coverage["out_proj"]["weight_attribute"] == "weight"
-    assert coverage["out_proj"]["status"] == "eligible"
+
+
+def test_attention_bias_vectors_are_not_interpreted_as_projection_matrices():
+    module = nn.MultiheadAttention(8, 2, add_bias_kv=True, bias=False)
+    coverage = []
+    metrics = net_esd.net_esd_estimator(module, parallel=False, coverage=coverage)
+
+    assert metrics["longname"] == ["in_proj_weight", "out_proj"]
+    usage = weight_usage_report(module, coverage, metrics["longname"])
+    for name in ("bias_k", "bias_v"):
+        record = next(record for record in usage["tensors"] if record["name"] == name)
+        assert record["status"] == "unresolved" and record["measurement_names"] == []
 
 
 def test_standard_weight_selection_is_unchanged_when_packed_metadata_exists():
@@ -284,8 +365,8 @@ def test_weight_usage_distinguishes_buffers_non_matrix_parameters_and_known_skip
     usage = weight_usage_report(model, coverage, metrics["longname"])
     records = {record["name"]: record for record in usage["tensors"]}
 
-    assert records["attention.in_proj_weight"]["status"] == "skipped"
-    assert records["attention.in_proj_weight"]["reason"] == "unsupported_weight_attribute"
+    assert records["attention.in_proj_weight"]["status"] == "measured"
+    assert records["attention.in_proj_weight"]["measurement_names"] == ["attention.in_proj_weight"]
     assert records["attention.out_proj.weight"]["status"] == "measured"
     for name in ("attention.in_proj_bias", "attention.out_proj.bias", "norm.weight", "norm.bias"):
         assert records[name]["status"] == "not_applicable"

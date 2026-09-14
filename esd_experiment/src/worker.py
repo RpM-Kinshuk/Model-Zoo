@@ -84,13 +84,24 @@ def parse_args():
 
 
 def coverage_report(records, metrics):
-    """Keep module coverage separate from per-measurement fit availability."""
+    """Count physical modules, even when one owns several measured weights."""
+    modules = {}
+    for record in records:
+        modules.setdefault(record["module_name"], []).append(record)
+    statuses = []
+    for weights in modules.values():
+        if all(weight["status"] == "analyzed" for weight in weights):
+            statuses.append("analyzed")
+        elif any(weight["status"] in {"analyzed", "partially_analyzed"} for weight in weights):
+            statuses.append("partially_analyzed")
+        else:
+            statuses.append("skipped")
     counts = {
-        "candidate_modules": len(records),
-        "eligible_modules": sum(bool(record["measurement_names"]) for record in records),
-        "analyzed_modules": sum(record["status"] == "analyzed" for record in records),
-        "partially_analyzed_modules": sum(record["status"] == "partially_analyzed" for record in records),
-        "skipped_modules": sum(record["status"] == "skipped" for record in records),
+        "candidate_modules": len(modules),
+        "eligible_modules": sum(any(weight["measurement_names"] for weight in weights) for weights in modules.values()),
+        "analyzed_modules": statuses.count("analyzed"),
+        "partially_analyzed_modules": statuses.count("partially_analyzed"),
+        "skipped_modules": statuses.count("skipped"),
         "analyzed_measurements": len(metrics.get("longname", [])),
         "fitted_measurements": sum(status == "fitted" for status in metrics.get("fit_status", [])),
     }

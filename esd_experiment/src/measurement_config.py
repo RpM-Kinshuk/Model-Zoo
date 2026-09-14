@@ -6,7 +6,8 @@ import math
 from pathlib import Path
 import re
 
-NUMERICS_VERSION = "6"
+# Version 7 adds declared MultiheadAttention matrices to the measured set.
+NUMERICS_VERSION = "7"
 FORMAT_VERSION = "2.0"
 # Version 6 extends checkpoint-shape selection to the tested encoder families.
 # Loading policy is separate from the spectral formulas.

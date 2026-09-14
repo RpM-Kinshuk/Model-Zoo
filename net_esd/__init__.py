@@ -72,10 +72,10 @@ def net_esd_estimator(
         max_workers (int, optional): Max concurrent workers. Defaults to len(device_ids) or auto-selected pool size.
         device_ids (List[int], optional): GPU IDs to use for compute. If None, auto-select GPUs not used by the model; if none available, use all.
         compute_dtype (str, optional): Spectrum computation precision, 'float32' or 'float64'. Loading precision is separate.
-        coverage (list, optional): Append per-module eligibility, skip reasons, emitted identities and fit statuses here.
+        coverage (list, optional): Append per-weight eligibility, owning modules, skip reasons, emitted identities and fit statuses here.
 
     Returns:
-        dict: Aligned metric lists. Full module_name and slice identify each
+        dict: Aligned metric lists. Full module_name, weight_attribute and slice identify each
             measurement; legacy longname is retained for compatibility.
     """
     if compute_dtype not in ("float32", "float64"):
@@ -212,7 +212,7 @@ def net_esd_estimator(
                 raise ValueError(f"Unknown backend: {backend}. Expected 'thread' or 'process'.")
 
         identity = {
-            measurement_name: (record["module_name"], slice_name)
+            measurement_name: (record["module_name"], record["weight_attribute"], slice_name)
             for record in coverage_records
             for measurement_name, slice_name in zip(record["measurement_names"], record["measurement_slices"])
         }
@@ -222,7 +222,7 @@ def net_esd_estimator(
                 continue
             if result.get("longname") != name:
                 raise ValueError(f"ESD result identity does not match requested layer {name!r}")
-            result["module_name"], result["slice"] = identity[name]
+            result["module_name"], result["weight_attribute"], result["slice"] = identity[name]
             # Multiprocess transport can cast checkpoint-native bfloat16 to
             # numpy-compatible float32; record the actual input, not transport.
             result["source_dtype"] = str(weight.dtype).removeprefix("torch.")

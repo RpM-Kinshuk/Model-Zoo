@@ -178,6 +178,54 @@ def test_weight_usage_survives_real_spectra_writer_and_summary_round_trip(tmp_pa
         np.testing.assert_array_equal(h5["eigs"][0], metrics["eigs"][0])
 
 
+@pytest.mark.parametrize("defect", [None, "shape", "no_spectrum"])
+def test_attention_records_and_partial_module_counts_survive_round_trip(tmp_path, monkeypatch, defect):
+    import torch
+    import net_esd
+    from net_esd.utils import weight_usage_report
+    from test_worker import load_worker_module
+
+    attention = torch.nn.MultiheadAttention(8, 2, kdim=4, vdim=6)
+    model = torch.nn.ModuleDict({"attention": attention, "shared_attention": attention})
+    if defect == "shape":
+        attention.k_proj_weight = torch.nn.Parameter(torch.ones(8, 5))
+    elif defect == "no_spectrum":
+        compute = net_esd.compute_esd_for_weight
+        monkeypatch.setattr(net_esd, "compute_esd_for_weight", lambda name, *args:
+                            None if name == "attention.k_proj_weight" else compute(name, *args))
+    weights = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=weights)
+    worker = load_worker_module()
+    coverage = worker.coverage_report(weights, metrics)
+    usage = weight_usage_report(model, weights, metrics["longname"])
+    coverage["weight_usage"] = usage
+    paths = tmp_path / "model.csv", tmp_path / "model.h5"
+    config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
+
+    worker.save_results(metrics, paths[0], "org/model", False, h5_output_path=paths[1],
+                        save_eigs=True, measurement_config=config, coverage=coverage)
+    summary = analyze_results.read_model_summary(*paths)
+
+    assert summary["candidate_modules"] == summary["measured_modules"] == 2
+    assert summary["analyzed_modules"] == (2 if defect is None else 1)
+    assert summary["partially_analyzed_modules"] == (0 if defect is None else 1)
+    assert summary["analyzed_measurements"] == (4 if defect is None else 3)
+    assert summary["skipped_modules"] == 0
+    linked = next(record for record in usage["tensors"] if record["name"] == "attention.q_proj_weight")
+    assert linked["aliases"] == ["shared_attention.q_proj_weight"]
+    assert linked["measurement_names"] == ["attention.q_proj_weight"]
+    key = next(record for record in usage["tensors"] if record["name"] == "attention.k_proj_weight")
+    assert key["measurement_names"] == ([] if defect else ["attention.k_proj_weight"])
+    assert key["status"] == ("skipped" if defect else "measured")
+    with h5py.File(paths[1]) as h5:
+        names = h5["layers/longname"].asstr()[:].tolist()
+        assert names == metrics["longname"]
+        assert h5["layers/weight_attribute"].asstr()[:].tolist() == metrics["weight_attribute"]
+        assert len(set(zip(metrics["module_name"], metrics["weight_attribute"], metrics["slice"]))) == len(names)
+        for index, spectrum in enumerate(metrics["eigs"]):
+            np.testing.assert_array_equal(h5["eigs"][index], spectrum)
+
+
 @pytest.mark.parametrize("field,value", [("registered_tensors", 9), ("measured_tensors", -1),
                                         ("skipped_tensors", True), ("shared_tensors", 10),
                                         ("unmapped_measurements", 4)])
