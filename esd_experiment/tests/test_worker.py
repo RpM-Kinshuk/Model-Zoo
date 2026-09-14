@@ -83,6 +83,66 @@ def load_worker_module():
     return worker
 
 
+@pytest.mark.parametrize("flags,filter_type", [([], True), (["--filter_type"], True), (["--no-filter_type"], False)])
+def test_worker_dense_fallback_uses_loaded_weights_and_records_selection(tmp_path, monkeypatch, flags, filter_type):
+    import torch
+    import net_esd
+    from net_esd.utils import weight_usage_report
+
+    class CustomWeight(torch.nn.Module):
+        def __init__(self, shape):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(shape))
+
+    model = torch.nn.ModuleDict({
+        "standard": torch.nn.Linear(4, 4, bias=False),
+        "custom": CustomWeight((4, 4)),
+        "tall_head": torch.nn.Linear(4, 32, bias=False),
+        "unknown_kernel": CustomWeight((4, 4, 2)),
+        "packed": torch.nn.Module(),
+    })
+    model.custom.extra = torch.nn.Parameter(torch.eye(4))
+    model.packed.register_buffer("qweight", torch.ones(4, 4, dtype=torch.int32))
+    before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+    worker = load_worker_module()
+    monkeypatch.setattr(worker, "torch", torch)
+    monkeypatch.setattr(worker, "net_esd_estimator", net_esd.net_esd_estimator)
+    monkeypatch.setattr(worker, "weight_usage_report", weight_usage_report)
+    load_model = Mock(return_value=(model, False))
+    monkeypatch.setattr(worker, "load_model", load_model)
+    arguments = ["worker.py", "--model_id", "org/control", "--revision", "a" * 40,
+                 "--output_dir", str(tmp_path), "--device_map", "cpu", "--no-parallel_esd"]
+    monkeypatch.setattr(sys, "argv", arguments + flags)
+
+    assert worker.main() == 0
+
+    expected = ["standard"] if filter_type else ["standard", "custom", "tall_head"]
+    with worker.h5py.File(tmp_path / "metrics/org--control.h5") as h5:
+        assert h5["layers/longname"].asstr()[:].tolist() == expected
+        config = json.loads(h5.attrs["measurement_config_json"])
+        assert config["filter_type"] is filter_type
+        coverage = json.loads(h5["coverage"].asstr()[()])
+        assert coverage["weight_usage"]["counts"]["unresolved_tensors"] == 1
+        skipped = {record["module_name"]: record["reason"] for record in coverage["modules"]
+                   if record["status"] == "skipped"}
+        assert skipped["packed"] == "unsupported_weight_attribute"
+        assert skipped["unknown_kernel"] == "unsupported_module_type"
+        for index, name in enumerate(expected):
+            reference = torch.linalg.svdvals(before[f"{name}.weight"].double()).square().sort().values.numpy()
+            worker.np.testing.assert_allclose(h5["eigs"][index], reference, rtol=5e-5, atol=1e-7)
+    for name, tensor in model.state_dict().items():
+        torch.testing.assert_close(tensor, before[name], rtol=0, atol=0)
+    assert worker.main() == 0  # Resume does not load the same model twice.
+    assert load_model.call_count == 1
+    paths = [tmp_path / "stats/org--control.csv", tmp_path / "metrics/org--control.h5"]
+    saved = [path.read_bytes() for path in paths]
+    opposite_flag = "--no-filter_type" if filter_type else "--filter_type"
+    monkeypatch.setattr(sys, "argv", arguments + [opposite_flag])
+    assert worker.main() == 1  # Do not silently mix different layer selections.
+    assert load_model.call_count == 1
+    assert [path.read_bytes() for path in paths] == saved
+
+
 def test_temp_output_path_is_hidden_sidecar(tmp_path: Path):
     worker = load_worker_module()
 

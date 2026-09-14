@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Eigenvalue threshold")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins")
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum, not saved eigenvalues")
+    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=True, help="Restrict layer types and skip Linear aspect ratios >= 8 (default); --no-filter_type also allows other dense 2D .weight tensors and keeps wide/tall Linear layers")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
     parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")
@@ -828,6 +829,7 @@ def main():
                     bins=args.bins,
                     fix_fingers=fix_fingers_value,
                     filter_zeros=args.filter_zeros,
+                    filter_type=measurement["filter_type"],
                     use_svd=args.use_svd,
                     save_eigs=getattr(args, "save_eigs", True),
                     parallel=args.parallel_esd,

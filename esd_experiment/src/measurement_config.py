@@ -56,7 +56,7 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
         "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
         "xmin_pos": 2,
         "conv_norm": 0.5,
-        "filter_type": True,
+        "filter_type": bool(getattr(args, "filter_type", True)),
         "spectrum_storage": "full",
     }
     if not math.isfinite(config["evals_thresh"]) or config["evals_thresh"] < 0:

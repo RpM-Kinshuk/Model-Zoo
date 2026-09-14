@@ -202,6 +202,18 @@ projections. Names and a 3:1 shape do not establish the packing layout: separate
 grouped-query key/value projections can have that shape too. The existing
 Linear aspect-ratio skip remains a measurement convention.
 
+For an explicit broader pass over a successfully loaded model, add
+`--no-filter_type` to the runner or worker command in a fresh output directory.
+This exposes the estimator's existing dense-matrix fallback: other ordinary
+floating, dense 2D `.weight` tensors become eligible, and the legacy Linear
+aspect-ratio skip is disabled. Standard convolution layouts remain supported;
+unknown higher-dimensional layouts, packed/quantized representations and
+nonstandard attributes such as `in_proj_weight` are still skipped. This is not
+architecture recovery or permission to use a partially loaded checkpoint.
+Inspect coverage and weight-usage records for remaining gaps. `filter_type` is
+stored in HDF5 and the summary, and must match on resume; the default remains
+`True`, so existing compatible runs continue with their original selection.
+
 Coverage also inventories loaded registered parameters and buffers, including
 non-persistent buffers, without reading/copying their values. Each tensor has its
 full name, shared aliases, shape/dtype and measurement links or a reason it was
@@ -256,6 +268,11 @@ Definitions: [Clauset–Shalizi–Newman](https://arxiv.org/abs/0706.1062),
 
 The runner writes `<output_dir>/gpu_config.json`. Edit it and send
 `kill -HUP <runner_pid>` to reload GPU/memory/concurrency and supervision limits.
+`SIGUSR1` stops dispatching new models and lets current workers finish (drain).
+`SIGINT`/`SIGTERM` stop the run and request termination of active worker groups.
+Resume with the same pinned input, output directory and measurement settings:
+compatible completed models are skipped; interrupted models restart. There is
+no within-model/layer checkpointing.
 Workers see only assigned GPUs: a single physical GPU becomes local `cuda:0`.
 Each worker has its own process group for scoped termination.
 
@@ -269,8 +286,12 @@ Each worker has its own process group for scoped termination.
   `logs/terminal_status/*.json` retain terminal results. Empty-analysis coverage
   is preserved in `logs/coverage/`.
 
-Active worker logs, heartbeats and per-worker HF caches are removed on completion,
-failure or termination. Copy any needed diagnostic logs before cleanup.
+Runner-managed worker logs, heartbeats and per-worker HF caches are removed on
+completion, failure or termination. Copy any needed diagnostic logs before cleanup.
+Cache removal is deliberate: checkpoint storage previously grew without bound,
+even over a few models. Re-downloading can be an acceptable tradeoff on this
+shared HPC server. GPU availability checks, runtime signals, scoped shutdown
+and resume from completed outputs are also intentional operating safeguards.
 
 ## Validation
 
@@ -317,6 +338,14 @@ Check consumers and distinguish disposable outputs from source data and useful
 research results before removal. Preserve the local run-script changes. No
 50k-model run is authorized.
 
+Shared-HPC constraints are part of correctness: retain bounded temporary disk
+usage, respect other users' GPU jobs, and preserve runtime control and resumable
+progress. Do not remove cache cleanup, availability checks, signal handling or
+resume behavior merely to reduce overhead. A replacement must demonstrate the
+same guarantees before the existing safeguard can be retired. Any cache reuse
+proposal needs explicit disk limits, ownership and eviction/cleanup behavior;
+an indefinitely growing shared cache is not an acceptable optimization.
+
 ### Already in place
 
 Corrected numerics, full-spectrum storage, canonical identities, missing-fit and
@@ -328,7 +357,9 @@ tensors and saved spectra; missing-metadata inference was tested separately with
 local safetensors. These are implementation checks, not research validation.
 Loaded-tensor accounting now exposes extra parameters missed by module coverage
 and records shared aliases and measurement links. It reuses coverage JSON/HDF5
-and the summary reader; no new storage layer or CLI mode was added.
+and the summary reader without a new storage layer.
+The existing dense 2D `.weight` fallback is now accessible from the runner and
+worker with `--no-filter_type`, under recorded settings and unchanged defaults.
 
 ### 1. Now: small correctness and operability steps
 
@@ -359,6 +390,8 @@ effort. Each slice should have a concrete check and a small, understandable diff
   or newly initialized during loading.
   The loaded registered-tensor portion is implemented; broader checkpoint-name
   conversions, non-tensor packing and fallback eligibility remain to be checked.
+  The explicit dense `.weight` fallback covers a limited subset of loaded-layer
+  gaps; it does not yet handle extra named parameters or recover failed loads.
 - [ ] **Decide when direct weight analysis is appropriate.** If instantiation
   fails, evaluate using verified ordinary dense checkpoint tensors directly.
   Do not salvage an unchecked partially loaded model or guess packed/quantized
@@ -401,8 +434,9 @@ is not required to proceed, but known gaps must be visible and scoped.
   pinned inputs, downloads, cache use and loading. Check malformed/duplicate rows,
   unavailable checkpoints, transient failures, shared adapter bases and cache
   reuse. Measure download/startup time, bytes transferred and peak host memory.
-  Investigate whether per-worker isolation and cleanup cause costly repeated
-  downloads; balance reuse with safe concurrency, disk bounds and reproducibility.
+  Keep ephemeral cleanup as the baseline: it prevents the disk-growth problem
+  already observed here. Measure repeated-download costs before considering any
+  bounded reuse; preserve safe concurrency, disk limits and reproducibility.
   Do not add retries or prefetching without evidence and explicit bounds.
 - [ ] **Workers, timeouts and recovery.** Exercise a failed launch, stalled
   download, slow-but-progressing analysis, worker exit/OOM and interrupted run.
@@ -426,9 +460,10 @@ pilot; let the pilot resolve workload-dependent questions. This is not a mandate
 for a scheduler rewrite, a new monitoring stack or a separate database layer.
 
 Initial workflow inspection: per-worker caches are isolated and removed on exit,
-so cross-worker reuse is not provided by that path. Measure repeated downloads
-before changing cache ownership. Heartbeats report liveness; stage timeouts bound
-elapsed stage time, not per-layer progress. Calibrate them against slow valid
+so cross-worker reuse is not provided by that path, intentionally bounding cache
+accumulation across completed jobs. Measure repeated downloads before proposing
+an alternative with equally clear storage bounds. Heartbeats report liveness;
+stage timeouts bound elapsed stage time, not per-layer progress. Calibrate them against slow valid
 work before changing termination policy. Existing recovery/timeout controls are
 covered by offline tests; workload costs still need pilot measurements.
 

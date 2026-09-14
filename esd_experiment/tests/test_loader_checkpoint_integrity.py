@@ -10,7 +10,8 @@ import pytest
 import torch
 import transformers
 
-from net_esd.utils import iter_eligible_layers
+from net_esd import net_esd_estimator
+from net_esd.utils import iter_eligible_layers, weight_usage_report
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "model_loader.py"
@@ -41,6 +42,29 @@ def tiny_bert(model_cls=transformers.BertModel):
 
 def empty_loading_info():
     return {"missing_keys": [], "unexpected_keys": [], "mismatched_keys": [], "error_msgs": []}
+
+
+def test_dense_fallback_measures_a_loaded_bert_head_without_changing_checkpoint(tmp_path):
+    config = tiny_bert().config
+    config.num_labels = 64  # classifier is 64 x 8: excluded by the legacy filter.
+    expected = transformers.BertForSequenceClassification(config).eval()
+    expected.save_pretrained(tmp_path)
+    actual, _ = loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+    assert actual._model_zoo_loading_info["validated"]
+    assert "classifier" not in {name for name, _, _ in iter_eligible_layers(actual)}
+    coverage = []
+
+    metrics = net_esd_estimator(actual, filter_type=False, parallel=False,
+                               fix_fingers="xmin_mid", coverage=coverage)
+
+    index = metrics["longname"].index("classifier")
+    reference = torch.linalg.svdvals(expected.classifier.weight.detach().double()).square().sort().values
+    torch.testing.assert_close(torch.as_tensor(metrics["eigs"][index]).double(), reference, rtol=5e-5, atol=1e-7)
+    usage = weight_usage_report(actual, coverage, metrics["longname"])
+    head = next(record for record in usage["tensors"] if record["name"] == "classifier.weight")
+    assert head["status"] == "measured" and head["measurement_names"] == ["classifier"]
+    for name, tensor in expected.state_dict().items():
+        assert torch.equal(actual.state_dict()[name], tensor), name
 
 
 ENCODER_FAMILIES = ["roberta", "distilbert", "albert", "deberta", "deberta-v2"]
