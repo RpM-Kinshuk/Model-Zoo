@@ -50,16 +50,20 @@ def _worker_module_context():
 
     fake_net_esd = ModuleType("net_esd")
     fake_net_esd.net_esd_estimator = lambda *args, **kwargs: None
+    fake_net_esd_utils = ModuleType("net_esd.utils")
+    fake_net_esd_utils.weight_usage_report = lambda *args: {"counts": {}}
 
     original_modules = {
         "torch": sys.modules.get("torch"),
         "model_loader": sys.modules.get("model_loader"),
         "net_esd": sys.modules.get("net_esd"),
+        "net_esd.utils": sys.modules.get("net_esd.utils"),
     }
     try:
         sys.modules["torch"] = fake_torch
         sys.modules["model_loader"] = fake_model_loader
         sys.modules["net_esd"] = fake_net_esd
+        sys.modules["net_esd.utils"] = fake_net_esd_utils
         yield
     finally:
         for name, module in original_modules.items():
@@ -518,8 +522,11 @@ def test_main_regenerates_incomplete_outputs_when_overwrite_is_requested(tmp_pat
             "alpha": [2.0],
         }
     )
+    usage = {"scope": "loaded_registered_tensors", "counts": {}, "tensors": []}
+    worker.weight_usage_report = Mock(return_value=usage)
 
     def fake_save_results(metrics, output_path, *args, **kwargs):
+        assert kwargs["coverage"]["weight_usage"] == usage
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("alpha\n1.0\n")
         h5_output_path = kwargs["h5_output_path"]
@@ -536,6 +543,11 @@ def test_main_regenerates_incomplete_outputs_when_overwrite_is_requested(tmp_pat
     assert exit_code == 0
     assert worker.load_model.call_count == 1
     assert worker.net_esd_estimator.call_count == 1
+    worker.weight_usage_report.assert_called_once_with(
+        worker.load_model.return_value[0], [], ["model.layers.0.mlp.up_proj"],
+    )
+    report = json.loads((tmp_path / "logs" / "coverage" / "org--model.json").read_text())
+    assert report["weight_usage"] == usage
     assert output_file.read_text() == "alpha\n1.0\n"
     assert metrics_file.exists()
     assert metrics_file.read_text() == "h5-temp"

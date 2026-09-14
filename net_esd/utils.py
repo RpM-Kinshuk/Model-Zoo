@@ -184,6 +184,72 @@ def iter_eligible_layers(
         yield name, weight, weight.numel() + bias_params
 
 
+def weight_usage_report(net: nn.Module, coverage, measurement_names):
+    """Link loaded registered tensors (including aliases) to saved measurements.
+
+    This reads names and metadata, not tensor values or state_dict copies. It
+    complements the loader's checkpoint-integrity check; it cannot establish
+    what was discarded before loading. Sharing means the same Tensor object,
+    not equal values or overlapping storage. Unrecognized buffers are listed
+    separately from unaccounted-for parameters, without guessing their purpose.
+    """
+    by_tensor_id = {}
+    by_name = {}
+    for kind, get_named_tensors in (("parameter", net.named_parameters), ("buffer", net.named_buffers)):
+        for name, tensor in get_named_tensors(remove_duplicate=False):
+            if id(tensor) in by_tensor_id:
+                record = by_tensor_id[id(tensor)]
+                record["aliases"].append(name)
+            else:
+                shape = None if nn.parameter.is_lazy(tensor) else list(tensor.shape)
+                if kind == "buffer":
+                    status, reason = "not_applicable", "buffer_not_selected_as_weight"
+                elif shape is not None and len(shape) < 2:
+                    status, reason = "not_applicable", "non_matrix_parameter"
+                else:
+                    status, reason = "unresolved", "parameter_not_in_module_coverage"
+                record = {
+                    "name": name, "aliases": [], "kind": kind, "shape": shape,
+                    "dtype": str(tensor.dtype).removeprefix("torch."),
+                    "status": status, "reason": reason, "measurement_names": [],
+                }
+                by_tensor_id[id(tensor)] = record
+            by_name[name] = record
+
+    saved_names = set(measurement_names)
+    mapped_names = set()
+    for module_record in coverage:
+        attributes = module_record.get("unsupported_weight_attributes") or [module_record["weight_attribute"]]
+        for attribute in attributes:
+            name = ".".join(part for part in (module_record["module_name"], attribute) if part)
+            record = by_name.get(name)
+            if record is None:
+                # Callable/packed helpers or computed properties may not be
+                # registered tensors. Keep their original module coverage;
+                # any computed spectra stay explicitly unmapped below.
+                continue
+            measured = saved_names.intersection(module_record["measurement_names"])
+            if measured:
+                record["measurement_names"] = sorted(set(record["measurement_names"]) | measured)
+                record["status"], record["reason"] = "measured", ""
+                mapped_names.update(measured)
+            elif record["status"] != "measured":
+                if module_record["reason"] == "weight_has_fewer_than_two_dimensions":
+                    continue
+                record["status"] = "skipped" if module_record["status"] == "skipped" else "unresolved"
+                record["reason"] = module_record["reason"] or "selected_weight_without_measurement"
+
+    records = list(by_tensor_id.values())
+    unmapped = sorted(saved_names - mapped_names)
+    counts = {f"{status}_tensors": sum(record["status"] == status for record in records)
+              for status in ("measured", "skipped", "not_applicable", "unresolved")}
+    counts.update(registered_tensors=len(records),
+                  shared_tensors=sum(bool(record["aliases"]) for record in records),
+                  unmapped_measurements=len(unmapped))
+    return {"scope": "loaded_registered_tensors", "counts": counts,
+            "tensors": records, "unmapped_measurements": unmapped}
+
+
 def estimate_compute_cost(weight: torch.Tensor, use_svd: bool) -> int:
     """Estimate dense eigenspectrum compute cost for scheduling.
 

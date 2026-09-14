@@ -21,7 +21,7 @@ analyze_results = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(analyze_results)
 
 
-def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, **settings):
+def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, weight_usage=None, **settings):
     """Match the worker's two-file schema; /alpha is deliberately unavailable."""
     csv_path = run_dir / "stats" / f"{stem}.csv"
     h5_path = run_dir / "metrics" / f"{stem}.h5"
@@ -63,7 +63,10 @@ def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, 
             counts = dict(candidate_modules=4, eligible_modules=3, analyzed_modules=3,
                           partially_analyzed_modules=0, skipped_modules=1,
                           analyzed_measurements=3, fitted_measurements=2)
-            h5.create_dataset("coverage", data=json.dumps({"counts": counts, "modules": []}))
+            report = {"counts": counts, "modules": []}
+            if weight_usage is not None:
+                report["weight_usage"] = weight_usage
+            h5.create_dataset("coverage", data=json.dumps(report))
             for name, count in counts.items():
                 h5.attrs[f"coverage_{name}"] = count
     return csv_path, h5_path
@@ -124,6 +127,69 @@ def test_absent_coverage_is_unknown_not_complete(tmp_path):
     assert summary["coverage_status"] == "unknown"
     for name in ("candidate_modules", "analyzed_modules", "partially_analyzed_modules", "skipped_modules"):
         assert summary[name] is None
+
+
+@pytest.mark.parametrize("coverage", [False, True])
+def test_absent_weight_usage_is_unknown_even_when_module_coverage_exists(tmp_path, coverage):
+    summary = analyze_results.read_model_summary(*write_pair(tmp_path, coverage=coverage))
+    assert summary["weight_usage_status"] == "unknown"
+    assert all(summary[name] is None for name in analyze_results.WEIGHT_COUNTS)
+
+
+def test_summary_records_loaded_tensor_counts(tmp_path):
+    counts = dict(registered_tensors=8, measured_tensors=3, skipped_tensors=1,
+                  not_applicable_tensors=3, unresolved_tensors=1, shared_tensors=2,
+                  unmapped_measurements=0)
+    usage = {"scope": "loaded_registered_tensors", "counts": counts}
+
+    summary = analyze_results.read_model_summary(*write_pair(tmp_path, weight_usage=usage))
+
+    assert summary["weight_usage_status"] == "recorded"
+    assert all(summary[name] == count for name, count in counts.items())
+
+
+def test_weight_usage_survives_real_spectra_writer_and_summary_round_trip(tmp_path):
+    import torch
+    from net_esd import net_esd_estimator
+    from net_esd.utils import weight_usage_report
+    from test_worker import load_worker_module
+
+    layer = torch.nn.Linear(4, 4, bias=False)
+    layer.extra = torch.nn.Parameter(torch.eye(4))
+    model = torch.nn.ModuleDict({"first": layer, "shared": layer})
+    modules = []
+    metrics = net_esd_estimator(model, parallel=False, coverage=modules)
+    worker = load_worker_module()
+    coverage = worker.coverage_report(modules, metrics)
+    coverage["weight_usage"] = weight_usage_report(model, modules, metrics["longname"])
+    csv_path, h5_path = tmp_path / "model.csv", tmp_path / "model.h5"
+    config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
+
+    worker.save_results(metrics, csv_path, "org/model", False, h5_output_path=h5_path,
+                        save_eigs=True, measurement_config=config, coverage=coverage)
+    summary = analyze_results.read_model_summary(csv_path, h5_path)
+
+    assert summary["weight_usage_status"] == "recorded"
+    assert summary["registered_tensors"] == summary["shared_tensors"] == 2
+    assert summary["measured_tensors"] == summary["unresolved_tensors"] == 1
+    assert summary["unmapped_measurements"] == 0
+    with h5py.File(h5_path) as h5:
+        assert json.loads(h5["coverage"].asstr()[()]) == coverage
+        np.testing.assert_array_equal(h5["eigs"][0], metrics["eigs"][0])
+
+
+@pytest.mark.parametrize("field,value", [("registered_tensors", 9), ("measured_tensors", -1),
+                                        ("skipped_tensors", True), ("shared_tensors", 10),
+                                        ("unmapped_measurements", 4)])
+def test_invalid_weight_usage_counts_are_rejected(tmp_path, field, value):
+    counts = dict(registered_tensors=8, measured_tensors=3, skipped_tensors=1,
+                  not_applicable_tensors=3, unresolved_tensors=1, shared_tensors=2,
+                  unmapped_measurements=0)
+    counts[field] = value
+    usage = {"scope": "loaded_registered_tensors", "counts": counts}
+
+    with pytest.raises(ValueError, match="[Ww]eight-usage"):
+        analyze_results.read_model_summary(*write_pair(tmp_path, weight_usage=usage))
 
 
 def test_no_fitted_measurements_remain_in_summary():

@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 import net_esd
-from net_esd.utils import iter_eligible_layers
+from net_esd.utils import iter_eligible_layers, weight_usage_report
 
 
 class CustomLinear(nn.Linear):
@@ -230,6 +230,137 @@ def test_standard_weight_selection_is_unchanged_when_packed_metadata_exists():
     assert coverage[""]["weight_attribute"] == "weight"
     assert coverage[""]["status"] == "eligible"
     assert "unsupported_weight_attributes" not in coverage[""]
+
+
+def test_weight_usage_exposes_extra_parameters_and_shared_module_aliases():
+    layer = nn.Linear(4, 4, bias=False)
+    layer.extra_projection = nn.Parameter(torch.ones(4, 4))
+    model = nn.ModuleDict({"first": layer, "shared": layer})
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+    records = {record["name"]: record for record in usage["tensors"]}
+
+    assert metrics["longname"] == ["first"]  # No change in selection or computation.
+    assert records["first.weight"]["aliases"] == ["shared.weight"]
+    assert records["first.weight"]["measurement_names"] == ["first"]
+    extra = records["first.extra_projection"]
+    assert extra["aliases"] == ["shared.extra_projection"]
+    assert extra["status"] == "unresolved"
+    assert extra["reason"] == "parameter_not_in_module_coverage"
+    assert usage["counts"] == dict(registered_tensors=2, measured_tensors=1,
+                                   skipped_tensors=0, not_applicable_tensors=0,
+                                   unresolved_tensors=1, shared_tensors=2,
+                                   unmapped_measurements=0)
+
+
+@pytest.mark.parametrize("head_first", [False, True])
+def test_weight_usage_links_tied_heads_even_when_one_module_is_skipped(head_first):
+    embedding = nn.Embedding(40, 4)
+    head = nn.Linear(4, 40, bias=False)
+    head.weight = embedding.weight
+    modules = [("head", head), ("embedding", embedding)]
+    model = nn.ModuleDict(modules if head_first else reversed(modules))
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+
+    assert metrics["longname"] == ["embedding"]
+    assert usage["counts"]["registered_tensors"] == usage["counts"]["measured_tensors"] == 1
+    record = usage["tensors"][0]
+    assert set([record["name"], *record["aliases"]]) == {"embedding.weight", "head.weight"}
+    assert record["measurement_names"] == ["embedding"]
+    assert record["status"] == "measured" and record["reason"] == ""
+
+
+def test_weight_usage_distinguishes_buffers_non_matrix_parameters_and_known_skips():
+    model = nn.ModuleDict({"attention": nn.MultiheadAttention(4, 2), "norm": nn.LayerNorm(4)})
+    model.register_buffer("positions", torch.arange(4).reshape(1, 4), persistent=False)
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+    records = {record["name"]: record for record in usage["tensors"]}
+
+    assert records["attention.in_proj_weight"]["status"] == "skipped"
+    assert records["attention.in_proj_weight"]["reason"] == "unsupported_weight_attribute"
+    assert records["attention.out_proj.weight"]["status"] == "measured"
+    for name in ("attention.in_proj_bias", "attention.out_proj.bias", "norm.weight", "norm.bias"):
+        assert records[name]["status"] == "not_applicable"
+        assert records[name]["reason"] == "non_matrix_parameter"
+    assert records["positions"]["kind"] == "buffer"
+    assert records["positions"]["reason"] == "buffer_not_selected_as_weight"
+    assert usage["counts"]["unresolved_tensors"] == 0
+
+
+def test_weight_usage_keeps_separate_tensor_objects_even_with_shared_storage():
+    model = nn.ModuleDict({"first": nn.Linear(4, 4, bias=False), "view": nn.Linear(4, 4, bias=False)})
+    model.view.weight = nn.Parameter(model.first.weight.detach())
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+
+    assert usage["counts"]["registered_tensors"] == usage["counts"]["measured_tensors"] == 2
+    assert usage["counts"]["shared_tensors"] == 0
+    assert [record["measurement_names"] for record in usage["tensors"]] == [["first"], ["view"]]
+
+
+def test_weight_usage_reads_only_metadata_and_handles_lazy_meta_and_packed_weights(monkeypatch):
+    packed = nn.Module()
+    packed.register_buffer("qweight", torch.ones(4, 4, dtype=torch.int32))
+    model = nn.ModuleDict({"meta": nn.Linear(4, 4, device="meta"), "lazy": nn.LazyLinear(4), "packed": packed})
+    coverage = []
+    assert list(iter_eligible_layers(model, coverage=coverage)) == []
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Weight accounting must not copy or read tensor data")
+
+    monkeypatch.setattr(model, "state_dict", forbidden)
+    monkeypatch.setattr(torch.Tensor, "cpu", forbidden)
+    monkeypatch.setattr(torch.Tensor, "numpy", forbidden)
+    monkeypatch.setattr(torch.Tensor, "detach", forbidden)
+    usage = weight_usage_report(model, coverage, [])
+    records = {record["name"]: record for record in usage["tensors"]}
+
+    assert records["meta.weight"]["reason"] == "meta_weight"
+    assert records["lazy.weight"]["shape"] is None
+    assert records["lazy.weight"]["reason"] == "uninitialized_weight"
+    assert records["packed.qweight"]["reason"] == "unsupported_weight_attribute"
+
+
+def test_weight_usage_does_not_invent_links_for_computed_weight_properties():
+    class ComputedWeight(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.kernel = nn.Parameter(torch.eye(4))
+
+        @property
+        def weight(self):
+            return self.kernel * 2
+
+    model = ComputedWeight()
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, filter_type=False, parallel=False, coverage=coverage)
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+
+    assert usage["tensors"][0]["status"] == "unresolved"
+    assert usage["unmapped_measurements"] == [""]  # Root module identity.
+    assert usage["counts"]["unmapped_measurements"] == 1
+
+
+def test_weight_usage_requires_a_result_not_just_eligibility():
+    model = nn.Linear(4, 4, bias=False)
+    coverage = []
+    list(iter_eligible_layers(model, coverage=coverage))
+
+    usage = weight_usage_report(model, coverage, [])
+
+    assert usage["tensors"][0]["status"] == "unresolved"
+    assert usage["tensors"][0]["reason"] == "selected_weight_without_measurement"
+    assert usage["counts"]["measured_tensors"] == 0
 
 
 @pytest.mark.parametrize("shape", [(4, 12), (12, 4)])

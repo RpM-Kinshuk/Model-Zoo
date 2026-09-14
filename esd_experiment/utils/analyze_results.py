@@ -23,6 +23,9 @@ from measurement_config import artifact_compatibility, measurement_config
 MEASUREMENT_FIELDS = tuple(measurement_config(SimpleNamespace()))
 MODULE_COUNTS = ("candidate_modules", "analyzed_modules",
                  "partially_analyzed_modules", "skipped_modules")
+WEIGHT_COUNTS = ("registered_tensors", "measured_tensors", "skipped_tensors",
+                 "not_applicable_tensors", "unresolved_tensors", "shared_tensors",
+                 "unmapped_measurements")
 
 
 def parse_args(argv=None):
@@ -111,9 +114,9 @@ def read_model_summary(csv_path, h5_path):
             base_revision_loaded=loading_info.get("base_revision_loaded"),
             base_resolved_commit_hash=loading_info.get("base_resolved_commit_hash"),
             csv_path=str(csv_path.resolve()), h5_path=str(h5_path.resolve()),
-            coverage_status="unknown", **settings,
+            coverage_status="unknown", weight_usage_status="unknown", **settings,
         )
-        summary.update({name: None for name in MODULE_COUNTS})
+        summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS)})
         if "coverage" in h5:
             coverage = json.loads(h5["coverage"].asstr()[()])
             counts = coverage["counts"]
@@ -129,6 +132,22 @@ def read_model_summary(csv_path, h5_path):
                 raise ValueError("Coverage disagrees with measured module identities")
             summary.update({name: counts[name] for name in MODULE_COUNTS})
             summary["coverage_status"] = "recorded"
+            usage = coverage.get("weight_usage")
+            if usage is not None:
+                if usage.get("scope") != "loaded_registered_tensors":
+                    raise ValueError("Unknown weight-usage scope")
+                counts = usage["counts"]
+                for name in WEIGHT_COUNTS:
+                    if type(counts.get(name)) is not int or counts[name] < 0:
+                        raise ValueError(f"Invalid weight-usage count: {name}")
+                if counts["registered_tensors"] != sum(counts[name] for name in (
+                        "measured_tensors", "skipped_tensors", "not_applicable_tensors", "unresolved_tensors")):
+                    raise ValueError("Weight-usage tensor counts do not add up")
+                if (counts["shared_tensors"] > counts["registered_tensors"]
+                        or counts["unmapped_measurements"] > summary["analyzed_measurements"]):
+                    raise ValueError("Weight-usage counts exceed available tensors or measurements")
+                summary.update({name: counts[name] for name in WEIGHT_COUNTS})
+                summary["weight_usage_status"] = "recorded"
     return summary
 
 
@@ -143,6 +162,12 @@ def print_model_stats(summary, verbose=False, mixed_settings=False):
     unknown = (valid["coverage_status"] == "unknown").sum()
     if unknown:
         print(f"Module coverage is unknown for {unknown} models.")
+    unknown_usage = (valid["weight_usage_status"] == "unknown").sum()
+    if unknown_usage:
+        print(f"Loaded weight usage is unknown for {unknown_usage} models.")
+    print(f"Unresolved loaded tensors: {valid['unresolved_tensors'].sum():.0f}; "
+          f"measurements without a registered-tensor link: {valid['unmapped_measurements'].sum():.0f} "
+          "(recorded reports only)")
     if mixed_settings:
         warnings.warn("Mixed measurement settings: filter summary.csv by settings before comparing models. "
                       "Pooled metric statistics are not shown.")

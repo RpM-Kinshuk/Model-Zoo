@@ -1,15 +1,13 @@
 import sys
 import shlex
 import importlib.util
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from types import ModuleType
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+from test_worker import _worker_module_context
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -45,71 +43,6 @@ def _write_compatible_h5(path, config=None):
         h5.create_dataset("layers/alpha", data=[2.0])
         if config is None or config.get("save_eigs"):
             h5.create_dataset("eigs", (1,), dtype=h5py.vlen_dtype("float32"))[0] = [1., 2.]
-
-
-@contextmanager
-def _worker_module_context():
-    fake_torch = ModuleType("torch")
-    fake_torch.float16 = object()
-    fake_torch.cuda = SimpleNamespace(
-        is_available=lambda: False,
-        device_count=lambda: 0,
-        empty_cache=lambda: None,
-        get_device_name=lambda index: "cpu",
-        get_device_properties=lambda index: SimpleNamespace(total_memory=0, major=0, minor=0),
-    )
-    fake_torch.nn = SimpleNamespace(Module=object)
-
-    fake_numpy = ModuleType("numpy")
-    fake_numpy.ndarray = object
-    fake_numpy.full = lambda *args, **kwargs: None
-    fake_numpy.nan = float("nan")
-
-    fake_h5py = ModuleType("h5py")
-    fake_h5py.File = lambda *args, **kwargs: None
-
-    @dataclass
-    class _FakeLoaderFailure(Exception):
-        stage: str
-        reason: str
-        message: str
-
-        def __post_init__(self) -> None:
-            super().__init__(self.message)
-
-    fake_model_loader = ModuleType("model_loader")
-    fake_model_loader.LoaderFailure = _FakeLoaderFailure
-    fake_model_loader.load_model = lambda *args, **kwargs: None
-    fake_model_loader.parse_model_string = lambda model_id: (
-        model_id.split("@", 1)[0],
-        model_id.split("@", 1)[1] if "@" in model_id else "",
-    )
-    fake_model_loader.safe_filename = lambda value: value.replace("/", "--").replace("@", "__")
-
-    fake_net_esd = ModuleType("net_esd")
-    fake_net_esd.net_esd_estimator = lambda *args, **kwargs: None
-
-    original_modules = {
-        "torch": sys.modules.get("torch"),
-        "numpy": sys.modules.get("numpy"),
-        "h5py": sys.modules.get("h5py"),
-        "model_loader": sys.modules.get("model_loader"),
-        "net_esd": sys.modules.get("net_esd"),
-        "pandas": sys.modules.get("pandas"),
-    }
-    try:
-        sys.modules["torch"] = fake_torch
-        sys.modules["numpy"] = fake_numpy
-        sys.modules["h5py"] = fake_h5py
-        sys.modules["model_loader"] = fake_model_loader
-        sys.modules["net_esd"] = fake_net_esd
-        yield
-    finally:
-        for name, module in original_modules.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
 
 
 def test_available_backends_includes_compressed_tensors(monkeypatch):

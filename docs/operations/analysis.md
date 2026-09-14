@@ -124,8 +124,9 @@ python esd_experiment/analyze_results.py \
 
 This writes `summary.csv`: one row per CSV/HDF5 pair, with artifact paths,
 measurement settings, fitted/missing measurement counts, module coverage and
-scalar summaries. It validates current artifacts and reads canonical `/layers`
-one model at a time; it does not load eigenvalues or use the derived `/alpha`
+loaded-tensor usage counts, plus scalar summaries. It validates current
+artifacts and reads canonical `/layers` one model at a time; it does not load
+eigenvalues or use the derived `/alpha`
 view. Measurement counts are not model depth.
 Alpha and other fit-derived summaries include only finite fitted `alpha > 1`;
 other metrics use their finite values across all measured rows.
@@ -139,6 +140,13 @@ separate fields; the latter is not proof that every checkpoint dependency was
 pinned. Recorded adapter-base repository, revision and resolved commit are
 included separately from the requested `source_model`. Full runtime provenance
 remains in HDF5.
+
+`weight_usage_status=recorded` means a loaded-tensor inventory exists, not that
+coverage is complete. Inspect `unresolved_tensors`, `skipped_tensors` and
+`unmapped_measurements`; full names and reasons are in `/coverage` under
+`weight_usage`. Older otherwise-compatible outputs can still be read/resumed,
+but their absent inventory is `unknown`, not zero or complete. This additive
+report does not change loading, tensor selection or numerical conventions.
 
 The summary is an artifact index, not a ledger of every attempted model: failures
 that produced no pair remain in the runner's logs. The depth-only clustering
@@ -193,6 +201,21 @@ reconstruction. Each eligible matrix is measured whole, including fused QKV
 projections. Names and a 3:1 shape do not establish the packing layout: separate
 grouped-query key/value projections can have that shape too. The existing
 Linear aspect-ratio skip remains a measurement convention.
+
+Coverage also inventories loaded registered parameters and buffers, including
+non-persistent buffers, without reading/copying their values. Each tensor has its
+full name, shared aliases, shape/dtype and measurement links or a reason it was
+not measured. Shared aliases mean the same Tensor object, not equal values or
+overlapping storage; existing per-module measurements are not deduplicated.
+Scalar/vector parameters and buffers not selected as weights are distinguished
+from skipped weights and unresolved parameters. For example, an extra matrix
+parameter beside a module's `.weight` is unresolved if the selector overlooked
+it. Computed/unregistered weights can leave measurements explicitly unmapped.
+Callable/packed non-tensor helpers remain in module coverage; this inventory
+does not unpack them or prove that all checkpoint weights survived loading.
+The loader's integrity gate remains separate and required. See
+[PyTorch's named tensor traversal](https://docs.pytorch.org/docs/2.11/generated/torch.nn.Module.html#torch.nn.Module.named_parameters)
+for alias enumeration with `remove_duplicate=False`.
 
 ## Interpreting the metrics
 
@@ -303,10 +326,13 @@ controls exercise standard heads, shards, shared weights, malformed checkpoints
 and ambiguous layouts. Small public CPU checks verified preserved checkpoint
 tensors and saved spectra; missing-metadata inference was tested separately with
 local safetensors. These are implementation checks, not research validation.
+Loaded-tensor accounting now exposes extra parameters missed by module coverage
+and records shared aliases and measurement links. It reuses coverage JSON/HDF5
+and the summary reader; no new storage layer or CLI mode was added.
 
 ### 1. Now: small correctness and operability steps
 
-Architecture fallback and weight usage remain the next implementation slice.
+Continue architecture fallback and checkpoint-to-measurement weight accounting.
 Alongside it, inspect the broader workflow below so the roadmap does not become
 only a loader project. These are hypotheses to check, not diagnosed faults or
 commitments to build every proposed feature. Prioritize demonstrated risks to
@@ -331,6 +357,8 @@ effort. Each slice should have a concrete check and a small, understandable diff
   heads and full names; do not confuse physical shared modules with execution
   depth. Inspecting only the loaded model cannot expose weights already discarded
   or newly initialized during loading.
+  The loaded registered-tensor portion is implemented; broader checkpoint-name
+  conversions, non-tensor packing and fallback eligibility remain to be checked.
 - [ ] **Decide when direct weight analysis is appropriate.** If instantiation
   fails, evaluate using verified ordinary dense checkpoint tensors directly.
   Do not salvage an unchecked partially loaded model or guess packed/quantized
@@ -396,6 +424,13 @@ For each finding, record the evidence, smallest useful change (including deletio
 or no change), and how to verify it. Fix critical demonstrated gaps before the
 pilot; let the pilot resolve workload-dependent questions. This is not a mandate
 for a scheduler rewrite, a new monitoring stack or a separate database layer.
+
+Initial workflow inspection: per-worker caches are isolated and removed on exit,
+so cross-worker reuse is not provided by that path. Measure repeated downloads
+before changing cache ownership. Heartbeats report liveness; stage timeouts bound
+elapsed stage time, not per-layer progress. Calibrate them against slow valid
+work before changing termination policy. Existing recovery/timeout controls are
+covered by offline tests; workload costs still need pilot measurements.
 
 ### 2. Then: a small stratified trained-checkpoint pilot
 

@@ -38,6 +38,7 @@ from measurement_config import (
     validate_model_pin,
 )
 from net_esd import net_esd_estimator
+from net_esd.utils import weight_usage_report
 
 
 def parse_args():
@@ -838,10 +839,12 @@ def main():
                 raise LoaderFailure(stage, reason, message) from exc
 
             coverage = coverage_report(layer_coverage, metrics)
+            coverage["weight_usage"] = weight_usage_report(model, layer_coverage, metrics.get("longname", []))
             coverage.update(model_id=display_name, measurement_config=measurement)
             # Preserve missingness information even if every candidate is skipped.
             _write_json_atomic(output_dir / "logs" / "coverage" / f"{safe_filename(display_name)}.json", coverage)
             print(f"Coverage: {json.dumps(coverage['counts'], sort_keys=True)}")
+            print(f"Loaded weight usage: {json.dumps(coverage['weight_usage']['counts'], sort_keys=True)}")
             validation_failure = validate_metrics_output(metrics)
             if validation_failure is not None:
                 stage, reason = validation_failure
