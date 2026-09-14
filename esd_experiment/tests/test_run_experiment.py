@@ -155,6 +155,8 @@ def test_create_runtime_config_includes_max_concurrent_jobs(tmp_path):
     assert config_path.read_text()
     config = run_experiment.json.loads(config_path.read_text())
     assert config["max_concurrent_jobs"] == 3
+    with pytest.raises(OSError):
+        run_experiment.create_runtime_config(args, tmp_path / "missing" / "gpu_config.json")
 
 
 

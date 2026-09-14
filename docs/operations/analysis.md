@@ -373,13 +373,37 @@ Definitions: [Clauset–Shalizi–Newman](https://arxiv.org/abs/0706.1062),
 
 The runner writes `<output_dir>/gpu_config.json`. Edit it and send
 `kill -HUP <runner_pid>` to reload GPU/memory/concurrency and supervision limits.
+Initial configuration write/load failures abort before dispatch. GPU selection
+requires repeated low-memory readings **and no visible GPU processes**; a small
+existing job is not an idle device.
 `SIGUSR1` stops dispatching new models and lets current workers finish (drain).
 `SIGINT`/`SIGTERM` stop the run and request termination of active worker groups.
+The runner attempts supervisor cleanup before exiting nonzero. Workers get
+`termination_grace_seconds` before remaining group members receive SIGKILL;
+repeating SIGINT/SIGTERM does not bypass cleanup. Allow the current supervisor
+poll (up to five seconds), grace period and cache deletion to finish. SIGKILL
+of the runner itself cannot run cleanup and should be a last resort.
 Resume with the same pinned input, output directory and measurement settings:
 compatible completed models are skipped; interrupted models restart. There is
 no within-model/layer checkpointing.
 Workers see only assigned GPUs: a single physical GPU becomes local `cuda:0`.
 Each worker has its own process group for scoped termination.
+
+Status, supervision or cache-cleanup errors stop new launches, request shutdown
+of the remaining workers and make the run exit nonzero. Finalization steps are
+attempted independently: a status-write error must not skip cache cleanup, and
+neither error strands the internal GPU reservation after confirmed termination.
+If termination cannot be confirmed, caches and worker records are retained;
+if status recording fails, diagnostic worker files are retained.
+
+The main wait also checks for stuck supervisor I/O. An operation stalled longer
+than `max(30, termination_grace_seconds)` requests shutdown. Shutdown has a shared
+deadline of `grace + max(30, grace) + 10` seconds (130 seconds at the default).
+If control threads remain blocked, the runner attempts SIGKILL on owned groups
+and exits without waiting for file cleanup. This bounds the runtime supervisor
+wait, not startup I/O or kernel-stuck processes. Inspect retained PIDs/logs/cache
+before resuming after an infrastructure failure; unconfirmed cleanup is never
+reported as successful.
 
 - `heartbeat_timeout_seconds` detects stopped heartbeats.
 - `stage_timeout_seconds` limits load/analyze/save stages even while heartbeats
@@ -392,7 +416,8 @@ Each worker has its own process group for scoped termination.
   is preserved in `logs/coverage/`.
 
 Runner-managed worker logs, heartbeats and per-worker HF caches are removed on
-completion, failure or termination. Copy any needed diagnostic logs before cleanup.
+ordinary completion, failure or confirmed termination, with the error-path
+exceptions above. Copy any needed diagnostic logs before cleanup.
 Cache removal is deliberate: checkpoint storage previously grew without bound,
 even over a few models. Re-downloading can be an acceptable tradeoff on this
 shared HPC server. GPU availability checks, runtime signals, scoped shutdown
@@ -423,6 +448,54 @@ merging and FP4 partial coverage; they do not validate heterogeneous model
 quality or full quantized support. GPTQ still needs a healthy checkpoint and a
 consistent backend environment. One-off reports/checkpoint caches are disposable;
 keep production data under `analysis_runs/phase2/`.
+
+### Bounded pilot, 2026-09-14
+
+`analysis_runs/validation/trained_pilot_20260914/` holds the pinned `models.csv`,
+`pilot_report.json`, ordinary CSV/HDF5 outputs and reference checks. This was a
+coverage/operability check: 18 trained checkpoints plus two adapter/quantization
+controls, not a population sample. The current 15k curated input is heavily
+LLM/adapter-oriented; this pilot deliberately also includes encoders and vision.
+
+- **16 valid pairs:** 1,296 measurements, 757,362 full-spectrum eigenvalues,
+  6.22 MiB of CSV/HDF5. One missing fit remains explicitly stored. All measured
+  weights have registered-tensor links; deliberate skips remain (including the
+  default Linear aspect-ratio filter and DeiT token/position parameters).
+- **Four non-completions:** `prajjwal1/bert-tiny` lacks `model_type`;
+  `albert/albert-base-v2` has pooler weights omitted by its declared loader;
+  `microsoft/deberta-v3-xsmall` needs architecture inspection but has only `.bin`
+  weights; `casperhansen/opt-125m-awq` is blocked by the backend preflight.
+  All successful cases used model analysis; this pilot did not trigger automatic
+  checkpoint fallback or establish quantized coverage.
+- **Numerics:** four well-conditioned GPU controls passed the independent
+  SciPy float64 reference; sensitivity controls retain rank/filter/cutoff flags.
+  Six selected saved MiniLM/ResNet spectra matched pinned float32 weights with
+  maximum error below 2e-7 times the reference largest eigenvalue. Convolution
+  checks use the documented pooled kernel slices, not the complete operator.
+- **Recovery:** drain preserved an active model's successful output. SIGTERM
+  exposed a runner exit before supervisor cleanup; this was fixed and repeated
+  successfully. The interrupted model then completed on resume, and prior
+  CSV/HDF5 hashes stayed unchanged. Changed-precision compatibility checks
+  rejected all 16 completed pairs without modifying them.
+- **Cost/access:** one worker, `load_dtype=auto`, float32 SVD, CPU math threads=1,
+  L40 GPUs 5 then 4 after other jobs occupied 5. The final resume took 765 seconds,
+  with about 245 sampled worker seconds; the remainder includes startup,
+  preflight, availability checks, dispatch and cleanup, not just avoidable idle time.
+  Sampled peaks were 1.95 GiB process-tree RSS, 1.77 GiB GPU memory and 1.24 GiB
+  cache. RSS can double-count shared mappings; cache bytes are not bytes transferred.
+  Worker caches returned to zero after the fixed runs. The summary rebuilt in
+  0.37 seconds; selected-spectrum reads had a 1.5 ms median. These small, warm
+  filesystem reads and checkpoints do not establish 50k-model costs.
+
+`auto` used float16 for Pythia/OPT and the merged adapter, bfloat16 for SmolLM2,
+and float32 elsewhere. These are observed loaded dtypes, not a claim that every
+stored checkpoint tensor retained its original precision. The independent
+trained-weight comparisons above cover the six selected float32 weights only.
+
+That pilot's shutdown fix passed 794 offline tests. The subsequent runtime audit
+adds focused failure-path checks for status writes, cache cleanup, process
+ownership and bounded shutdown. Numerical/loading policies and ephemeral caches
+are unchanged. Predictive validity and broader coverage remain open.
 
 ## Roadmap: a heterogeneous model-spectra dataset
 
@@ -576,7 +649,7 @@ stage timeouts bound elapsed stage time, not per-layer progress. Calibrate them 
 work before changing termination policy. Existing recovery/timeout controls are
 covered by offline tests; workload costs still need pilot measurements.
 
-### 2. Then: a small stratified trained-checkpoint pilot
+### 2. Bounded trained-checkpoint pilots
 
 Use roughly 20–30 pinned public checkpoints spanning encoders, decoders,
 encoder-decoder models, CNNs and supported adapters. Select against the intended
@@ -591,6 +664,18 @@ outputs, cache reuse and selective result queries. Distinguish active work from
 queue/download/startup delays, and record manual intervention needed to complete
 the workflow. Use these results to accept or reject the efficiency and usability
 hypotheses above. A finite alpha alone is not a successful scientific validation.
+
+The first 20-entry coverage pass and follow-up runtime hardening are recorded above.
+Before another batch, the
+next small workflow step is an outcome view joining selected pins with successful,
+failed and preflight-blocked results. Reuse the existing summary/terminal records;
+do not introduce a database service. Then address the demonstrated encoder gaps:
+safe legacy-checkpoint inspection and preserving ALBERT's extra stored weights,
+without guessing architectures or weakening loading integrity. Reconsider automatic
+fallback eligibility only with those concrete cases and distinct measurement scope.
+Keep GPU checks and ephemeral caches; measure representative larger checkpoints
+before optimizing the small-model startup/dispatch costs. Also audit the curated
+input's single-character `Architecture` values before using them for stratification.
 
 ### 3. After that: cost and coverage gates for staged scale-up
 

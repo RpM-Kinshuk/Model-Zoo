@@ -355,6 +355,12 @@ def parse_args():
         parser.error(str(exc))
     if args.analysis_source == "checkpoint" and args.num_gpus_per_job != 1:
         parser.error("Checkpoint mode uses one device per worker; use --num_gpus_per_job 1")
+    if any(gpu < 0 for gpu in args.gpus) or len(set(args.gpus)) != len(args.gpus):
+        parser.error("--gpus must contain distinct nonnegative indices")
+    if not 1 <= args.num_gpus_per_job <= len(args.gpus):
+        parser.error("--num_gpus_per_job must be between 1 and the number of selected GPUs")
+    if args.max_check < 1 or args.gpu_memory_threshold < 1:
+        parser.error("--max_check and --gpu_memory_threshold must be >= 1")
     if args.max_concurrent_jobs is not None and args.max_concurrent_jobs < 1:
         parser.error("--max_concurrent_jobs must be >= 1")
     if args.heartbeat_timeout_seconds < 0:
@@ -728,12 +734,9 @@ def create_runtime_config(args, config_path):
         "stage_timeout_seconds": getattr(args, "stage_timeout_seconds", {}),
         "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
     }
-    try:
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        print(f"Initialized runtime config at: {config_path}")
-    except Exception as e:
-        print(f"Warning: Could not create config file: {e}")
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"Initialized runtime config at: {config_path}")
 
 
 def main():
@@ -770,7 +773,10 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     config_path = str(output_dir / "gpu_config.json")
-    create_runtime_config(args, config_path)
+    try:
+        create_runtime_config(args, config_path)
+    except OSError as exc:
+        raise SystemExit(f"Cannot write GPU configuration; no workers started: {exc}") from exc
     
     # Setup logger
     logger = get_logger(str(log_dir), "esd_experiment.log")
@@ -819,6 +825,8 @@ def main():
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
         logger.info(f"Failed: {outcomes.failure_count} models")
         logger.info(f"Results saved to: {output_dir}")
+        if dispatcher.shutdown_event.is_set():
+            raise SystemExit(1)
         return
     
     logger.info(f"Will process {len(model_df)} models")
@@ -844,8 +852,14 @@ def main():
     
     # Start and wait for completion
     dispatch_thread.start()
-    while dispatch_thread.is_alive():
-        dispatch_thread.join(timeout=0.5)
+    dispatch_thread.wait_for_completion()
+
+    if dispatcher.error:
+        logger.error(f"Experiment stopped: {dispatcher.error}. Inspect retained logs/cache before resuming.")
+        raise SystemExit(1)
+    if dispatcher.shutdown_event.is_set():
+        logger.info("Experiment interrupted; worker cleanup finished. Resume with the same pinned input and settings.")
+        raise SystemExit(1)
     
     logger.info("=" * 80)
     logger.info("Experiment completed!")
