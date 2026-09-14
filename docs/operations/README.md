@@ -11,8 +11,9 @@ This is the primary human entrypoint for Model-Zoo operations across phases 1 an
 - `phase-contract.md` for the phase ownership split and canonical file contract.
 - `curation.md` for the phase 1 curated outputs.
 - [Analysis](analysis.md) for phase-2 commands, measurements, storage and supervision.
-- [Next coverage work](analysis.md#next-architecture-coverage-and-fallbacks) for the
-  planned checkpoint inspection, architecture selection and family-validation steps.
+- [Dataset roadmap](analysis.md#roadmap-a-heterogeneous-model-spectra-dataset) for
+  the original goal, human-first design and removal directives, coverage,
+  usability, storage/worker efficiency hypotheses and pilot/scale-up gates.
 
 ## Canonical Locations
 

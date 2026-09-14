@@ -100,14 +100,15 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **6**, loader **4**, HDF5 format **2.0**.
+Current output versions are numerics **6**, loader **6**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
-Numerics 6 removes heuristic QKV splitting; loader 4 pins implicit adapter-config
-probes as well as explicit loads. Older outputs need a fresh run. Incompatible/incomplete
+Numerics 6 removes heuristic QKV splitting; loader 6 extends checkpoint-shape
+selection to the tested encoder families, retaining pinned adapter probes. Older outputs
+need a fresh run. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
 models' previous outputs before loading. `summary.csv` alone is not completion.
@@ -151,6 +152,23 @@ architecture. Metadata loader scenarios are routing hints, not model identity.
 Missing/mismatched weights, loading errors, unexplained extra keys and ambiguous
 architecture declarations fail before analysis. Only the exact historical GPT2
 `masked_bias` buffers are permitted as extra keys, and remain recorded.
+
+Ordinary BERT, RoBERTa, DistilBERT, ALBERT and DeBERTa (v1/v2) checkpoints without
+`architectures` can be selected automatically from their complete safetensors
+key/shape layout, including shards and omitted tied
+aliases. Candidate built-in classes are constructed on the meta device, without
+allocating their weights. The decoder config distinguishes masked from causal LM;
+multiple matches (for example some one-output classification/multiple-choice
+heads) fail explicitly. Declared architectures are never silently replaced.
+The inspection uses the pinned HF download/cache path and loads only headers
+into RAM; uncached weight files are still downloaded once in the load stage.
+Selection evidence and actual input/output embedding tying are recorded in loading
+provenance. Other families, legacy-only files, custom and quantized missing-metadata
+cases are not covered by this new inference path. No architecture override exists yet.
+Families without a supported causal-LM class are not inferred as decoders. Task
+constraints are checked before trying a candidate structure, so a span-QA class
+requiring two outputs cannot block a valid multiclass classifier. ALBERT's shared
+modules are measured as stored, not repeated to manufacture logical depth.
 
 Ordinary/RSLoRA matrix adapters are checked for exact configured keys, shapes,
 finite values and correct loading after recorded dtype conversion; merging uses
@@ -257,59 +275,157 @@ quality or full quantized support. GPTQ still needs a healthy checkpoint and a
 consistent backend environment. One-off reports/checkpoint caches are disposable;
 keep production data under `analysis_runs/phase2/`.
 
-## Next: architecture coverage and fallbacks
+## Roadmap: a heterogeneous model-spectra dataset
 
-Planned work, not current guarantees. BERT and other common encoder families are
-core coverage for the heterogeneous dataset, not optional exceptions. Prioritize
-this before further scale-up; no 50k-model run is authorized.
+The original goal is an efficient, robust dataset/database of roughly 50,000
+HF-metadata-sourced models, preserving ESD analyses and eigenvalues across many
+model types. Trustworthy numbers must stay attached to the correct checkpoint
+and weight under recorded conventions. Model loading serves that measurement
+goal; providing task inference is not itself a requirement.
 
-Keep the existing loader/worker flow, pinned inputs, strict weight checks and
-canonical storage. Use small readable helpers and existing provenance/coverage
-records, not a separate scouting service, plugin registry or new report format.
+First principle: keep this human-readable, usable and maintainable from the
+start, down to commands, variable names and errors. Prefer small helpers, plain
+names and one clear way to do each job. The existing loader/worker, cache,
+HDF5/CSV writer and summary reader are starting points, not permanent requirements.
+For each change, consider keeping, simplifying, merging, replacing or removing
+what exists before adding another mechanism. Redundant code, artifacts, docs and
+obsolete workflows can go; branch history need not become a compatibility burden.
+Check consumers and distinguish disposable outputs from source data and useful
+research results before removal. Preserve the local run-script changes. No
+50k-model run is authorized.
 
-- [ ] **Inspect the checkpoint before choosing a fallback.** Start with pinned
-  config and declared architecture. When metadata is missing or inconsistent,
-  inspect checkpoint tensor names, shapes and dtypes, including all shards.
-  Prefer safetensors headers and the existing HF cache; bound metadata requests,
-  header sizes and retries. For supported legacy state dictionaries, investigate
-  restricted, metadata-only PyTorch inspection; never enable unrestricted pickle
-  loading or remote code just to improve coverage. Keep preparation metadata-only;
-  any necessary weight download belongs to the existing bounded loading stage.
-- [ ] **Select a supported class using evidence.** Use installed Transformers
-  config/class mappings to narrow candidates, starting with the pilot's missing-
-  metadata BERT checkpoint. Account for backbone and task-head weights, shapes,
-  documented key conversions, tied weights and buffers without loading multiple
-  full models. Do not default every unknown family to causal LM or repeatedly
-  try classes until one loads. Key/shape agreement alone cannot recover forward
-  semantics: ambiguous matches or contradictory declarations need a clear
-  diagnostic and, where appropriate, one explicit recorded architecture override.
-  Do not silently replace a declared architecture or discard a trained head.
-- [ ] **Check the loaded model against that evidence.** Preserve the existing
-  loading-integrity gate; inspect named modules, parameters and relevant buffers
-  to account for checkpoint weights and shared aliases. Record the chosen class,
-  selection reason and any override in existing provenance. Use existing coverage
-  records for analyzed/unsupported weights and reasons. A successful load and a
-  complete ESD analysis remain separate outcomes; inspecting only the loaded model
-  cannot reveal checkpoint weights already discarded by loading.
-- [ ] **Verify common architectures, then broaden the same path.** Cover BERT
-  base, pretraining, masked-LM, classification and QA heads; missing/wrong metadata;
-  incomplete checkpoints; tied weights; sharded files; and ambiguous matches.
-  Run a bounded public-checkpoint pilot across BERT, RoBERTa, DistilBERT, ALBERT
-  and DeBERTa, retaining decoder, encoder-decoder and CNN regression controls.
-  Quantized, custom-code and composite repositories need explicit separate
-  coverage evidence, not success inferred from their backbone alone.
+### Already in place
 
-Acceptance: the original BERT pilot preserves its trained weights and completes
-ESD/storage; the family controls select the intended classes; malformed and
-ambiguous controls still fail clearly. Check artifact alignment and skipped
-weight accounting, not merely finite fits. Report coverage by family and bound
-extra loading time/memory. Any override must participate in resume compatibility;
-changes to loading policy require a loader-version bump and fresh pilot outputs.
+Corrected numerics, full-spectrum storage, canonical identities, missing-fit and
+module-coverage records, pinned model/base revisions and version-aware resume.
+Checkpoint-shape selection covers the six encoder model types above. Offline
+controls exercise standard heads, shards, shared weights, malformed checkpoints
+and ambiguous layouts. Small public CPU checks verified preserved checkpoint
+tensors and saved spectra; missing-metadata inference was tested separately with
+local safetensors. These are implementation checks, not research validation.
 
-Then finish the corrected CPU/GPU pilot on an idle authorized GPU (3–7), followed
-by the broader stratified measurement/coverage pilot. Aspect-ratio correction and
-predictive validation remain separate research questions; loader success does
-not establish either.
+### 1. Now: small correctness and operability steps
+
+Architecture fallback and weight usage remain the next implementation slice.
+Alongside it, inspect the broader workflow below so the roadmap does not become
+only a loader project. These are hypotheses to check, not diagnosed faults or
+commitments to build every proposed feature. Prioritize demonstrated risks to
+measurement identity, data durability and recovery, then measured cost and human
+effort. Each slice should have a concrete check and a small, understandable diff.
+
+#### Architecture fallback and weight usage
+
+- [ ] **Map the remaining fallback cases.** Separate missing/contradictory
+  architecture metadata, unsupported classes, backend failures and resource
+  limits. Preserve declared classes when consistent. Use pinned config and
+  checkpoint keys/shapes to narrow supported alternatives, without repeatedly
+  loading full models. Add one recorded architecture override only where needed
+  for ambiguity; an override must still pass weight-integrity checks. Backend
+  recovery must not silently change architecture, precision, base or revision.
+- [ ] **Account for checkpoint-to-measurement usage.** Compare checkpoint contents
+  with loaded named modules, parameters, relevant buffers and shared aliases, then
+  with the tensors actually passed to ESD and the saved records. Each in-scope
+  weight must be accounted for as measured, shared with an identified measurement,
+  deliberately skipped with a reason, or unresolved. Distinguish non-weight
+  buffers and non-matrix parameters from missing analyzable weights. Preserve task
+  heads and full names; do not confuse physical shared modules with execution
+  depth. Inspecting only the loaded model cannot expose weights already discarded
+  or newly initialized during loading.
+- [ ] **Decide when direct weight analysis is appropriate.** If instantiation
+  fails, evaluate using verified ordinary dense checkpoint tensors directly.
+  Do not salvage an unchecked partially loaded model or guess packed/quantized
+  layouts from shapes. A tensor-only route, if justified, must be explicitly
+  labelled in provenance and reuse the existing estimator/writer; it is not a
+  claim that the full model loaded or its architecture was recovered. Define its
+  eligibility, alias handling and partial-coverage rules before implementation.
+  Keep the strict gate for the existing model-loading route.
+- [ ] **Verify these paths with bounded controls.** Reuse current regression
+  fixtures; add cases for each new fallback and for dropped/new weights, heads,
+  shared aliases, unsupported layouts and partial coverage. Keep declared and
+  inferred loading, and any future tensor-only measurements, distinguishable in
+  summaries and resume checks. Only claimed-supported tensors should reach ESD.
+
+Acceptance before the next pilot: supported cases produce correctly identified
+measurements, uncertain cases remain explicit, and no fallback silently changes
+the measured object. Record the selection reason, analysis source and coverage
+in existing outputs. Verify time/memory bounds and failure/resume behavior; bump
+the relevant policy version when behavior changes. Universal architecture support
+is not required to proceed, but known gaps must be visible and scoped.
+
+#### Workflow, storage and efficiency hypotheses
+
+- [ ] **Human workflow and cleanup.** Walk through preparing a small input,
+  launching it, checking progress, understanding a failure, resuming and reading
+  one spectrum. Identify confusing defaults, repeated configuration, stale docs,
+  redundant scripts and outputs. Consolidate or remove where that makes this
+  path clearer; keep one primary operating guide. Check that errors explain what
+  happened and what the operator can do next. New abstractions must earn their
+  complexity, just as existing ones must earn their place.
+- [ ] **Database and result access.** Test the existing summary index and HDF5
+  reader against actual research questions: find models by metadata and coverage,
+  compare compatible runs, join canonical layer records, and fetch selected
+  spectra without reading every array. Check checkpoint/revision/measurement
+  identity, duplicate handling, partial writes and rebuilding derived indexes.
+  Separate authoritative measurements from replaceable summaries. Measure query
+  time and storage at representative sizes before choosing whether to keep,
+  simplify or replace the current layout; a new database service is not assumed.
+- [ ] **Input preparation and loading.** Follow HF metadata through selection,
+  pinned inputs, downloads, cache use and loading. Check malformed/duplicate rows,
+  unavailable checkpoints, transient failures, shared adapter bases and cache
+  reuse. Measure download/startup time, bytes transferred and peak host memory.
+  Investigate whether per-worker isolation and cleanup cause costly repeated
+  downloads; balance reuse with safe concurrency, disk bounds and reproducibility.
+  Do not add retries or prefetching without evidence and explicit bounds.
+- [ ] **Workers, timeouts and recovery.** Exercise a failed launch, stalled
+  download, slow-but-progressing analysis, worker exit/OOM and interrupted run.
+  Check that stage and heartbeat limits distinguish these cases, release owned
+  processes/resources, preserve completed outputs and leave a clear terminal
+  record. Verify resume does not accept incomplete data or lose failures. Look
+  for overlapping supervision/state mechanisms that can be merged or removed;
+  avoid another watchdog merely to compensate for an unclear existing one.
+- [ ] **Scheduling and idle time.** Separate lack of eligible GPU capacity from
+  download, CPU/SVD, startup and dispatch delays. Measure queue/stage times,
+  useful completed spectra per wall time, wasted work and resource peaks. Only
+  then assess polling intervals, concurrency, placement or overlapping work.
+  High GPU utilization alone is not success, and an idle wait imposed by resource
+  ownership or safety is not automatically waste.
+
+Start with a bounded workflow audit using existing commands, summaries, logs and
+small failure controls. Add only measurements needed to answer an open question.
+For each finding, record the evidence, smallest useful change (including deletion
+or no change), and how to verify it. Fix critical demonstrated gaps before the
+pilot; let the pilot resolve workload-dependent questions. This is not a mandate
+for a scheduler rewrite, a new monitoring stack or a separate database layer.
+
+### 2. Then: a small stratified trained-checkpoint pilot
+
+Use roughly 20–30 pinned public checkpoints spanning encoders, decoders,
+encoder-decoder models, CNNs and supported adapters. Select against the intended
+HF metadata population, including different sizes and known loading challenges;
+keep quantized/custom/composite coverage explicit. Finish corrected GPU checks
+on an idle authorized device (3–7), with representative CPU/float64 comparisons.
+
+Use the existing summaries and terminal records to measure completion, loaded
+weight usage, skipped weights and missing fits by family, plus runtime, peak
+memory and spectrum-storage size. Exercise interruption/resume and incompatible
+outputs, cache reuse and selective result queries. Distinguish active work from
+queue/download/startup delays, and record manual intervention needed to complete
+the workflow. Use these results to accept or reject the efficiency and usability
+hypotheses above. A finite alpha alone is not a successful scientific validation.
+
+### 3. After that: cost and coverage gates for staged scale-up
+
+Use pilot measurements and the target metadata distribution to estimate storage
+and compute, with uncertainty for larger/untested models. Identify family-level
+missingness and expensive failure patterns. Fix observed critical problems, then
+check that the operating/query path remains simple and retire superseded paths
+and disposable pilot artifacts when no longer useful. Seek approval for the next
+bounded batch. Keep pinned inputs and consistent
+measurement versions; do not grow concurrency or launch 50k models implicitly.
+
+Predictive validity, alternative-distribution comparisons and aspect-ratio
+correction remain separate research questions. None follows merely from a
+working loader, matching formulas or a completed dataset run.
 
 Inspection references: [safetensors metadata](https://huggingface.co/docs/safetensors/metadata_parsing)
 supports reading tensor descriptions without full weight downloads;

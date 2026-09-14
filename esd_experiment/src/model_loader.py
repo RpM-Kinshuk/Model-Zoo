@@ -3,6 +3,7 @@ Robust model loader with PEFT adapter support.
 Heavily inspired by calculate_adapters.py and run_metric.py patterns.
 """
 import importlib
+import copy
 import hashlib
 import json
 import os
@@ -127,12 +128,14 @@ def _json_safe_loading_value(value):
     return str(value)
 
 
-def _load_checkpoint_checked(model_cls, repo_id: str, **kwargs):
+def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=None, **kwargs):
     """Never measure parameters silently initialized or discarded during loading.
 
     Keep ``hf_from_pretrained``'s public return convention unchanged; only
     production loads require and validate Transformers' loading report.
     """
+    if architecture_selection is not None and architecture_selection["method"] == "checkpoint_shapes":
+        kwargs["use_safetensors"] = True  # Load the format we actually inspected.
     loaded = hf_from_pretrained(model_cls, repo_id, output_loading_info=True, **kwargs)
     if not isinstance(loaded, tuple) or len(loaded) != 2 or not isinstance(loaded[1], dict):
         raise LoaderFailure("load", "checkpoint_loading_info_missing", "Loader did not return a checkpoint loading report")
@@ -172,22 +175,31 @@ def _load_checkpoint_checked(model_cls, repo_id: str, **kwargs):
         "allowed_unexpected_keys": allowed_unexpected,
         "validated": True,
     }
+    if architecture_selection is not None:
+        model._model_zoo_loading_info["architecture_selection"] = architecture_selection
+        if architecture_selection["method"] == "checkpoint_shapes":
+            input_embeddings, output_embeddings = model.get_input_embeddings(), model.get_output_embeddings()
+            if input_embeddings is not None and output_embeddings is not None:
+                model._model_zoo_loading_info["input_output_embeddings_tied"] = (
+                    input_embeddings.weight is output_embeddings.weight
+                )
     return model
 
 
-def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None):
+def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None, *, config=None):
     """Prefer the checkpoint's built-in architecture over a task-name guess.
 
     Looking up an installed Transformers class does not evaluate checkpoint
     code. Unknown/custom architectures keep their existing AutoModel route,
     whose loaded weights must still pass the integrity check.
     """
-    try:
-        config = AutoConfig.from_pretrained(
-            repo_id, token=get_hf_token(), revision=revision, trust_remote_code=False,
-        )
-    except Exception:
-        return None
+    if config is None:
+        try:
+            config = AutoConfig.from_pretrained(
+                repo_id, token=get_hf_token(), revision=revision, trust_remote_code=False,
+            )
+        except Exception:
+            return None
     candidates = []
     for name in getattr(config, "architectures", None) or []:
         if not isinstance(name, str) or not name.isidentifier():
@@ -216,6 +228,134 @@ def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None)
             "Checkpoint declares multiple supported architectures; refusing to choose a different set of weights",
         )
     return candidates[0] if candidates else None
+
+
+def _checkpoint_tensor_shapes(repo_id, revision):
+    """Read safetensors headers, using the same pinned files/cache as loading.
+
+    Missing-metadata encoder inspection currently requires safetensors. Downloads
+    happen once in the worker's bounded load stage; tensor data is not loaded
+    into RAM here. Never fall back to unrestricted pickle deserialization.
+    """
+    from safetensors import safe_open
+    from transformers.utils.hub import cached_file
+
+    if not Path(repo_id).is_dir() and not is_commit_sha(revision):
+        raise LoaderFailure("load", "checkpoint_inspection_failed", "Checkpoint inspection requires a pinned revision")
+
+    def resolve(filename):
+        return cached_file(
+            repo_id, filename, revision=revision, token=get_hf_token(),
+            _raise_exceptions_for_missing_entries=False,
+        )
+
+    try:
+        single = resolve("model.safetensors")
+        weight_map = None
+        if single:
+            files = {"model.safetensors": single}
+        else:
+            index = resolve("model.safetensors.index.json")
+            if not index:
+                raise ValueError("Missing-architecture inspection requires safetensors weights")
+            if Path(index).stat().st_size > 8 * 1024 * 1024:
+                raise ValueError("Safetensors index exceeds the 8 MiB inspection limit")
+            with open(index) as handle:
+                weight_map = json.load(handle).get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError("Missing or empty safetensors weight_map")
+            filenames = set(weight_map.values())
+            if len(filenames) > 256 or any(
+                not isinstance(name, str) or not re.fullmatch(r"[\w.-]+\.safetensors", name)
+                for name in filenames
+            ):
+                raise ValueError("Unsupported shard names or more than 256 shards")
+            files = {name: resolve(name) for name in sorted(filenames)}
+        shapes, dtypes = {}, set()
+        for filename, path in files.items():
+            if not path:
+                raise ValueError(f"Missing checkpoint shard: {filename}")
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                for name in handle.keys():
+                    if name in shapes or (weight_map is not None and weight_map.get(name) != filename):
+                        raise ValueError(f"Duplicate or incorrectly indexed tensor: {name}")
+                    tensor = handle.get_slice(name)
+                    shapes[name] = tuple(tensor.get_shape())
+                    dtypes.add(tensor.get_dtype())
+        if weight_map is not None and shapes.keys() != weight_map.keys():
+            raise ValueError("Safetensors index and shard tensors do not match")
+        return shapes, {"files": sorted(files), "tensor_count": len(shapes), "dtypes": sorted(dtypes)}
+    except Exception as exc:
+        raise LoaderFailure("load", "checkpoint_inspection_failed", str(exc)) from exc
+
+
+def _matching_encoder_classes(config, shapes):
+    """Compare complete state layouts on meta, including tied tensor aliases."""
+    is_decoder = getattr(config, "is_decoder", False)
+    if is_decoder and type(config) not in transformers.AutoModelForCausalLM._model_mapping:
+        return []  # No supported decoder interpretation for this family.
+    auto_classes = [
+        AutoModel,
+        transformers.AutoModelForCausalLM if is_decoder else transformers.AutoModelForMaskedLM,
+        transformers.AutoModelForSequenceClassification, transformers.AutoModelForTokenClassification,
+        transformers.AutoModelForQuestionAnswering, transformers.AutoModelForMultipleChoice,
+        transformers.AutoModelForNextSentencePrediction,
+    ]
+    if not is_decoder:
+        # Some families map pretraining to masked LM. That must not introduce
+        # a masked-LM candidate when the config explicitly requests a decoder.
+        auto_classes.append(transformers.AutoModelForPreTraining)
+    candidates = dict.fromkeys(
+        auto._model_mapping[type(config)] for auto in auto_classes
+        if type(config) in auto._model_mapping
+        # Span-QA requires start/end outputs. In particular DistilBERT refuses
+        # construction with another label count; that is not a failed classifier.
+        and (auto is not transformers.AutoModelForQuestionAnswering or config.num_labels == 2)
+    )
+    matches = []
+    for model_cls in candidates:
+        # No tensor storage, checkpoint code, forward pass or trial weight load.
+        with torch.device("meta"):
+            model = model_cls(copy.deepcopy(config))
+            model.tie_weights()
+        state = model.state_dict(keep_vars=True)
+        if any(name not in state or tuple(state[name].shape) != shape for name, shape in shapes.items()):
+            continue
+        # Safetensors may omit one name of a shared tensor, but not the entire
+        # group. Unrelated absent parameters never pass as tied weights.
+        present = {id(state[name]) for name in shapes}
+        if all(id(tensor) in present for tensor in state.values()):
+            matches.append(model_cls)
+    return matches
+
+
+def _checkpoint_model_cls(repo_id, revision=None):
+    """Declared architecture first; inspect supported unlabelled encoders."""
+    try:
+        config = AutoConfig.from_pretrained(
+            repo_id, token=get_hf_token(), revision=revision, trust_remote_code=False,
+        )
+    except Exception:
+        return None, None
+    declared = _declared_checkpoint_model_cls(repo_id, revision, config=config)
+    if declared is not None:
+        return declared, {"method": "declared_architecture", "model_class": declared.__name__}
+    family = getattr(config, "model_type", None)
+    if (family not in {"bert", "roberta", "distilbert", "albert", "deberta", "deberta-v2"}
+            or getattr(config, "architectures", None)
+            or getattr(config, "auto_map", None) or getattr(config, "quantization_config", None)
+            or getattr(config, "is_encoder_decoder", False)):
+        return None, None
+    shapes, inspection = _checkpoint_tensor_shapes(repo_id, revision)
+    matches = _matching_encoder_classes(config, shapes)
+    if len(matches) != 1:
+        names = ", ".join(model_cls.__name__ for model_cls in matches) or "none"
+        raise LoaderFailure(
+            "load", "ambiguous_checkpoint_architecture" if matches else "checkpoint_architecture_unresolved",
+            f"{family} checkpoint matches {names}; refusing to guess an architecture or discard weights",
+        )
+    selected = matches[0]
+    return selected, dict(inspection, method="checkpoint_shapes", model_class=selected.__name__)
 
 
 def ensure_optimum_gptq_backend_compat() -> None:
@@ -821,8 +961,10 @@ def load_and_merge_adapter(
         revision=revision,
     )
     auto_model_cls = _select_auto_model_cls(effective_loader)
+    architecture_selection = None
     if effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}:
-        auto_model_cls = _declared_checkpoint_model_cls(base_repo, base_revision) or auto_model_cls
+        selected, architecture_selection = _checkpoint_model_cls(base_repo, base_revision)
+        auto_model_cls = selected or auto_model_cls
 
     print(f"Loading base model: {base_repo}")
     if effective_loader in {"awq", "gguf"}:
@@ -843,6 +985,7 @@ def load_and_merge_adapter(
             torch_dtype=torch_dtype,
             revision=base_revision,
             trust_remote_code=trust_remote_code,
+            architecture_selection=architecture_selection,
         )
     except LoaderFailure:
         raise
@@ -965,9 +1108,11 @@ def load_model(
             revision=revision,
         )
         auto_model_cls = _select_auto_model_cls(effective_loader)
+        architecture_selection = None
         if (effective_loader in {"standard_causal", "seq2seq", "sequence_classification", "multimodal"}
                 and (loader_scenario or "").strip().lower() != "quantized_transformers_native"):
-            auto_model_cls = _declared_checkpoint_model_cls(repo_id, revision) or auto_model_cls
+            selected, architecture_selection = _checkpoint_model_cls(repo_id, revision)
+            auto_model_cls = selected or auto_model_cls
         if effective_loader == "gptq":
             ensure_optimum_gptq_backend_compat()
         load_kwargs: dict[str, Any] = {
@@ -986,11 +1131,14 @@ def load_model(
             model = _load_checkpoint_checked(
                 auto_model_cls,
                 repo_id,
+                architecture_selection=architecture_selection,
                 **load_kwargs,
             )
         except LoaderFailure:
             raise
         except Exception as exc:
+            if architecture_selection is not None:
+                raise  # A selected checkpoint architecture is not a task hint.
             fallback_loader = _fallback_loader_from_error(effective_loader, exc)
             if fallback_loader is not None and fallback_loader != effective_loader:
                 model = _load_checkpoint_checked(

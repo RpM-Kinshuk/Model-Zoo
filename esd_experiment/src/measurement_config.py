@@ -8,9 +8,9 @@ import re
 
 NUMERICS_VERSION = "6"
 FORMAT_VERSION = "2.0"
-# Loading policy is separate from the spectral formulas. Version 4 also pins
-# Transformers' implicit adapter-config probes to the requested model revision.
-LOADER_VERSION = "4"
+# Version 6 extends checkpoint-shape selection to the tested encoder families.
+# Loading policy is separate from the spectral formulas.
+LOADER_VERSION = "6"
 
 
 def is_commit_sha(value):

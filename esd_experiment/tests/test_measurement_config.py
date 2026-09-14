@@ -41,7 +41,7 @@ def test_current_configuration_and_extra_provenance_are_compatible(tmp_path):
     assert artifact_compatibility(csv_path, h5_path, expected) == (True, "compatible")
 
 
-@pytest.mark.parametrize("stored_version", [None, "1", "2", "3", "older"])
+@pytest.mark.parametrize("stored_version", [None, "1", "2", "3", "4", "5", "older"])
 def test_artifacts_before_loader_integrity_checks_cannot_resume(tmp_path, stored_version):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
     assert expected["loader_version"] == LOADER_VERSION
