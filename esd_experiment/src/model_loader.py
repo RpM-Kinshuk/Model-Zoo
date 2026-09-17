@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, PretrainedConfig
-from measurement_config import is_commit_sha
+from measurement_config import is_commit_sha, safe_filename
 try:
     from transformers import AutoModelForSeq2SeqLM
 except ImportError:  # pragma: no cover - depends on transformers version
@@ -1219,14 +1219,3 @@ def parse_model_string(model_str: str) -> Tuple[str, Optional[str]]:
         repo_id, revision = model_str.split("@", 1)
         return repo_id.strip(), revision.strip() or None
     return model_str, None
-
-
-def safe_filename(model_id: str) -> str:
-    """Convert model ID to safe filename."""
-    # Replace / with --
-    safe = model_id.replace("/", "--")
-    # Replace @ with __
-    safe = safe.replace("@", "__")
-    # Remove other problematic characters
-    safe = re.sub(r"[^\w\-\.]", "_", safe)
-    return safe

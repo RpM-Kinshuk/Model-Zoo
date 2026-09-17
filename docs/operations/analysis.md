@@ -127,17 +127,40 @@ python esd_experiment/analyze_results.py \
   --results_dir analysis_runs/phase2/my_run
 ```
 
-This writes `summary.csv`: one row per CSV/HDF5 pair, with artifact paths,
-measurement settings, fitted/missing measurement counts, module coverage and
-loaded-tensor usage counts, plus scalar summaries. It validates current
-artifacts and reads canonical `/layers` one model at a time; it does not load
-eigenvalues or use the derived `/alpha`
-view. Measurement counts are not model depth.
+This rebuilds `summary.csv` from `models.csv`, artifact pairs and
+`logs/terminal_status/*.json`. Use `--model_list path/to/pinned.csv` if your
+selected list lives elsewhere. Every selected model gets a row, even without
+outputs; extra stored models remain visible with `selected=False`. Original
+metadata is preserved as `input_*` columns for family/coverage queries.
+
+| `outcome` | Evidence |
+|---|---|
+| `success` | Valid CSV/HDF5 pair, matching the selected model/base pins when a list is supplied. Overrides stale failure records. |
+| `failed` | Last terminal record reports a worker failure. |
+| `blocked` | Recorded preflight block, or a preparation `pin_status=error` row. |
+| `incomplete` | Invalid/incompatible pair, or a success record without artifacts. |
+| `unrecorded` | No usable outcome for this selection; may be queued, running or never launched. |
+
+`outcome_reason`, `outcome_stage`, `outcome_message` and artifact/terminal paths
+explain the row. `outcome_pin_status=unknown` means the terminal record does not
+establish the selected checkpoint/base revisions; existing worker failure records
+have this limitation. A known terminal-pin mismatch stays `unrecorded`, not a
+failure of the selected checkpoint. New preflight blocks record both pins in the
+existing terminal directory; the reader never reruns environment-dependent checks.
+This is a snapshot of persisted evidence, not a live monitor or attempt history.
+
+Valid pairs retain measurement settings, fitted/missing measurement counts,
+module coverage, loaded-tensor usage counts and scalar summaries. The reader
+validates artifacts and reads canonical `/layers` one model at a time; it does
+not load eigenvalues or use the derived `/alpha` view. Measurement counts are
+not model depth.
 Alpha and other fit-derived summaries include only finite fitted `alpha > 1`;
 other metrics use their finite values across all measured rows.
 
 Incomplete or incompatible pairs remain as `artifact_status=invalid` rows with
-an `artifact_error`, and the command exits nonzero. Missing coverage is
+an `artifact_error`. Incomplete outputs or malformed terminal records make the
+command exit nonzero; ordinary recorded failures/blocks do not mean indexing
+failed. Missing coverage is
 `coverage_status=unknown`, never assumed complete. Mixed measurement settings
 produce a warning and suppress pooled metric statistics; filter by settings
 before comparing rows. Requested revisions and `model_config_commit_hash` are
@@ -153,10 +176,13 @@ coverage is complete. Inspect `unresolved_tensors`, `skipped_tensors` and
 but their absent inventory is `unknown`, not zero or complete. This additive
 report does not change loading, tensor selection or numerical conventions.
 
-The summary is an artifact index, not a ledger of every attempted model: failures
-that produced no pair remain in the runner's logs. The depth-only clustering
-dashboard accepts complete `/alpha` views and warns when skipping partial or
-unavailable views; arbitrary model structures remain accessible through `/layers`.
+Filter `selected` when computing coverage of your input list, and
+`outcome == "success"` before comparing measurements. The summary is replaceable;
+it does not affect resume or alter measurements/terminal records. Historical
+text-only failure logs are not reconstructed into checkpoint-specific outcomes.
+The depth-only clustering dashboard accepts complete `/alpha` views and warns
+when skipping partial or unavailable views; arbitrary model structures remain
+accessible through `/layers`.
 
 ## Loading and coverage
 
@@ -412,8 +438,8 @@ reported as successful.
   timeout windows are trusted.
 - `logs/current_state.json` records PID, PGID, assigned GPUs, stage and paths.
   `logs/failure_records.jsonl`, `logs/failed_models.txt` and
-  `logs/terminal_status/*.json` retain terminal results. Empty-analysis coverage
-  is preserved in `logs/coverage/`.
+  `logs/terminal_status/*.json` retain terminal results, including preflight
+  blocks. Empty-analysis coverage is preserved in `logs/coverage/`.
 
 Runner-managed worker logs, heartbeats and per-worker HF caches are removed on
 ordinary completion, failure or confirmed termination, with the error-path
@@ -666,10 +692,13 @@ the workflow. Use these results to accept or reject the efficiency and usability
 hypotheses above. A finite alpha alone is not a successful scientific validation.
 
 The first 20-entry coverage pass and follow-up runtime hardening are recorded above.
-Before another batch, the
-next small workflow step is an outcome view joining selected pins with successful,
-failed and preflight-blocked results. Reuse the existing summary/terminal records;
-do not introduce a database service. Then address the demonstrated encoder gaps:
+The existing summary now joins selected pins, artifacts and terminal outcomes.
+Rebuilding the pilot index gives 16 verified successes, three recorded failures
+with unknown terminal-pin provenance, and one unrecorded model: the AWQ preflight
+block was not saved per model at the time. Future blocks are recorded; do not
+rewrite historical evidence from today's backend availability.
+
+Next, address the demonstrated encoder gaps:
 safe legacy-checkpoint inspection and preserving ALBERT's extra stored weights,
 without guessing architectures or weakening loading integrity. Reconsider automatic
 fallback eligibility only with those concrete cases and distinct measurement scope.

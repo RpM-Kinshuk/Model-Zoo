@@ -24,6 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Tuple
 from tempfile import NamedTemporaryFile
 
@@ -36,6 +37,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
 
 from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, WorkerJob
+from gputracker.supervision import _write_json_atomic
 from model_preflight import classify_row_preflight
 from model_loader import get_hf_token, safe_filename
 from measurement_config import artifact_compatibility, is_commit_sha, measurement_config, validate_model_pin
@@ -144,7 +146,7 @@ def _terminal_failed_models(output_dir: Path) -> set[str]:
             if not isinstance(record, dict):
                 continue
             status = _normalize_text(record.get("status") or record.get("state") or record.get("outcome"))
-            if status in success_statuses or not status:
+            if status in success_statuses or status == "blocked" or not status:
                 continue
             model_id = _normalize_text(record.get("model_id")) or _decode_model_id_from_terminal_file(status_file)
             failed_models.add(model_id)
@@ -265,6 +267,23 @@ def apply_preflight(model_df: pd.DataFrame, analysis_source="auto") -> Tuple[pd.
             blocked_rows.append(annotated_row)
 
     return pd.DataFrame(runnable_rows), pd.DataFrame(blocked_rows)
+
+
+def record_preflight_blocks(blocked_df, output_dir):
+    """Keep per-model blocks beside worker outcomes; no worker was launched."""
+    for row in blocked_df.to_dict("records"):
+        model_id = _normalize_text(row["model_id"])
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "model_id": model_id, "status": "blocked", "stage": "preflight",
+            "reason": row["preflight_reason"],
+            "message": f"Preflight rejected loader {row['preflight_effective_loader']}",
+            "revision": _normalize_text(row.get("revision_norm")) or model_id.partition("@")[2],
+            "source_model": _normalize_text(row.get("source_model")),
+            "analysis_policy": row["analysis_source"],
+            "origin": "runner",
+        }
+        _write_json_atomic(output_dir / "logs" / "terminal_status" / f"{safe_filename(model_id)}.json", record)
 
 
 def parse_args():
@@ -803,6 +822,10 @@ def main():
     logger.info(f"Loaded {len(model_df)} models from CSV")
     
     model_df, blocked_df = apply_preflight(model_df, args.analysis_source)
+    try:
+        record_preflight_blocks(blocked_df, output_dir)
+    except OSError as exc:
+        raise SystemExit(f"Cannot record preflight outcomes; no workers started: {exc}") from exc
     if len(blocked_df) > 0:
         logger.info(f"Blocked by preflight: {len(blocked_df)} models")
         logger.info(

@@ -595,6 +595,19 @@ def test_apply_preflight_uses_loader_resolution_metadata_for_backend_status():
     assert blocked_df.iloc[0]["preflight_effective_loader"] == "awq"
 
 
+def test_preflight_blocks_are_recorded_with_pins_without_counting_as_worker_failures(tmp_path):
+    blocked = pd.DataFrame([dict(model_id="org/model", revision_norm="a" * 40, source_model="",
+                                analysis_source="auto", preflight_reason="unsupported_backend",
+                                preflight_effective_loader="awq")])
+    run_experiment.record_preflight_blocks(blocked, tmp_path)
+    path = tmp_path / "logs/terminal_status/org--model.json"
+    record = run_experiment.json.loads(path.read_text())
+    assert record["status"] == "blocked" and record["stage"] == "preflight"
+    assert record["revision"] == "a" * 40
+    assert record["reason"] == "unsupported_backend"
+    assert collect_run_outcomes(tmp_path).failure_count == 0
+
+
 def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"

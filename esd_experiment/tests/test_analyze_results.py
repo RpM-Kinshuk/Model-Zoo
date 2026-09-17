@@ -329,7 +329,8 @@ def test_main_indexes_valid_and_missing_pairs_and_can_be_rerun(tmp_path):
         assert isinstance(invalid["artifact_error"], str) and invalid["artifact_error"]
 
 
-@pytest.mark.parametrize("output", ["stats/org--model.csv", "metrics/index.csv", "summary.h5"])
+@pytest.mark.parametrize("output", ["stats/org--model.csv", "metrics/index.csv", "summary.h5",
+                                  "models.csv", "logs/summary.csv"])
 def test_output_cannot_overwrite_input_artifacts(tmp_path, output):
     csv_path, h5_path = write_pair(tmp_path)
     original = csv_path.read_bytes(), h5_path.read_bytes()
@@ -367,3 +368,84 @@ def test_mixed_measurement_warning_ignores_identity_differences(tmp_path, capsys
     messages = [str(warning.message).lower() for warning in recwarn]
     assert any("mixed" in message and "settings" in message for message in messages) is mixed
     assert ("Mean of model fitted-alpha means:" in captured.out) is not mixed
+
+
+def test_summary_joins_selected_models_with_artifacts_and_last_recorded_outcomes(tmp_path):
+    write_pair(tmp_path, "org--success", requested_revision="a" * 40)
+    write_pair(tmp_path, "org--extra", requested_revision="a" * 40)
+    models = [dict(model_id=f"org/{name}", revision_norm="a" * 40, family="encoder")
+              for name in ("success", "failed", "blocked", "unrecorded", "lost")]
+    models.append(dict(model_id="org/unpinned", pin_status="error", pin_error="revision unavailable"))
+    pd.DataFrame(models).fillna("").to_csv(tmp_path / "models.csv", index=False)
+    terminal_dir = tmp_path / "logs/terminal_status"
+    terminal_dir.mkdir(parents=True)
+    for name, status in (("success", "failed"), ("failed", "failed"), ("blocked", "blocked"), ("lost", "success")):
+        record = dict(model_id=f"org/{name}", status=status, reason="example", stage="load")
+        if name == "blocked":
+            record.update(revision="a" * 40, source_model="", stage="preflight")
+        (terminal_dir / f"org--{name}.json").write_text(json.dumps(record))
+
+    assert analyze_results.main(["--results_dir", str(tmp_path)]) == 1  # Lost output is incomplete.
+    summary = pd.read_csv(tmp_path / "summary.csv", keep_default_na=False).set_index("model_id")
+    assert summary["outcome"].to_dict() == {
+        "org/success": "success", "org/extra": "success", "org/failed": "failed",
+        "org/blocked": "blocked", "org/unrecorded": "unrecorded", "org/lost": "incomplete",
+        "org/unpinned": "blocked",
+    }
+    assert summary["selected"].sum() == 6
+    assert not summary.loc["org/extra", "selected"]
+    assert summary.loc["org/failed", "input_family"] == "encoder"
+    assert summary.loc["org/failed", "outcome_pin_status"] == "unknown"
+    assert summary.loc["org/failed", "analyzed_measurements"] == ""
+    assert summary.loc["org/blocked", "outcome_pin_status"] == "matched"
+    assert summary.loc["org/unpinned", "outcome_reason"] == "pin_error"
+    assert summary.loc["org/success", "outcome_pin_status"] == "matched"
+
+
+@pytest.mark.parametrize("evidence", ["artifact", "terminal"])
+@pytest.mark.parametrize("changed_pin", ["revision", "base"])
+def test_other_checkpoint_pins_do_not_count_as_selected_outcomes(tmp_path, evidence, changed_pin):
+    selected = dict(model_id="org/model", revision_norm="a" * 40, source_model="org/base@" + "b" * 40)
+    revision = "c" * 40 if changed_pin == "revision" else selected["revision_norm"]
+    source = "org/base@" + "d" * 40 if changed_pin == "base" else selected["source_model"]
+    if evidence == "artifact":
+        write_pair(tmp_path, requested_revision=revision, source_model=source)
+        with pytest.warns(UserWarning, match="measurement setting differs"):
+            row = analyze_results.summarize_outcome(tmp_path, "org--model", selected)
+        assert row["outcome"] == "incomplete"
+        assert row["artifact_status"] == "invalid"
+    else:
+        path = tmp_path / "logs/terminal_status/org--model.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(dict(model_id="org/model", status="failed", revision=revision, source_model=source)))
+        row = analyze_results.summarize_outcome(tmp_path, "org--model", selected)
+        assert row["outcome"] == "unrecorded"
+        assert row["outcome_pin_status"] == "mismatch"
+
+
+def test_status_only_run_exposes_corrupt_record_without_needing_artifact_directories(tmp_path):
+    path = tmp_path / "logs/terminal_status/org--model.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken")
+    assert analyze_results.main(["--results_dir", str(tmp_path)]) == 1
+    row = pd.read_csv(tmp_path / "summary.csv").iloc[0]
+    assert row["outcome"] == "unrecorded"
+    assert row["terminal_error"]
+    assert row["terminal_status_path"] == str(path)
+
+
+def test_external_model_list_is_checked_before_replacing_summary(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    models = tmp_path / "selected.csv"
+    models.write_text("model_id,revision_norm\norg/model," + "a" * 40 + "\n")
+    args = ["--results_dir", str(run_dir), "--model_list", str(models)]
+    assert analyze_results.main(args) == 0  # Preparation-only runs are useful too.
+    output = run_dir / "summary.csv"
+    original = output.read_bytes()
+    models.write_text(models.read_text() + "org/model," + "a" * 40 + "\n")
+    assert analyze_results.main(args) == 1
+    assert output.read_bytes() == original
+    original_models = models.read_bytes()
+    assert analyze_results.main(args + ["--output", str(models)]) == 1
+    assert models.read_bytes() == original_models

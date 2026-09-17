@@ -21,6 +21,11 @@ def is_commit_sha(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
 
 
+def safe_filename(model_id: str) -> str:
+    """Use the same model-to-artifact mapping in writers and offline readers."""
+    return re.sub(r"[^\w\-\.]", "_", model_id.replace("/", "--").replace("@", "__"))
+
+
 def validate_model_pin(model_id, revision="", source_model="", base_model_relation="", loader_scenario=""):
     """Require explicit HF revisions before dispatch or standalone loading."""
     from huggingface_hub.utils import validate_repo_id
