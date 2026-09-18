@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import zipfile
 import torch
 import transformers
 import warnings
@@ -135,7 +136,8 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
     production loads require and validate Transformers' loading report.
     """
     if architecture_selection is not None and architecture_selection["method"] == "checkpoint_shapes":
-        kwargs["use_safetensors"] = True  # Load the format we actually inspected.
+        kwargs["use_safetensors"] = architecture_selection["format"] == "safetensors"
+        kwargs["weights_only"] = True  # Load the format we inspected, never unrestricted pickle.
     loaded = hf_from_pretrained(model_cls, repo_id, output_loading_info=True, **kwargs)
     if not isinstance(loaded, tuple) or len(loaded) != 2 or not isinstance(loaded[1], dict):
         raise LoaderFailure("load", "checkpoint_loading_info_missing", "Loader did not return a checkpoint loading report")
@@ -156,6 +158,14 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
             allowed_unexpected.append(key)
         else:
             unexpected.append(key)
+    restored = []
+    if (type(model).__name__ == "AlbertForMaskedLM" and type(model).__module__.startswith("transformers.")
+            and set(unexpected) == {"albert.pooler.weight", "albert.pooler.bias"}
+            and not any(info[key] for key in ("missing_keys", "mismatched_keys", "error_msgs"))
+            and not info.get("conversion_errors")):
+        _restore_albert_pooler(model, repo_id, kwargs.get("revision"))
+        print("Restored ALBERT's stored pooler weight and bias for analysis.")
+        restored, unexpected = unexpected, []
     if (info["missing_keys"] or info["mismatched_keys"] or info["error_msgs"]
             or info.get("conversion_errors") or unexpected):
         problems = {
@@ -168,11 +178,23 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
             f"Checkpoint weights do not match {type(model).__name__}: "
             + "; ".join(f"{key}={value}" for key, value in problems.items() if value),
         )
+    verified_buffers = (architecture_selection or {}).get("position_id_buffers", [])
+    if verified_buffers:
+        # Transformers regenerates these nonpersistent buffers. Verify values,
+        # not only shapes, before accepting that regeneration as harmless.
+        index = checkpoint_tensor_index(repo_id, kwargs.get("revision"), allow_bin=True)
+        saved = _read_checkpoint_tensors(index, verified_buffers)
+        for name, tensor in saved.items():
+            buffer = model.get_buffer(name)
+            if tensor.dtype != buffer.dtype or not torch.equal(tensor, buffer.cpu()):
+                raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Stored position IDs differ: {name}")
     model._model_zoo_loading_info = {
         "model_class": type(model).__name__,
         "loader_class": model_cls.__name__,
         "loading_info": info,
         "allowed_unexpected_keys": allowed_unexpected,
+        "restored_checkpoint_keys": restored,
+        "verified_checkpoint_buffers": verified_buffers,
         "validated": True,
     }
     if architecture_selection is not None:
@@ -184,6 +206,47 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
                     input_embeddings.weight is output_embeddings.weight
                 )
     return model
+
+
+def _read_checkpoint_tensors(index, names):
+    """Read a few checked tensors; legacy .bin files may require one full shard."""
+    from safetensors import safe_open
+
+    values = {}
+    for filename in {index["tensors"][name]["file"] for name in names}:
+        selected = [name for name in names if index["tensors"][name]["file"] == filename]
+        path = index["files"][filename]
+        if index["format"] == "safetensors":
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                values.update({name: handle.get_tensor(name) for name in selected})
+        else:
+            state = torch.load(path, map_location="cpu", weights_only=True, mmap=zipfile.is_zipfile(path))
+            # Do not retain the full checkpoint through a view into its storage.
+            values.update({name: state[name].clone() for name in selected})
+            del state
+    return values
+
+
+def _restore_albert_pooler(model, repo_id, revision):
+    """Keep the exact stored pooler omitted by Transformers' ALBERT MLM class."""
+    index = checkpoint_tensor_index(repo_id, revision)  # Safetensors only for this recovery.
+    hidden = model.config.hidden_size
+    expected = {"albert.pooler.weight": (hidden, hidden), "albert.pooler.bias": (hidden,)}
+    reference = next(model.albert.encoder.parameters())
+    if model.albert.pooler is not None or reference.device.type == "meta":
+        raise LoaderFailure("load", "checkpoint_weight_mismatch", "Cannot restore ALBERT pooler on this model/device")
+    for name, shape in expected.items():
+        entry = index["tensors"].get(name)
+        if entry is None or entry["shape"] != shape or entry["dtype"] not in {"F16", "BF16", "F32", "F64"}:
+            raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Invalid stored ALBERT pooler: {name}")
+    values = {name.rsplit(".", 1)[1]: tensor.to(device=reference.device, dtype=reference.dtype)
+              for name, tensor in _read_checkpoint_tensors(index, expected).items()}
+    # Meta construction avoids random initialization or another full model load.
+    with torch.device("meta"):
+        pooler = torch.nn.Linear(hidden, hidden)
+    pooler.load_state_dict(values, strict=True, assign=True)
+    model.albert.pooler = pooler
+    model.albert.pooler_activation = torch.nn.Tanh()
 
 
 def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None, *, config=None):
@@ -230,12 +293,12 @@ def _declared_checkpoint_model_cls(repo_id: str, revision: Optional[str] = None,
     return candidates[0] if candidates else None
 
 
-def checkpoint_tensor_index(repo_id, revision):
-    """Read safetensors headers, using the same pinned files/cache as loading.
+def checkpoint_tensor_index(repo_id, revision, *, allow_bin=False):
+    """Inspect pinned checkpoint metadata without allocating weight storage.
 
-    Missing-metadata encoder inspection currently requires safetensors. Downloads
-    happen once in the worker's bounded load stage; tensor data is not loaded
-    into RAM here. Never fall back to unrestricted pickle deserialization.
+    Callers may inspect restricted PyTorch state dicts when safetensors
+    are absent. Never retry
+    with unrestricted pickle or add checkpoint-provided globals to an allowlist.
     """
     from safetensors import safe_open
     from transformers.utils.hub import cached_file
@@ -250,23 +313,30 @@ def checkpoint_tensor_index(repo_id, revision):
         )
 
     try:
-        single = resolve("model.safetensors")
+        formats = [("safetensors", "model.safetensors")]
+        if allow_bin:
+            formats.append(("pytorch", "pytorch_model.bin"))
+        for weight_format, filename in formats:
+            single = resolve(filename)
+            index = None if single else resolve(filename + ".index.json")
+            if single or index:
+                break
+        else:
+            raise ValueError("Checkpoint inspection requires safetensors" + (" or a restricted PyTorch state dict" if allow_bin else ""))
         weight_map = None
         if single:
-            files = {"model.safetensors": single}
+            files = {filename: single}
         else:
-            index = resolve("model.safetensors.index.json")
-            if not index:
-                raise ValueError("Checkpoint inspection requires safetensors weights (model.safetensors or its shard index)")
             if Path(index).stat().st_size > 8 * 1024 * 1024:
-                raise ValueError("Safetensors index exceeds the 8 MiB inspection limit")
+                raise ValueError("Checkpoint index exceeds the 8 MiB inspection limit")
             with open(index) as handle:
                 weight_map = json.load(handle).get("weight_map")
             if not isinstance(weight_map, dict) or not weight_map:
-                raise ValueError("Missing or empty safetensors weight_map")
+                raise ValueError("Missing or empty checkpoint weight_map")
             filenames = set(weight_map.values())
+            suffix = r"\.safetensors" if weight_format == "safetensors" else r"\.bin"
             if len(filenames) > 256 or any(
-                not isinstance(name, str) or not re.fullmatch(r"[\w.-]+\.safetensors", name)
+                not isinstance(name, str) or not re.fullmatch(r"[\w.-]+" + suffix, name)
                 for name in filenames
             ):
                 raise ValueError("Unsupported shard names or more than 256 shards")
@@ -275,28 +345,49 @@ def checkpoint_tensor_index(repo_id, revision):
         for filename, path in files.items():
             if not path:
                 raise ValueError(f"Missing checkpoint shard: {filename}")
-            with safe_open(path, framework="pt", device="cpu") as handle:
-                for name in handle.keys():
-                    if not name or "\x00" in name:
-                        raise ValueError("Checkpoint tensor names must be nonempty and contain no NUL characters")
-                    if name in tensors or (weight_map is not None and weight_map.get(name) != filename):
-                        raise ValueError(f"Duplicate or incorrectly indexed tensor: {name}")
-                    tensor = handle.get_slice(name)
-                    tensors[name] = {"shape": tuple(tensor.get_shape()),
-                                     "dtype": tensor.get_dtype(), "file": filename}
+            if weight_format == "safetensors":
+                with safe_open(path, framework="pt", device="cpu") as handle:
+                    entries = {name: {"shape": tuple(handle.get_slice(name).get_shape()),
+                                      "dtype": handle.get_slice(name).get_dtype()} for name in handle.keys()}
+            else:
+                from torch._subclasses.fake_tensor import FakeTensorMode
+                from transformers.utils.import_utils import check_torch_load_is_safe
+
+                check_torch_load_is_safe()  # Includes the upstream minimum patched-version check.
+                try:
+                    with FakeTensorMode():
+                        state = torch.load(path, map_location="cpu", weights_only=True)
+                except Exception as exc:
+                    raise ValueError("Restricted PyTorch inspection failed; provide safetensors or a plain tensor "
+                                     "state dict. No unrestricted loading was attempted.") from exc
+                if not isinstance(state, dict) or not state:
+                    raise ValueError("PyTorch checkpoint must be a nonempty plain tensor state dict")
+                entries = {}
+                for name, tensor in state.items():
+                    if not isinstance(tensor, torch.Tensor) or tensor.layout != torch.strided:
+                        raise ValueError(f"Unsupported PyTorch checkpoint entry: {name}")
+                    entries[name] = {"shape": tuple(tensor.shape), "dtype": str(tensor.dtype)}
+                del state
+            for name, entry in entries.items():
+                if not isinstance(name, str) or not name or "\x00" in name:
+                    raise ValueError("Checkpoint tensor names must be nonempty strings and contain no NUL characters")
+                if name in tensors or (weight_map is not None and weight_map.get(name) != filename):
+                    raise ValueError(f"Duplicate or incorrectly indexed tensor: {name}")
+                tensors[name] = dict(entry, file=filename)
         if weight_map is not None and tensors.keys() != weight_map.keys():
-            raise ValueError("Safetensors index and shard tensors do not match")
-        return {"files": files, "tensors": tensors}
+            raise ValueError("Checkpoint index and shard tensors do not match")
+        return {"files": files, "tensors": tensors, "format": weight_format}
     except Exception as exc:
         raise LoaderFailure("load", "checkpoint_inspection_failed", str(exc)) from exc
 
 
 def _checkpoint_tensor_shapes(repo_id, revision):
-    index = checkpoint_tensor_index(repo_id, revision)
+    index = checkpoint_tensor_index(repo_id, revision, allow_bin=True)
     tensors = index["tensors"]
     return {name: entry["shape"] for name, entry in tensors.items()}, {
-        "files": sorted(index["files"]), "tensor_count": len(tensors),
+        "files": sorted(index["files"]), "tensor_count": len(tensors), "format": index["format"],
         "dtypes": sorted({entry["dtype"] for entry in tensors.values()}),
+        "position_id_buffers": sorted(name for name in tensors if name.endswith(".position_ids")),
     }
 
 
@@ -330,11 +421,17 @@ def _matching_encoder_classes(config, shapes):
             model = model_cls(copy.deepcopy(config))
             model.tie_weights()
         state = model.state_dict(keep_vars=True)
-        if any(name not in state or tuple(state[name].shape) != shape for name, shape in shapes.items()):
+        # Older BERT files serialize position_ids; the same registered buffer
+        # is nonpersistent today. It is optional, not an unexplained parameter.
+        available = dict(state)
+        if type(config) is transformers.BertConfig:
+            available.update({name: tensor for name, tensor in model.named_buffers()
+                              if name.endswith(".position_ids")})
+        if any(name not in available or tuple(available[name].shape) != shape for name, shape in shapes.items()):
             continue
         # Safetensors may omit one name of a shared tensor, but not the entire
         # group. Unrelated absent parameters never pass as tied weights.
-        present = {id(state[name]) for name in shapes}
+        present = {id(available[name]) for name in shapes}
         if all(id(tensor) in present for tensor in state.values()):
             matches.append(model_cls)
     return matches
@@ -363,6 +460,25 @@ def _checkpoint_model_cls(repo_id, revision=None, *, trust_remote_code=False):
             if unsupported_type:
                 raise LoaderFailure("load", "checkpoint_config_unsupported",
                                     f"No installed config class supports model_type={model_type!r}") from exc
+            # Old BERT exports can omit both identity fields. Require explicit
+            # dimensions, BERT-prefixed keys and one complete built-in layout;
+            # a repository name containing "bert" is not evidence.
+            dimensions = {"hidden_size", "intermediate_size", "num_attention_heads", "num_hidden_layers",
+                          "vocab_size", "max_position_embeddings", "type_vocab_size"}
+            if (model_type is None and dimensions.issubset(raw_config)
+                    and not any(raw_config.get(key) for key in (
+                        "architectures", "auto_map", "quantization_config", "is_encoder_decoder", "is_decoder"))):
+                shapes, inspection = _checkpoint_tensor_shapes(repo_id, revision)
+                matches = []
+                if "bert.embeddings.word_embeddings.weight" in shapes:
+                    config = transformers.BertConfig.from_dict(raw_config)
+                    matches = _matching_encoder_classes(config, shapes)
+                if len(matches) != 1:
+                    raise LoaderFailure("load", "checkpoint_architecture_unresolved",
+                                        "Missing model_type: no unique, complete BERT checkpoint layout") from exc
+                selected = matches[0]
+                return selected, dict(inspection, method="checkpoint_shapes", model_class=selected.__name__,
+                                      inferred_model_type="bert")
         return None, None
     except Exception:
         return None, None
@@ -377,6 +493,12 @@ def _checkpoint_model_cls(repo_id, revision=None, *, trust_remote_code=False):
         return None, None
     shapes, inspection = _checkpoint_tensor_shapes(repo_id, revision)
     matches = _matching_encoder_classes(config, shapes)
+    if not matches and _is_legacy_deberta_layout(config, shapes):
+        raise LoaderFailure(
+            "load", "checkpoint_legacy_deberta_layout",
+            "Complete legacy DeBERTa pretraining layout; use stored-matrix analysis "
+            "to preserve its embeddings and both prediction heads without reconstructing a model",
+        )
     if len(matches) != 1:
         names = ", ".join(model_cls.__name__ for model_cls in matches) or "none"
         raise LoaderFailure(
@@ -385,6 +507,40 @@ def _checkpoint_model_cls(repo_id, revision=None, *, trust_remote_code=False):
         )
     selected = matches[0]
     return selected, dict(inspection, method="checkpoint_shapes", model_class=selected.__name__)
+
+
+def _is_legacy_deberta_layout(config, shapes):
+    """Recognize the observed original pretraining export, not arbitrary extras.
+
+    Microsoft's DeBERTa/deberta/bert.py and apps/models/{masked_language_model,
+    replaced_token_detection_model}.py define the two heads. The extra embedding
+    keys are present in the pinned v3-xsmall export; no alias/value relation is
+    assumed. This validates names/shapes for tensor-only fallback, not inference.
+    """
+    if type(config) is not transformers.DebertaV2Config or getattr(config, "is_decoder", False):
+        return False
+    with torch.device("meta"):
+        backbone = transformers.DebertaV2Model(copy.deepcopy(config))
+    expected = {"deberta." + name: tuple(tensor.shape) for name, tensor in backbone.state_dict().items()}
+    hidden = config.hidden_size
+    embedding = getattr(config, "embedding_size", hidden)
+    expected.update({
+        "deberta.embeddings.word_embeddings._weight": (config.vocab_size, embedding),
+        "deberta.embeddings.position_embeddings._weight": (config.max_position_embeddings, embedding),
+        "deberta.embeddings.position_embeddings.weight": (config.max_position_embeddings, embedding),
+        "lm_predictions.lm_head.dense.weight": (embedding, hidden),
+        "lm_predictions.lm_head.dense.bias": (embedding,),
+        "lm_predictions.lm_head.LayerNorm.weight": (embedding,),
+        "lm_predictions.lm_head.LayerNorm.bias": (embedding,),
+        "lm_predictions.lm_head.bias": (config.vocab_size,),
+        "mask_predictions.dense.weight": (hidden, hidden),
+        "mask_predictions.dense.bias": (hidden,),
+        "mask_predictions.LayerNorm.weight": (hidden,),
+        "mask_predictions.LayerNorm.bias": (hidden,),
+        "mask_predictions.classifier.weight": (1, hidden),
+        "mask_predictions.classifier.bias": (1,),
+    })
+    return shapes == expected
 
 
 def ensure_optimum_gptq_backend_compat() -> None:

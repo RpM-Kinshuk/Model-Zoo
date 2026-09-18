@@ -1,15 +1,17 @@
-"""Explicit matrix descriptors from safetensors, without constructing a model.
+"""Explicit matrix descriptors from checkpoints, without constructing a model.
 
 Checkpoint keys are identities, not inferred modules. Only stored floating 2D
 tensors are measured: no reshaping, dequantization, adapter merge or alias guesses.
-Downloads use the worker's existing ephemeral cache; analysis holds one input
-tensor at a time, plus the accumulated scalar results and spectra.
+Downloads use the worker's existing ephemeral cache. Analysis opens one file at
+a time, plus the working tensor and accumulated scalar results and spectra.
 """
 
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
 import re
+import zipfile
 
 import torch
 from safetensors import safe_open
@@ -20,7 +22,7 @@ from net_esd.constants import RESULT_KEYS
 from net_esd.core import compute_esd_for_weight
 
 
-FLOAT_DTYPES = {"F16", "BF16", "F32", "F64"}
+FLOAT_DTYPES = {"F16", "BF16", "F32", "F64", "torch.float16", "torch.bfloat16", "torch.float32", "torch.float64"}
 PACKED_KEY = re.compile(
     r"(^|\.)(qweight|qzeros|quant_state|weight_scale|weight_scale_inv|"
     r"weight_packed|weight_zero_point|lora_[ab]|ia3_[a-z]+)(\.|$)", re.I,
@@ -76,13 +78,19 @@ def inspect_checkpoint(repo_id, revision, *, base_model_relation="", loader_scen
             raise LoaderFailure("load", "unsupported_checkpoint_representation",
                                 "Quantization/compression config requires a supported model-loading path")
 
-    index = checkpoint_tensor_index(repo_id, revision)
+    index = checkpoint_tensor_index(repo_id, revision, allow_bin=True)
+    if index["format"] == "pytorch" and any(not zipfile.is_zipfile(path) for path in index["files"].values()):
+        raise LoaderFailure("load", "unsupported_checkpoint_representation",
+                            "Matrix-only PyTorch analysis requires mmap-compatible ZIP state dicts; "
+                            "provide safetensors for older non-ZIP files")
     if any(PACKED_KEY.search(name) for name in index["tensors"]):
         raise LoaderFailure("load", "unsupported_checkpoint_representation",
                             "Packed/adapter tensor markers found; checkpoint mode does not interpret them")
     index["provenance"] = {
         "scope": "checkpoint_tensors", "config_sha256": config_hash,
         "files": sorted(index["files"]), "tensor_count": len(index["tensors"]),
+        "format": index["format"],
+        "tensor_access": "safetensors" if index["format"] == "safetensors" else "pytorch_mmap",
         "checkpoint_bytes": sum(Path(path).stat().st_size for path in index["files"].values()),
         "dtypes": sorted({entry["dtype"] for entry in index["tensors"].values()}),
         "selection": "stored_floating_2d_tensors", "aliases": "not_inferred",
@@ -90,18 +98,33 @@ def inspect_checkpoint(repo_id, revision, *, base_model_relation="", loader_scen
     return index
 
 
+@contextmanager
+def _tensor_reader(index, filename):
+    """Open one inspected file; never eagerly load a legacy PyTorch shard."""
+    path = index["files"][filename]
+    if index["format"] == "safetensors":
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            yield handle.get_tensor
+    else:
+        state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        try:
+            yield state.__getitem__
+        finally:
+            state.clear()  # Release tensors even if the caller retains the reader.
+
+
 def analyze_checkpoint(index, measurement, *, device="cpu"):
     """Stream matrices into the same numerical core used by loaded models.
 
-    One compute device per worker keeps input memory bounded without a new queue or
-    execution backend. The dispatcher can still run independent workers in parallel.
+    A PyTorch shard stays memory-mapped while its matrices are analyzed; resident
+    pages are managed by the OS. No model or full-shard tensor copy is constructed.
     """
     results = {key: [] for key in RESULT_KEYS}
     records = []
     with torch.no_grad():
-        for filename, path in sorted(index["files"].items()):
-            with safe_open(path, framework="pt", device="cpu") as handle:
-                for name in sorted(handle.keys()):
+        for filename in sorted(index["files"]):
+            with _tensor_reader(index, filename) as read_tensor:
+                for name in sorted(name for name, entry in index["tensors"].items() if entry["file"] == filename):
                     entry = index["tensors"][name]
                     shape = entry["shape"]
                     record = {"name": name, **entry, "status": "skipped", "reason": "",
@@ -115,7 +138,7 @@ def analyze_checkpoint(index, measurement, *, device="cpu"):
                         record["reason"] = "empty_tensor"
                     if record["reason"]:
                         continue
-                    weight = handle.get_tensor(name)
+                    weight = read_tensor(name)
                     dtype = weight.dtype if measurement["load_dtype"] == "auto" else getattr(torch, measurement["load_dtype"])
                     weight = weight.to(device=device, dtype=dtype)
                     result = compute_esd_for_weight(

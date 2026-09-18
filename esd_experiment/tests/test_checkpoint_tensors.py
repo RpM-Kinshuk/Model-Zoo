@@ -24,7 +24,7 @@ def settings(**kwargs):
     return measurement_config(SimpleNamespace(analysis_source="checkpoint", **kwargs))
 
 
-def saved_tensors(path):
+def saved_tensors(path, file_format="safetensors"):
     path.mkdir(exist_ok=True)
     tensors = {
         "encoder.layers.0.q.weight": torch.diag(torch.arange(1., 5.)).double(),
@@ -35,7 +35,18 @@ def saved_tensors(path):
         "integer_matrix": torch.ones(2, 2, dtype=torch.int32),
         "empty": torch.empty(0, 2), "zero_matrix": torch.zeros(2, 2),
     }
-    save_file(tensors, path / "model.safetensors")
+    if file_format == "safetensors":
+        save_file(tensors, path / "model.safetensors")
+    elif file_format == "sharded":
+        weight_map = {}
+        for number in range(2):
+            group = dict(list(tensors.items())[number::2])
+            filename = f"pytorch_model-{number}.bin"
+            torch.save(group, path / filename)
+            weight_map.update({name: filename for name in group})
+        (path / "pytorch_model.bin.index.json").write_text(json.dumps({"weight_map": weight_map}))
+    else:
+        torch.save(tensors, path / "pytorch_model.bin", _use_new_zipfile_serialization=file_format != "legacy")
     return tensors
 
 
@@ -45,16 +56,17 @@ def no_token(monkeypatch):
     monkeypatch.setattr(sys.modules[checkpoint.checkpoint_tensor_index.__module__], "get_hf_token", lambda: None)
 
 
-def test_exact_keys_native_precision_and_explicit_skips(tmp_path):
-    tensors = saved_tensors(tmp_path)
+@pytest.mark.parametrize("file_format", ["safetensors", "zip", "sharded"])
+def test_exact_keys_native_precision_and_explicit_skips(tmp_path, file_format):
+    tensors = saved_tensors(tmp_path, file_format)
     index = checkpoint.inspect_checkpoint(str(tmp_path), None)
     metrics, coverage = checkpoint.analyze_checkpoint(index, settings(compute_dtype="float64"))
 
     expected = sorted(name for name, tensor in tensors.items()
                       if tensor.ndim == 2 and tensor.is_floating_point() and tensor.numel())
-    assert metrics["longname"] == expected
-    assert metrics["weight_attribute"] == expected and metrics["module_name"] == [""] * len(expected)
-    for i, name in enumerate(expected):
+    assert sorted(metrics["longname"]) == expected
+    assert metrics["weight_attribute"] == metrics["longname"] and metrics["module_name"] == [""] * len(expected)
+    for i, name in enumerate(metrics["longname"]):
         reference = torch.linalg.svdvals(tensors[name].double()).square().sort().values.numpy()
         np.testing.assert_allclose(metrics["eigs"][i], reference, rtol=1e-12, atol=1e-12)
         assert metrics["source_dtype"][i] == str(tensors[name].dtype).removeprefix("torch.")
@@ -68,6 +80,35 @@ def test_exact_keys_native_precision_and_explicit_skips(tmp_path):
     assert coverage["counts"]["stored_tensors"] == len(tensors)
     assert coverage["counts"]["analyzed_tensors"] == len(expected)
     assert index["provenance"]["aliases"] == "not_inferred"
+    assert index["provenance"]["tensor_access"] == ("safetensors" if file_format == "safetensors" else "pytorch_mmap")
+
+
+def test_pytorch_matrix_reader_is_restricted_mapped_and_releases_shards(tmp_path, monkeypatch):
+    saved_tensors(tmp_path, "sharded")
+    index = checkpoint.inspect_checkpoint(str(tmp_path), None)
+    original_load = torch.load
+    previous = []
+
+    def checked_load(*args, **kwargs):
+        assert kwargs == {"map_location": "cpu", "weights_only": True, "mmap": True}
+        assert all(reference() is None for reference in previous)
+        state = original_load(*args, **kwargs)
+        previous[:] = [weakref.ref(tensor) for tensor in state.values()]
+        return state
+
+    monkeypatch.setattr(torch, "load", checked_load)
+    checkpoint.analyze_checkpoint(index, settings())
+    assert all(reference() is None for reference in previous)
+
+
+@pytest.mark.parametrize("file_format", ["legacy", "module"])
+def test_checkpoint_analysis_never_eagerly_loads_old_files_or_unpickles_modules(tmp_path, file_format):
+    if file_format == "module":
+        torch.save(torch.nn.Linear(2, 2), tmp_path / "pytorch_model.bin")
+    else:
+        saved_tensors(tmp_path, file_format)
+    with pytest.raises(checkpoint.LoaderFailure, match="mmap-compatible|No unrestricted loading"):
+        checkpoint.inspect_checkpoint(str(tmp_path), None)
 
 
 def test_unknown_architecture_is_not_constructed(tmp_path, monkeypatch):
@@ -355,15 +396,44 @@ def unknown_config(path, *, custom_code=False):
     (path / "config.json").write_text(json.dumps(config))
 
 
+def saved_legacy_deberta(path):
+    """Tiny counterpart of Microsoft's two-head export, with distinct embeddings."""
+    import transformers
+    config = transformers.DebertaV2Config(
+        vocab_size=32, hidden_size=8, intermediate_size=12, num_hidden_layers=1,
+        num_attention_heads=2, max_position_embeddings=16, type_vocab_size=0,
+        position_biased_input=False, relative_attention=True,
+    )
+    config.save_pretrained(path)
+    state = {"deberta." + name: tensor for name, tensor in transformers.DebertaV2Model(config).state_dict().items()}
+    state["deberta.embeddings.word_embeddings._weight"] = torch.randn(32, 8)
+    state["deberta.embeddings.position_embeddings._weight"] = torch.randn(16, 8)
+    state["deberta.embeddings.position_embeddings.weight"] = torch.randn(16, 8)
+    for prefix in ("lm_predictions.lm_head", "mask_predictions"):
+        head = torch.nn.Module()
+        head.dense = torch.nn.Linear(8, 8)
+        head.LayerNorm = torch.nn.LayerNorm(8)
+        if prefix == "mask_predictions":
+            head.classifier = torch.nn.Linear(8, 1)
+        else:
+            head.bias = torch.nn.Parameter(torch.zeros(32))
+        state.update({prefix + "." + name: tensor for name, tensor in head.state_dict().items()})
+    torch.save(state, path / "pytorch_model.bin")
+    return state
+
+
 @pytest.mark.parametrize("kind,reason", [
     ("unsupported", "checkpoint_config_unsupported"),
     ("custom_code", "checkpoint_config_requires_code"),
     ("ambiguous", "checkpoint_layout_ambiguous"),
+    ("legacy_deberta", "checkpoint_legacy_deberta_layout"),
 ])
 def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_worker, monkeypatch, kind, reason):
     from esd_experiment.utils.analyze_results import read_model_summary
     case = auto_worker
-    if kind == "ambiguous":
+    if kind == "legacy_deberta":
+        tensors = saved_legacy_deberta(case.weights)
+    elif kind == "ambiguous":
         import transformers
         from test_loader_checkpoint_integrity import tiny_bert
         config = tiny_bert().config
@@ -385,6 +455,12 @@ def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_wo
         assert config["runtime"]["model_class"] is None
         assert config["runtime"]["fallback"]["reason"] == reason
         assert h5["alpha"].attrs["view_status"] == "unavailable"
+        if kind == "legacy_deberta":
+            names = h5["layers/longname"].asstr()[:]
+            assert set(names) == {name for name, tensor in tensors.items() if tensor.ndim == 2}
+            for i, name in enumerate(names):
+                reference = torch.linalg.svdvals(tensors[name].double()).square().sort().values.numpy()
+                np.testing.assert_allclose(h5["eigs"][i], reference, rtol=1e-12, atol=1e-12)
     summary = read_model_summary(csv_path, h5_path)
     assert summary["analysis_policy"] == "auto" and summary["analysis_source"] == "checkpoint"
     assert summary["effective_filter_type"] is False and summary["fallback_reason"] == reason
@@ -397,6 +473,24 @@ def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_wo
     assert case.worker.main() == 1
     assert [path.read_bytes() for path in (csv_path, h5_path)] == before
     assert case.load.call_count == case.inspection.call_count == 1
+
+
+@pytest.mark.parametrize("defect", ["missing_encoder", "missing_head", "shape", "extra"])
+def test_legacy_deberta_fallback_requires_the_entire_known_layout(auto_worker, defect):
+    case = auto_worker
+    state = saved_legacy_deberta(case.weights)
+    if defect == "missing_encoder":
+        del state["deberta.encoder.layer.0.attention.self.query_proj.weight"]
+    elif defect == "missing_head":
+        del state["mask_predictions.classifier.bias"]
+    elif defect == "shape":
+        state["deberta.embeddings.word_embeddings._weight"] = torch.ones(2, 2)
+    else:
+        state["unexplained.weight"] = torch.ones(2, 2)
+    torch.save(state, case.weights / "pytorch_model.bin")
+    assert case.worker.main() == 1
+    case.inspection.assert_not_called()
+    assert not list(case.output.glob("metrics/*.h5"))
 
 
 def test_explicit_model_mode_does_not_fall_back(auto_worker, monkeypatch):

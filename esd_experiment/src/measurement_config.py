@@ -9,11 +9,12 @@ import re
 # Version 7 adds declared MultiheadAttention matrices to the measured set.
 NUMERICS_VERSION = "7"
 FORMAT_VERSION = "2.0"
-# Version 8 adds narrow automatic fallback and records the actual analysis source.
+# Version 10 adds mmap checkpoint analysis and exact legacy DeBERTa fallback.
 # Loading policy is separate from the spectral formulas.
-LOADER_VERSION = "8"
+LOADER_VERSION = "10"
 CHECKPOINT_FALLBACK_REASONS = {
     "checkpoint_config_unsupported", "checkpoint_config_requires_code", "checkpoint_layout_ambiguous",
+    "checkpoint_legacy_deberta_layout",
 }
 
 

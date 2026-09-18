@@ -104,16 +104,20 @@ with h5py.File("metrics/org--model.h5", "r") as h5:
     first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
 ```
 
-Current output versions are numerics **7**, loader **8**, HDF5 format **2.0**.
+Current output versions are numerics **7**, loader **10**, HDF5 format **2.0**.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
 Numerics 7 adds declared MultiheadAttention projection matrices, measured whole,
-and records their weight attributes. Loader 8 adds narrowly triggered automatic
-fallback and separates requested policy from actual analysis source. Older outputs
-need a fresh run. Incompatible/incomplete
+and records their weight attributes. The loader includes restricted legacy encoder
+inspection, BERT layout-based recovery of missing `model_type`, and restoration
+of ALBERT's stored pooler. Loader 10 adds memory-mapped PyTorch matrix analysis
+and automatic fallback for the exact legacy DeBERTa pretraining layout below.
+Requested analysis policy remains separate from actual analysis source.
+Earlier-loader outputs remain historical data, but are not accepted
+by current resume/index checks; use a fresh directory for loader 10. Incompatible/incomplete
 artifacts stop the run without deletion. Prefer a fresh directory; explicit
 `--overwrite` deletes the selected
 models' previous outputs before loading. `summary.csv` alone is not completion.
@@ -189,21 +193,43 @@ accessible through `/layers`.
 Ordinary Transformers loads preserve the checkpoint's compatible built-in
 architecture. Metadata loader scenarios are routing hints, not model identity.
 Missing/mismatched weights, loading errors, unexplained extra keys and ambiguous
-architecture declarations fail before analysis. Only the exact historical GPT2
+architecture declarations fail before analysis. The exact historical GPT2
 `masked_bias` buffers are permitted as extra keys, and remain recorded.
+For a declared `AlbertForMaskedLM` with only the two stored pooler tensors extra,
+the loader restores `albert.pooler.weight` and `.bias` from pinned safetensors.
+Shapes and floating dtypes must match the configured pooler; all other loading
+checks still apply. `restored_checkpoint_keys` records this recovery. The MLM
+class is retained, and the pooler reaches ordinary module coverage and ESD.
 
 Ordinary BERT, RoBERTa, DistilBERT, ALBERT and DeBERTa (v1/v2) checkpoints without
-`architectures` can be selected automatically from their complete safetensors
+`architectures` can be selected automatically from their complete checkpoint
 key/shape layout, including shards and omitted tied
 aliases. Candidate built-in classes are constructed on the meta device, without
 allocating their weights. The decoder config distinguishes masked from causal LM;
 multiple matches (for example some one-output classification/multiple-choice
 heads) fail explicitly. Declared architectures are never silently replaced.
-The inspection uses the pinned HF download/cache path and loads only headers
-into RAM; uncached weight files are still downloaded once in the load stage.
-Selection evidence and actual input/output embedding tying are recorded in loading
-provenance. Other families, legacy-only files, custom and quantized missing-metadata
-cases are not covered by this new inference path. No architecture override exists yet.
+Inspection prefers safetensors headers. When absent, encoder selection also
+accepts plain PyTorch state dicts (`pytorch_model.bin` or its shard index), using
+`FakeTensorMode` and explicit `weights_only=True` without allocating weight storage.
+It uses Transformers' patched-PyTorch version gate, never unrestricted pickle or
+checkpoint-specific allowlists. The selected format is forced during actual
+loading. Direct checkpoint-matrix analysis also accepts memory-mappable ZIP
+PyTorch state dicts; unlike encoder loading, it does not read pre-ZIP files.
+
+Old BERT exports missing both `model_type` and `architectures` additionally need
+explicit BERT dimensions, BERT-prefixed tensors and one complete built-in layout
+match. This inference is recorded, not based on the repository name. Serialized
+position-ID buffers are accepted only when their actual values match the loaded
+buffers, and are recorded as `verified_checkpoint_buffers`. This verification
+can require one extra shard read for legacy `.bin`; ordinary loading already
+materializes those weights. No trained keys are silently discarded.
+
+Downloads still use the worker's pinned, ephemeral cache and load-stage bounds.
+Selection evidence and input/output embedding tying remain in loading provenance.
+Other families, custom and quantized missing-metadata cases are not covered by
+this inference path. No architecture override exists yet. Restricted loading
+is not a sandbox or protection from resource exhaustion; see the
+[PyTorch serialization notes](https://docs.pytorch.org/docs/2.10/notes/serialization.html).
 Families without a supported causal-LM class are not inferred as decoders. Task
 constraints are checked before trying a candidate structure, so a span-QA class
 requiring two outputs cannot block a valid multiclass classifier. ALBERT's shared
@@ -276,14 +302,18 @@ for alias enumeration with `remove_duplicate=False`.
 ### Architecture-independent checkpoint matrices
 
 The default `--analysis_source auto` first attempts strict model loading. It can
-fall back once to checkpoint matrices for three identified cases:
+fall back once to checkpoint matrices for these identified cases:
 
 - A valid config declares a `model_type` that the installed library does not support.
 - Resolving the config requires repository code that is disabled.
 - Multiple supported encoder architectures fully match the checkpoint keys/shapes.
+- The exact legacy DeBERTa pretraining export matches: complete encoder, both
+  prediction heads and stored embedding tensors, with every name/shape accounted for.
 
-The last case differs from **no matching layout**, which may mean missing or
-incorrect weights and remains a failure. Conflicting architecture declarations,
+The DeBERTa case is a recognized stored layout, not a reconstructed model. No
+embedding alias/value relationship is assumed. Any missing key, wrong shape or
+unexplained extra key prevents this fallback. Other **unmatched layouts** may
+mean missing or incorrect weights and remain failures. Conflicting architecture declarations,
 missing dependencies, integrity failures, quantization/adapter failures, OOM,
 network errors, timeouts and numerical/save errors do not trigger fallback.
 No skipped layers are filled in from raw tensors after a successful model load.
@@ -302,10 +332,15 @@ original fallback stage/reason/message. The summary exposes `analysis_policy`,
 sources are not pooled even when both requests were `auto`. Resume validates this
 record and does not try loading again to promote an existing tensor-only result.
 
-Checkpoint mode reads pinned `model.safetensors` or `model.safetensors.index.json`
-and validates all shard keys/shapes. It needs no recognized architecture, model
-construction or repository Python. Missing/unknown architecture metadata is fine;
-malformed files still fail. There is no pickle or arbitrary-file fallback.
+Checkpoint mode prefers pinned `model.safetensors` or its shard index; when absent,
+it also accepts `pytorch_model.bin` or its shard index. All shard keys/shapes are
+validated. PyTorch files must be plain tensor state dicts in the ZIP format that
+supports `mmap=True`, with restricted `weights_only=True` loading and the same
+patched-version check as encoder inspection. Pre-ZIP files are rejected here
+instead of eagerly loading an entire shard; provide safetensors for those files.
+There is no unrestricted-pickle retry, custom allowlist or arbitrary-file search.
+No recognized architecture, model construction or repository Python is needed.
+Missing/unknown architecture metadata is fine; malformed files still fail.
 Known adapter/quantization config and packed-weight markers are rejected; use
 the supported model-loading path to merge or interpret those representations.
 
@@ -327,7 +362,10 @@ timeout and cache; a failed fallback is not retried, even with `--max_retries`.
 Auto/checkpoint workers accept `--device_map auto`, `cpu` or `cuda:<index>`; use
 model-only policy for other model device maps.
 Disk still holds the downloaded checkpoint until worker
-cleanup; host memory retains accumulated spectra, not a constructed full model.
+cleanup. PyTorch analysis maps one shard at a time and releases it before the
+next, retaining accumulated spectra but no constructed model or eager full-shard
+copy. Mapped pages can become resident as matrices are read; this is not a hard
+RSS limit. `checkpoint.format` and `checkpoint.tensor_access` record the reader.
 `load_dtype=auto` preserves each stored tensor's dtype. Actual `filter_type` is
 false: no module-class or legacy Linear aspect-ratio filter applies here. An
 automatic run retains its requested model filter separately in the config.
@@ -357,8 +395,9 @@ summary reading and resume passed. Temporary outputs/caches were removed.
 These random test checkpoints establish neither trained-model validity nor
 GPU equivalence; those remain pilot questions.
 
-This uses safetensors' [per-tensor reading API](https://huggingface.co/docs/safetensors/index);
-see also its [shared-tensor limitations](https://huggingface.co/docs/safetensors/torch_shared_tensors).
+Readers use safetensors' [per-tensor API](https://huggingface.co/docs/safetensors/index)
+or PyTorch's [restricted loading and memory mapping](https://docs.pytorch.org/docs/2.10/notes/serialization.html).
+See also safetensors' [shared-tensor limitations](https://huggingface.co/docs/safetensors/torch_shared_tensors).
 
 ## Interpreting the metrics
 
@@ -475,7 +514,7 @@ quality or full quantized support. GPTQ still needs a healthy checkpoint and a
 consistent backend environment. One-off reports/checkpoint caches are disposable;
 keep production data under `analysis_runs/phase2/`.
 
-### Bounded pilot, 2026-09-14
+### Bounded pilot, 2026-09-14 (loader 8)
 
 `analysis_runs/validation/trained_pilot_20260914/` holds the pinned `models.csv`,
 `pilot_report.json`, ordinary CSV/HDF5 outputs and reference checks. This was a
@@ -602,7 +641,7 @@ effort. Each slice should have a concrete check and a small, understandable diff
   automatic-fallback rules above; broader recovery needs pilot evidence.
 - [x] **Direct matrices and narrow automatic fallback.** `--analysis_source auto`
   is the default; `model` and `checkpoint` remain explicit overrides. Tensor analysis streams
-  ordinary floating safetensors matrices through the existing core/writer, with
+  ordinary floating safetensors or memory-mapped PyTorch matrices through the existing core/writer, with
   exact keys, complete stored-key accounting and separate summary/resume scope.
   Eligibility and limits are defined above. This does not salvage partial model
   loads, interpret unknown layouts or claim architectural recovery. Keep the
@@ -698,10 +737,34 @@ with unknown terminal-pin provenance, and one unrecorded model: the AWQ prefligh
 block was not saved per model at the time. Future blocks are recorded; do not
 rewrite historical evidence from today's backend availability.
 
-Next, address the demonstrated encoder gaps:
-safe legacy-checkpoint inspection and preserving ALBERT's extra stored weights,
-without guessing architectures or weakening loading integrity. Reconsider automatic
-fallback eligibility only with those concrete cases and distinct measurement scope.
+The loader-9 slice added restricted legacy inspection, missing BERT config-type
+recovery and restoration of ALBERT's stored pooler. The bounded CPU recheck used
+the same three pinned encoder checkpoints, without rewriting the loader-8 pilot.
+BERT-tiny and ALBERT preserved all 49 and 31 stored tensors respectively, including
+BERT's regenerated position-ID buffer and ALBERT's restored pooler. One matrix
+from each agreed with an independent float64 spectrum reference: maximum
+absolute error divided by the largest reference eigenvalue was below 3.3e-7.
+These are loader and sampled-matrix checks, not full-model or GPU validation.
+Reports are in `analysis_runs/validation/encoder_recovery_20260917/`; temporary
+download caches were removed.
+
+Loader 10 recognizes that DeBERTa-v3 checkpoint's complete legacy layout and
+automatically uses stored-matrix analysis, preserving its additional embedding
+tensors and LM/mask-prediction heads without inventing a replacement class.
+The head layouts follow Microsoft's [masked-LM implementation](https://github.com/microsoft/DeBERTa/blob/master/DeBERTa/deberta/bert.py)
+and [replaced-token implementation](https://github.com/microsoft/DeBERTa/blob/master/DeBERTa/apps/models/replaced_token_detection_model.py);
+the embedding keys are checked against the observed pinned export.
+
+The pinned DeBERTa-xsmall CPU worker recheck accounted for all 212 stored tensors:
+80 matrices measured, 132 non-matrix tensors skipped with reasons. All 80 saved
+spectra matched independent SciPy float64 SVD references, with maximum absolute
+error divided by the largest reference eigenvalue below 3.9e-6. Summary reading
+and unchanged-artifact resume passed. This cached, two-thread CPU run took about
+8 seconds and peaked at 1.31 GiB process RSS; it is not a large-model cost estimate.
+Outputs and verification are in `analysis_runs/validation/deberta_checkpoint_20260917/`.
+The disposable 231 MiB download cache was removed. Strict model-only loading is
+still unsupported for this export; these are explicitly checkpoint-matrix results.
+
 Keep GPU checks and ephemeral caches; measure representative larger checkpoints
 before optimizing the small-model startup/dispatch costs. Also audit the curated
 input's single-character `Architecture` values before using them for stratification.

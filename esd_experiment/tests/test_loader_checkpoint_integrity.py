@@ -445,13 +445,125 @@ def test_distinct_serialized_embedding_weights_are_not_silently_overwritten(tmp_
     assert not actual._model_zoo_loading_info["input_output_embeddings_tied"]
 
 
-def test_missing_metadata_does_not_enable_pickle_loading(tmp_path):
+def test_missing_metadata_does_not_enable_unrestricted_pickle_loading(tmp_path, monkeypatch):
     tiny_bert().config.save_pretrained(tmp_path)
-    (tmp_path / "pytorch_model.bin").write_bytes(b"not a safe checkpoint")
+    torch.save(torch.nn.Linear(2, 2), tmp_path / "pytorch_model.bin")  # A module is not a plain state dict.
+    original = torch.load
+    calls = []
 
-    with pytest.raises(loader.LoaderFailure, match="requires safetensors") as exc:
+    def restricted_load(*args, **kwargs):
+        calls.append(kwargs["weights_only"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", restricted_load)
+    with pytest.raises(loader.LoaderFailure, match="No unrestricted loading") as exc:
         loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
     assert exc.value.reason == "checkpoint_inspection_failed"
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("family", ["bert", "deberta-v2"])
+@pytest.mark.parametrize("file_format", ["zip", "legacy", "sharded"])
+def test_legacy_encoder_inspection_and_loading_preserve_weights(tmp_path, monkeypatch, family, file_format):
+    expected = tiny_bert(transformers.BertForPreTraining) if family == "bert" else tiny_encoder(family)
+    expected.config.architectures = None
+    expected.config.save_pretrained(tmp_path)
+    state = expected.state_dict()
+    if file_format == "sharded":
+        groups = [dict(list(state.items())[::2]), dict(list(state.items())[1::2])]
+        weight_map = {}
+        for number, group in enumerate(groups):
+            filename = f"pytorch_model-{number}.bin"
+            torch.save(group, tmp_path / filename)
+            weight_map.update({name: filename for name in group})
+        (tmp_path / "pytorch_model.bin.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+    else:
+        torch.save(state, tmp_path / "pytorch_model.bin", _use_new_zipfile_serialization=file_format == "zip")
+
+    original = torch.load
+    inspections = []
+
+    def checked_load(*args, **kwargs):
+        assert kwargs["weights_only"] is True
+        result = original(*args, **kwargs)
+        if torch._guards.active_fake_mode() is not None:
+            assert all(tensor.untyped_storage().device.type == "meta" for tensor in result.values())
+            inspections.append(args[0])
+        return result
+
+    monkeypatch.setattr(torch, "load", checked_load)
+    actual, _ = loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+    assert inspections
+    assert type(actual) is type(expected)
+    for name, tensor in state.items():
+        assert torch.equal(actual.state_dict()[name], tensor), name
+    assert actual._model_zoo_loading_info["architecture_selection"]["format"] == "pytorch"
+    with pytest.raises(loader.LoaderFailure, match="requires safetensors"):
+        loader.checkpoint_tensor_index(str(tmp_path), None)  # Callers must explicitly permit .bin inspection.
+
+
+@pytest.mark.parametrize("defect", [None, "missing_dimensions", "unknown_weight", "position_ids"])
+def test_missing_bert_model_type_requires_complete_config_and_weight_evidence(tmp_path, defect):
+    expected = tiny_bert(transformers.BertForPreTraining)
+    config = expected.config.to_dict()
+    config.pop("model_type")
+    config.pop("architectures", None)
+    if defect == "missing_dimensions":
+        config.pop("num_attention_heads")
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    state = expected.state_dict()
+    state["bert.embeddings.position_ids"] = torch.arange(expected.config.max_position_embeddings)[None]
+    if defect == "position_ids":
+        state["bert.embeddings.position_ids"] = state["bert.embeddings.position_ids"].flip(1)
+    if defect == "unknown_weight":
+        state["custom.weight"] = torch.eye(3)
+    torch.save(state, tmp_path / "pytorch_model.bin", _use_new_zipfile_serialization=False)
+    if defect:
+        with pytest.raises((loader.LoaderFailure, ValueError)):
+            loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+        return
+    actual, _ = loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+    assert type(actual) is transformers.BertForPreTraining
+    assert actual._model_zoo_loading_info["architecture_selection"]["inferred_model_type"] == "bert"
+    for name, tensor in state.items():
+        loaded = dict(actual.named_buffers()) if name.endswith(".position_ids") else actual.state_dict()
+        assert torch.equal(loaded[name], tensor), name
+
+
+@pytest.mark.parametrize("defect", [None, "shape", "extra", "missing_bias"])
+def test_albert_restores_only_a_complete_stored_pooler(tmp_path, defect):
+    expected = tiny_encoder("albert")
+    state = expected.state_dict()
+    hidden = expected.config.hidden_size
+    state["albert.pooler.weight"] = torch.diag(torch.arange(1., hidden + 1))
+    state["albert.pooler.bias"] = torch.arange(float(hidden))
+    if defect == "shape":
+        state["albert.pooler.weight"] = torch.eye(3)
+    elif defect == "extra":
+        state["unused.weight"] = torch.eye(3)
+    elif defect == "missing_bias":
+        del state["albert.pooler.bias"]
+    expected.save_pretrained(tmp_path, state_dict=state)
+    if defect:
+        with pytest.raises(loader.LoaderFailure) as exc:
+            loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+        assert exc.value.reason == "checkpoint_weight_mismatch"
+        return
+    actual, _ = loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
+    assert type(actual) is type(expected)
+    for name, tensor in state.items():
+        assert torch.equal(actual.state_dict()[name], tensor), name
+    assert set(actual._model_zoo_loading_info["restored_checkpoint_keys"]) == {
+        "albert.pooler.weight", "albert.pooler.bias"}
+    modules = []
+    metrics = net_esd_estimator(actual, parallel=False, coverage=modules)
+    position = metrics["longname"].index("albert.pooler")
+    torch.testing.assert_close(torch.as_tensor(metrics["eigs"][position]), torch.arange(1., hidden + 1).square())
+    usage = weight_usage_report(actual, modules, metrics["longname"])
+    assert usage["counts"]["unresolved_tensors"] == 0
+    with torch.no_grad():
+        inputs = torch.tensor([[1, 2, 3]])
+        torch.testing.assert_close(actual(inputs).logits, expected(inputs).logits)
 
 
 @pytest.mark.parametrize("defect", ["missing_shard", "wrong_shard", "extra_index_key", "path_escape"])
