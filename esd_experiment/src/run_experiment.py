@@ -477,6 +477,30 @@ def load_model_list(csv_path: str, limit: Optional[int] = None) -> pd.DataFrame:
     return df
 
 
+def _config_metadata(config):
+    """Keep complete Hub config labels, separately from imported CSV hints."""
+    fields = {"config_model_type": "", "config_architectures": "[]", "config_metadata_status": "missing"}
+    if config is None:
+        return fields
+    if isinstance(config, dict):
+        model_type = config.get("model_type")
+        architectures = config.get("architectures")
+        model_type = "" if model_type is None else model_type
+        architectures = [] if architectures is None else architectures
+        # Some metadata sources supply a string instead of a list. Never take
+        # its first character or discard other architectures in a real list.
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if (isinstance(model_type, str) and isinstance(architectures, list)
+                and all(isinstance(name, str) and len(name.strip()) > 1 for name in architectures)):
+            fields.update(config_model_type=model_type.strip(),
+                          config_architectures=json.dumps([name.strip() for name in architectures]),
+                          config_metadata_status="recorded")
+            return fields
+    fields["config_metadata_status"] = "invalid"
+    return fields
+
+
 def pin_model_revisions(model_df):
     """Resolve a plain CSV using Hub metadata and adapter JSON, never model code.
 
@@ -492,14 +516,14 @@ def pin_model_revisions(model_df):
     def resolve_revision(repo_id, revision):
         key = (repo_id, revision)
         if key not in resolved:
-            info = api.model_info(repo_id, revision=revision, timeout=30, expand=["sha", "siblings"])
+            info = api.model_info(repo_id, revision=revision, timeout=30, expand=["sha", "siblings", "config"])
             if not is_commit_sha(info.sha):
                 raise ValueError(f"Hub returned no full commit SHA for {repo_id}@{revision}")
             if is_commit_sha(revision) and info.sha.lower() != revision.lower():
                 raise ValueError(f"Hub commit differs from requested pin for {repo_id}")
             has_adapter = any(item.rfilename == "adapter_config.json" for item in info.siblings or [])
             # Keep only small facts, not every repository's file list/metadata.
-            resolved[key] = (info.sha, has_adapter)
+            resolved[key] = (info.sha, has_adapter, _config_metadata(info.config))
             resolved[(repo_id, info.sha)] = resolved[key]
         return resolved[key]
 
@@ -514,9 +538,13 @@ def pin_model_revisions(model_df):
         source_model = _normalize_text(row.get("source_model", ""))
         pinned["revision_requested"] = revision
         pinned["source_model_requested"] = source_model
+        # Repreparation must not leave stale labels attached to a changed pin,
+        # including when the new metadata request fails.
+        pinned.update(_config_metadata(None), config_revision="")
         try:
-            model_sha, has_adapter = resolve_revision(repo_id, revision)
+            model_sha, has_adapter, config_fields = resolve_revision(repo_id, revision)
             pinned["revision_norm"] = model_sha
+            pinned.update(config_fields, config_revision=model_sha)
             is_adapter = (has_adapter
                           or _normalize_text(row.get("base_model_relation", "")).lower() in {"adapter", "lora", "peft"}
                           or _normalize_text(row.get("loader_scenario", "")) == "adapter_requires_base")
@@ -533,7 +561,7 @@ def pin_model_revisions(model_df):
             if source_model:
                 pinned["source_model_requested"] = pinned["source_model_requested"] or source_model
                 base_repo, _, base_revision = source_model.partition("@")
-                base_sha, _ = resolve_revision(base_repo, base_revision or "main")
+                base_sha, _, _ = resolve_revision(base_repo, base_revision or "main")
                 pinned["source_model"] = f"{base_repo}@{base_sha}"
             validate_model_pin(model_id, pinned["revision_norm"], pinned.get("source_model", ""),
                                pinned.get("base_model_relation", ""))
@@ -777,6 +805,9 @@ def main():
             write_pinned_model_list(pinned, manifest_path)
             errors = int(pinned["pin_status"].eq("error").sum())
             print(f"Saved {len(pinned) - errors} pinned models and {errors} unresolved rows to {manifest_path}")
+            labelled = pinned["config_model_type"].ne("") | pinned["config_architectures"].ne("[]")
+            print(f"Config labels: {int(labelled.sum())}/{len(pinned)} rows have a model type or architecture; "
+                  "see config_metadata_status for gaps.")
             print("Review this CSV, then pass it as --model_list without --prepare_only to launch.")
             if errors:
                 raise SystemExit(1)

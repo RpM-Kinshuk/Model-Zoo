@@ -32,6 +32,19 @@ and `source_model_requested` preserve the references used to obtain the pins.
 Resolving an unspecified base revision today does not recover its historical
 training revision.
 
+Preparation also records `config_model_type`, the complete JSON list
+`config_architectures`, and `config_revision` from the same revision-specific
+Hub metadata response. `config_metadata_status` is `recorded`, `missing`, or
+`invalid`; recorded metadata can still omit either label. These are declarations,
+not a verified weight layout. The original `Architecture` and leaderboard fields
+remain unchanged. Routing prefers the prepared config labels only at their
+recorded pin; missing, invalid or stale config evidence does not revive imported
+architecture labels. Other routing hints and the worker's strict integrity checks
+still apply. This adds no request per model beyond the existing metadata lookup
+and downloads no weights. It does not infer an adapter's architecture from its base.
+The existing summary carries these input fields as `input_config_*` for queries;
+no separate metadata database or repair command is needed.
+
 `pin_status=error` rows keep their `pin_error`; preparation exits nonzero if any
 fail. Fix or explicitly remove those rows before launching. Duplicate output
 identities are rejected. An existing `models.csv` is never replaced, even with
@@ -765,9 +778,22 @@ Outputs and verification are in `analysis_runs/validation/deberta_checkpoint_202
 The disposable 231 MiB download cache was removed. Strict model-only loading is
 still unsupported for this export; these are explicitly checkpoint-matrix results.
 
-Keep GPU checks and ephemeral caches; measure representative larger checkpoints
-before optimizing the small-model startup/dispatch costs. Also audit the curated
-input's single-character `Architecture` values before using them for stratification.
+The metadata audit found all 8,467 Atlas-derived `Architecture` cells equal the
+first character of the original string in `../data/large_nlp_data.json`, including
+3,848 instances of `unknown` becoming `u`. The exporter is not in this checkout;
+string indexing during export is an inference from that exact source comparison.
+All 3,164 analysis-ready rows have a blank primary architecture and come from
+`seed_metadata`; this subset is not a balanced cross-family sample. The audit and
+source hashes are in `analysis_runs/validation/metadata_audit_20260917/audit.json`.
+Do not stratify by the damaged labels, or change old results to match today's
+metadata. Prepare fresh config labels, keep unknowns separate, and retain explicit
+pilot family/role labels for deliberate coverage controls.
+
+Next: reprepare the existing 20-checkpoint coverage list at the same pins in a
+fresh directory, inspect label gaps and preflight blocks, then run one worker on
+an idle authorized GPU (3–7). Keep GPU checks and ephemeral caches; measure
+representative larger checkpoints before optimizing small-model startup/dispatch
+costs. This preparation/rerun is not a population sample or permission to scale up.
 
 ### 3. After that: cost and coverage gates for staged scale-up
 

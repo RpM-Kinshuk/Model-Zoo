@@ -135,6 +135,16 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
         row.get("Architecture"),
         row.get("Architecture_lb"),
     )
+    if _text(row.get("config_metadata_status")):
+        # Prepared config labels belong to one revision. Missing/invalid/stale
+        # evidence stays unknown; do not revive the imported, possibly truncated
+        # Architecture field as if it were a fresh checkpoint declaration.
+        current = (_text(row.get("config_metadata_status")) == "recorded"
+                   and bool(_text(row.get("config_revision")))
+                   and _text(row.get("config_revision")) == _text(row.get("revision_norm")))
+        model_type = ""
+        config_model_type = _text(row.get("config_model_type")) if current else ""
+        architectures = _text(row.get("config_architectures")) if current else ""
     pipeline_tag = _blob(row.get("pipeline_tag"), row.get("pipeline_tag_lb"))
     tags = _blob(
         row.get("tags"),

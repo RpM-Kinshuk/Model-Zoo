@@ -25,7 +25,7 @@ Model and adapter-base revisions must be full commit SHAs. Remote code is off;
 use `--trust_remote_code` only for reviewed repositories.
 
 `--analysis_source auto` is the default: strict model loading first, then stored
-safetensors matrices only for narrowly identified architecture-support failures.
+safetensors or memory-mapped PyTorch matrices for narrowly identified architecture-support failures.
 Use `model` to disable fallback or `checkpoint` for direct matrix analysis.
 Broken weights, OOM and network/backend errors are not fallback triggers.
 The summary records the actual source and fallback reason; tensor-only results
@@ -49,7 +49,7 @@ definitions, supported loaders, output layout, resume rules and GPU supervision.
 - `gputracker/`: GPU scheduling, runtime config reload, worker supervision and cleanup.
 - `src/worker.py`: one-model load/analyze/save lifecycle and terminal status.
 - `src/model_loader.py`: checkpoint routing and integrity checks.
-- `src/checkpoint_tensors.py`: explicit, streaming safetensors matrix analysis.
+- `src/checkpoint_tensors.py`: explicit, file-by-file checkpoint matrix analysis.
 - `utils/analyze_results.py`: canonical result reader and per-model summary.
 - `../net_esd/`: reusable spectral-analysis core.
 - `tests/`: offline regression tests and separate installation/GPU smoke checks.

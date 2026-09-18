@@ -31,7 +31,7 @@ def hub(monkeypatch, tmp_path):
 
     def model_info(repo_id, *, revision, timeout, expand):
         assert timeout > 0
-        assert set(expand) == {"sha", "siblings"}
+        assert set(expand) == {"sha", "siblings", "config"}
         response = responses[(repo_id, revision)]
         if isinstance(response, Exception):
             raise response
@@ -56,9 +56,9 @@ def hub(monkeypatch, tmp_path):
                            download=download_mock)
 
 
-def model_info(sha=MODEL_SHA, *, adapter=False):
+def model_info(sha=MODEL_SHA, *, adapter=False, config=None):
     files = [SimpleNamespace(rfilename="adapter_config.json")] if adapter else []
-    return SimpleNamespace(sha=sha, siblings=files)
+    return SimpleNamespace(sha=sha, siblings=files, config=config)
 
 
 @pytest.mark.parametrize("row,requested", [
@@ -79,8 +79,42 @@ def test_revision_precedence_preserves_model_identity(hub, row, requested):
     assert pinned["revision_norm"] == resolved_sha
     assert pinned["pin_status"] == "pinned"
     assert pinned["pin_error"] == ""
-    hub.info.assert_called_once_with("org/model", revision=requested, timeout=30, expand=["sha", "siblings"])
+    hub.info.assert_called_once_with("org/model", revision=requested, timeout=30, expand=["sha", "siblings", "config"])
     hub.download.assert_not_called()
+
+
+@pytest.mark.parametrize("architectures,status,expected", [
+    (["BertModel", "BertForMaskedLM"], "recorded", ["BertModel", "BertForMaskedLM"]),
+    ("BertForMaskedLM", "recorded", ["BertForMaskedLM"]),
+    (None, "recorded", []),
+    (["B"], "invalid", []),
+    ({"name": "BertModel"}, "invalid", []),
+])
+def test_preparation_records_complete_config_labels_without_overwriting_input(hub, architectures, status, expected):
+    hub.responses[("org/model", "main")] = model_info(config={"model_type": "bert", "architectures": architectures})
+    original = {"model_id": "org/model", "Architecture": "B", "Architecture_lb": "WrongForSequenceClassification"}
+    pinned = runner.pin_model_revisions(pd.DataFrame([original])).iloc[0]
+    assert pinned["pin_status"] == "pinned"
+    assert pinned["config_metadata_status"] == status
+    assert json.loads(pinned["config_architectures"]) == expected
+    assert pinned["config_model_type"] == ("bert" if status == "recorded" else "")
+    assert pinned["config_revision"] == pinned["revision_norm"] == MODEL_SHA
+    assert pinned["Architecture"] == "B" and pinned["Architecture_lb"] == original["Architecture_lb"]
+    hub.info.assert_called_once()
+    hub.download.assert_not_called()
+
+
+def test_repreparation_clears_old_config_metadata_on_failure_or_missing_config(hub):
+    rows = [{"model_id": name, "config_model_type": "old", "config_architectures": '["OldModel"]',
+             "config_metadata_status": "recorded", "config_revision": OTHER_SHA}
+            for name in ("org/failed", "org/missing")]
+    hub.responses[("org/failed", "main")] = OSError("unavailable")
+    hub.responses[("org/missing", "main")] = model_info()
+    pinned = runner.pin_model_revisions(pd.DataFrame(rows))
+    assert pinned["config_model_type"].tolist() == ["", ""]
+    assert pinned["config_architectures"].tolist() == ["[]", "[]"]
+    assert pinned["config_metadata_status"].tolist() == ["missing", "missing"]
+    assert pinned["config_revision"].tolist() == ["", MODEL_SHA]
 
 
 def test_adapter_base_is_inferred_and_shared_resolutions_are_cached(hub):
