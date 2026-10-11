@@ -31,15 +31,36 @@ def offline_loading(monkeypatch):
 
 def prepare_checkpoint(root, family="llama", *, rslora=False, bias="none"):
     torch.manual_seed(123)
-    if family in ("bert", "bert_classifier"):
+    legacy_bert = family.startswith("bert_legacy_")
+    if family in ("bert", "bert_classifier") or legacy_bert:
         config = transformers.BertConfig(
             vocab_size=32, hidden_size=8, num_hidden_layers=1, num_attention_heads=2,
             intermediate_size=12, max_position_embeddings=16,
         )
-        cls = transformers.BertModel if family == "bert" else transformers.BertForSequenceClassification
+        cls = (transformers.BertModel if family == "bert" else
+               transformers.BertForMaskedLM if family == "bert_legacy_mlm" else
+               transformers.BertForSequenceClassification)
+        if legacy_bert:
+            source = transformers.BertForPreTraining(config)
+            source.save_pretrained(root / "base")
+            source.config.architectures = ["BertForMaskedLM"]
+            source.config.save_pretrained(root / "base")
+            path = root / "base" / "model.safetensors"
+            state = load_file(str(path))
+            state = {name.replace(".LayerNorm.weight", ".LayerNorm.gamma")
+                     .replace(".LayerNorm.bias", ".LayerNorm.beta"): value for name, value in state.items()}
+            save_file(state, str(path), metadata={"format": "pt"})
+            config = source.config
+            config.num_labels = 3  # Infer the saved task head, not BERT's default 2.
         model = cls(config)
+        if legacy_bert:
+            model.bert = source.bert
+            if family == "bert_legacy_mlm":
+                model.bert.pooler = None
+                model.cls.predictions = source.cls.predictions
+            model.tie_weights()
         targets = ["query", "value"]
-        task = "FEATURE_EXTRACTION" if family == "bert" else "SEQ_CLS"
+        task = "FEATURE_EXTRACTION" if family == "bert" else None if family == "bert_legacy_mlm" else "SEQ_CLS"
     elif family.startswith("gpt2"):
         cls = transformers.GPT2LMHeadModel if family == "gpt2" else transformers.GPT2ForTokenClassification
         model = cls(transformers.GPT2Config(
@@ -54,7 +75,8 @@ def prepare_checkpoint(root, family="llama", *, rslora=False, bias="none"):
         ))
         targets, task = ["q_proj", "v_proj"], "CAUSAL_LM"
     base_path, adapter_path = root / "base", root / "adapter"
-    model.save_pretrained(base_path)
+    if not legacy_bert:
+        model.save_pretrained(base_path)
     original = {key: value.detach().clone() for key, value in model.state_dict().items()}
     config = peft.LoraConfig(
         task_type=task, target_modules=targets, r=2, lora_alpha=4,
@@ -94,6 +116,7 @@ def prepare_checkpoint(root, family="llama", *, rslora=False, bias="none"):
     ("gpt2", False, "none"), ("gpt2", False, "all"),
     ("gpt2_classifier", False, "none"),
     ("bert", False, "none"), ("bert_classifier", False, "none"),
+    ("bert_legacy_classifier", False, "none"), ("bert_legacy_mlm", False, "all"),
 ])
 def test_clean_adapter_preserves_identity_and_matches_independent_merge(tmp_path, family, rslora, bias):
     base, adapter, weights, expected = prepare_checkpoint(tmp_path, family, rslora=rslora, bias=bias)
@@ -112,11 +135,41 @@ def test_clean_adapter_preserves_identity_and_matches_independent_merge(tmp_path
     report = model._model_zoo_loading_info
     assert report["adapter_weights_verified"] and report["safe_merge"]
     details = report["adapter_loading_info"]
+    if family.startswith("bert_legacy_"):
+        transfer = report["base_loading_info"]["bert_adapter_transfer"]
+        assert transfer["verified_base_class"] == "BertForPreTraining"
+        assert transfer["target_class"] == type(model).__name__
+        assert "cls.seq_relationship.weight" in transfer["excluded_base_keys"]
+        assert not any(parameter.is_meta for parameter in model.parameters())
+        if family.endswith("classifier"):
+            assert model.classifier.weight.shape[0] == 3
+            assert len(transfer["required_adapter_head_keys"]) == 2
+        else:
+            assert "bert.pooler.dense.weight" in transfer["excluded_base_keys"]
     assert details["peft_version"] == peft.__version__
     assert details["adapter_tensor_count"] == len(weights)
     assert len(details["adapter_state_sha256"]) == len(details["adapter_config_sha256"]) == 64
     assert details["checkpoint_dtypes"] == details["loaded_dtypes"] == ["torch.float32"]
     json.dumps(report, allow_nan=False)
+
+
+@pytest.mark.parametrize("defect", ["missing_head", "extra_base_weight", "norm_collision"])
+def test_legacy_bert_transfer_does_not_fill_gaps_or_hide_extra_weights(tmp_path, defect):
+    base, adapter, weights, _ = prepare_checkpoint(tmp_path, "bert_legacy_classifier")
+    if defect == "missing_head":
+        del weights["base_model.model.classifier.bias"]
+        save_file(weights, str(adapter / "adapter_model.safetensors"))
+    else:
+        path = base / "model.safetensors"
+        state = load_file(str(path))
+        if defect == "norm_collision":
+            state["bert.embeddings.LayerNorm.weight"] = torch.ones(8)
+        else:
+            state["custom.weight"] = torch.ones(8, 8)
+        save_file(state, str(path), metadata={"format": "pt"})
+    with pytest.raises(loader.LoaderFailure) as exc:
+        loader.load_and_merge_adapter(str(adapter), str(base), torch_dtype="auto", effective_loader="standard_causal")
+    assert exc.value.reason == ("adapter_checkpoint_mismatch" if defect == "missing_head" else "checkpoint_weight_mismatch")
 
 
 @pytest.mark.parametrize("defect", ["missing_A", "missing_B", "surplus_lora", "surplus_base", "shape", "nan", "inf", "integer"])

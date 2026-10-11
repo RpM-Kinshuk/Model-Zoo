@@ -1,0 +1,5 @@
+model_id,candidate_source
+7k8k7/bert-base-uncased-finetuned-swag,curated_phase2
+distilbert/distilbert-base-uncased-finetuned-sst-2-english,coverage_extension
+google/vit-base-patch16-224,coverage_extension
+microsoft/resnet-18,coverage_extension

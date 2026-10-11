@@ -1,0 +1,16 @@
+{
+  "runner_returncode": 0,
+  "checked_owned_pids": [
+    3778487,
+    3779095,
+    3779616
+  ],
+  "checked_owned_process_groups": [
+    3778487,
+    3779095,
+    3779616
+  ],
+  "remaining_owned_processes": [],
+  "removed_private_cache": "/tmp/model-zoo-cost-pilot-01_ghoju",
+  "cache_removed": true
+}

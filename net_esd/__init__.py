@@ -43,7 +43,7 @@ def net_esd_estimator(
         conv_norm: float = 0.5,
         filter_zeros: bool = False,
         use_svd: bool = True,
-        filter_type: Optional[bool] = True,
+        filter_type: Optional[bool] = False,
         save_eigs: Optional[bool] = True,
         parallel: Optional[bool] = True,
         backend: Optional[str] = "thread",
@@ -65,7 +65,7 @@ def net_esd_estimator(
         conv_norm (float, optional): Eigenvalue scale for pooled convolutional kernel slices. Defaults to 0.5.
         filter_zeros (bool, optional): Whether to filter eigenvalues below EVALS_THRESH. Defaults to False.
         use_svd (bool, optional): If True, use SVD for eigenvalue computation instead of Gram matrix method.
-        filter_type (bool, optional): Restrict to supported Linear/Embedding/Conv layouts and apply the legacy Linear aspect-ratio filter.
+        filter_type (bool, optional): Opt into legacy module/aspect-ratio restrictions. Defaults to False.
         save_eigs (bool, optional): If True, save computed eigenvalues in results.
         parallel (bool, optional): If True, dispatch layer computations across multiple GPUs.
         backend (str, optional): 'thread' for one thread per GPU; 'process' for one subprocess per GPU.

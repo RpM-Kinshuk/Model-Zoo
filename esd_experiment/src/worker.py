@@ -62,7 +62,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Eigenvalue threshold")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins")
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum, not saved eigenvalues")
-    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=True, help="Restrict layer types and skip Linear aspect ratios >= 8 (default); --no-filter_type also allows other dense 2D .weight tensors and keeps wide/tall Linear layers")
+    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=False, help="Optional legacy restriction: declared module types only and skip Linear aspect ratios >= 8; default includes supported dense 2D .weight tensors and wide/tall Linear layers")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
     parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")
@@ -124,7 +124,7 @@ def runtime_provenance(model, args):
             library_versions[package] = None
     return {
         "analysis_source": "model" if model is not None else "checkpoint",
-        "filter_type": bool(getattr(args, "filter_type", True)) if model is not None else False,
+        "filter_type": bool(getattr(args, "filter_type", False)) if model is not None else False,
         "model_class": f"{type(model).__module__}.{type(model).__name__}" if model is not None else None,
         "loading_info": getattr(model, "_model_zoo_loading_info", None),
         "installed_loading_library_versions": library_versions,

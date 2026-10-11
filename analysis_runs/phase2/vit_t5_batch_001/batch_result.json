@@ -1,0 +1,44 @@
+{
+  "purpose": "Extend real collection coverage, not statistical validation or a 50k launch.",
+  "wall_seconds": 64.9646598410327,
+  "models": [
+    {
+      "model_id": "google/flan-t5-small",
+      "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+      "matrix_coverage": "complete",
+      "layer_selection_version": "2",
+      "measurements": 150,
+      "eigenvalues": 63500,
+      "missing_fits": 0
+    },
+    {
+      "model_id": "google/vit-base-patch16-224",
+      "revision": "3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3",
+      "matrix_coverage": "complete",
+      "layer_selection_version": "2",
+      "measurements": 76,
+      "eigenvalues": 57030,
+      "missing_fits": 1
+    }
+  ],
+  "unchanged_original_vit_measurements": 74,
+  "vit_comparison": "All canonical fields and full spectra exactly equal for the original 74 measurements.",
+  "t5_identity": {
+    "distinct_saved_attention_names": [
+      "encoder.block.0.layer.0.SelfAttention.q",
+      "decoder.block.0.layer.0.SelfAttention.q",
+      "decoder.block.0.layer.1.EncDecAttention.q"
+    ],
+    "shared_tensors": 1
+  },
+  "eigenvalues": 120530,
+  "artifact_bytes": 1028929,
+  "peak_sampled_rss_bytes": 1839239168,
+  "peak_sampled_gpu_bytes": 1379926016,
+  "peak_sampled_cache_bytes": 346427392,
+  "other_gpu_pids_observed": [],
+  "no_overall_stop": true,
+  "older_artifact_hash_checks": 46,
+  "run_script_sha256": "b716f35b60292b887d3adce2c88a55ee4d76b01afd2eea310977a44174aac75d",
+  "plan_adjustment": "Fietje-2 already covered a 5.56 GB two-shard checkpoint in dense_batch_001; used a small encoder-decoder instead of a redundant sharded retry."
+}

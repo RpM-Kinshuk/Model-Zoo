@@ -1,0 +1,89 @@
+{
+  "purpose": "Bounded heterogeneous dataset collection from curated HF metadata, not predictive or population validation.",
+  "wall_seconds": 196.97237025480717,
+  "models": [
+    {
+      "model_id": "Definite/klue-bert-mlm-bible",
+      "revision": "4a433c101f9bb9644cd94a151f1f25346cf54f4c",
+      "model_type": "bert",
+      "matrix_coverage": "complete",
+      "measurements": 77,
+      "missing_fits": 0,
+      "eigenvalues": 58114,
+      "analysis_source": "model",
+      "gaps": []
+    },
+    {
+      "model_id": "EleutherAI/pythia-160m",
+      "revision": "50f5173d932e8e61f858120bcb800b97af589f46",
+      "model_type": "gpt_neox",
+      "matrix_coverage": "complete",
+      "measurements": 50,
+      "missing_fits": 0,
+      "eigenvalues": 38400,
+      "analysis_source": "model",
+      "gaps": []
+    },
+    {
+      "model_id": "bigscience/bloom-560m",
+      "revision": "ac2ae5fab2ce3f9f40dc79b5ca9f637430d24971",
+      "model_type": "bloom",
+      "matrix_coverage": "complete",
+      "measurements": 98,
+      "missing_fits": 0,
+      "eigenvalues": 100352,
+      "analysis_source": "model",
+      "gaps": []
+    },
+    {
+      "model_id": "facebook/opt-1.3b",
+      "revision": "3f5c25d0bc631cb57ac65913f76e22c2dfb61d62",
+      "model_type": "opt",
+      "matrix_coverage": "complete",
+      "measurements": 147,
+      "missing_fits": 0,
+      "eigenvalues": 301056,
+      "analysis_source": "model",
+      "gaps": []
+    },
+    {
+      "model_id": "openai/clip-vit-base-patch16",
+      "revision": "57c216476eefef5ab752ec549e440a49ae4ae5f3",
+      "model_type": "clip",
+      "matrix_coverage": "complete",
+      "measurements": 150,
+      "missing_fits": 0,
+      "eigenvalues": 94738,
+      "analysis_source": "model",
+      "gaps": []
+    },
+    {
+      "model_id": "stabilityai/stablelm-2-1_6b",
+      "revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
+      "model_type": "stablelm",
+      "matrix_coverage": "complete",
+      "measurements": 170,
+      "missing_fits": 0,
+      "eigenvalues": 348160,
+      "analysis_source": "model",
+      "gaps": []
+    }
+  ],
+  "measurements": 692,
+  "eigenvalues": 940820,
+  "artifact_bytes": 5567851,
+  "peak_sampled_rss_bytes": 2283270144,
+  "peak_sampled_gpu_bytes": 8273264640,
+  "peak_sampled_cache_bytes": 5263630336,
+  "other_gpu_pids_observed": [],
+  "no_overall_stop": true,
+  "older_artifact_hash_checks": 50,
+  "run_script_unchanged": true,
+  "overall_index_counts": {
+    "attempt_rows": 34,
+    "valid_pairs": 31,
+    "distinct_model_ids": 30,
+    "complete_coverage_pairs": 30
+  },
+  "preparation_fix": "Exact source_model=unknown placeholder is unspecified; original requested hint retained; adapters still require pinned bases."
+}

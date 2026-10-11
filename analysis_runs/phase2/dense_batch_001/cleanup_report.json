@@ -1,0 +1,44 @@
+{
+  "pilot_pids_exited": [
+    3696983,
+    3697719,
+    3698453,
+    3699229,
+    3699927,
+    3700516,
+    3701256,
+    3702089,
+    3702950,
+    3703821,
+    3704634,
+    3705428,
+    3706605,
+    3708223,
+    3709709,
+    3710795,
+    3711680
+  ],
+  "worker_groups_empty": [
+    3697719,
+    3698453,
+    3699229,
+    3699927,
+    3700516,
+    3701256,
+    3702089,
+    3702950,
+    3703821,
+    3704634,
+    3705428,
+    3706605,
+    3708223,
+    3709709,
+    3710795,
+    3711680
+  ],
+  "removed_cache_root": "/tmp/model-zoo-cost-pilot-xiytfe1s",
+  "remaining_files_removed": [
+    "metadata/hub/models--kernels-community--quantization_bitsandbytes/refs/main",
+    "metadata/hub/models--kernels-community--quantization_bitsandbytes/.no_exist/fa4365c273b3c3954244482bf6d701dd72b409e7/kernel-status.toml"
+  ]
+}

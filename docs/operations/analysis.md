@@ -9,7 +9,8 @@ python esd_experiment/run_experiment.py \
   --output_dir analysis_runs/phase2/my_run --limit 20 --prepare_only
 ```
 
-Review `analysis_runs/phase2/my_run/models.csv`, then launch exactly that list:
+Review `analysis_runs/phase2/my_run/models.csv`, then launch exactly that list.
+Held preparation rows stay visible but are not dispatched:
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -27,6 +28,9 @@ Preparation fills `revision_norm` with a full commit SHA and pins each
 `source_model` as `repo@SHA`. It uses `revision_norm` first, then a revision in
 `model_id`, then a full `Modelsha` from metadata, otherwise resolves `main`.
 Adapter bases come from an explicit `source_model` or the pinned adapter config.
+The curated literal `source_model=unknown` means unspecified, not a repository
+to fetch. Its original hint stays in `source_model_requested`; an adapter still
+needs a real base resolved from its config or supplied explicitly.
 Repeated bases share one resolution within preparation. `revision_requested`
 and `source_model_requested` preserve the references used to obtain the pins.
 Resolving an unspecified base revision today does not recover its historical
@@ -45,8 +49,24 @@ and downloads no weights. It does not infer an adapter's architecture from its b
 The existing summary carries these input fields as `input_config_*` for queries;
 no separate metadata database or repair command is needed.
 
+Preparation records `preparation_status=ready|held`, `preparation_reason`, the
+selected `weight_format`, `weight_files` (JSON byte sizes), `weight_bytes` and
+`download_bytes`. Adapter payloads and their pinned base files are counted
+together; ordinary finetune lineage hints do not add a second model to the
+budget. Standard safetensors files are preferred over PyTorch files. Sharded
+checkpoints use their small index JSON, not all similarly named files in the
+repository. The default `--max_weight_gib 6` holds oversized jobs; zero disables
+the size cap, not missing-file/size/access checks. Gated/private repositories
+need verified read access. These checks do not validate tensor layouts, predict
+RAM/VRAM requirements, or establish quantization support. Runtime integrity and
+coverage checks still apply. JSON downloads are deleted immediately after use;
+shared base metadata and index reviews are reused within preparation.
+
 `pin_status=error` rows keep their `pin_error`; preparation exits nonzero if any
-fail. Fix or explicitly remove those rows before launching. Duplicate output
+fail, but the written manifest retains them as holds. Launch skips explicit
+holds and records them as blocked; the summary can show them before launch.
+Manually pinned older lists without preparation fields remain supported, but
+unresolved rows in those lists must be fixed or removed. Duplicate output
 identities are rejected. An existing `models.csv` is never replaced, even with
 `--overwrite`: keep it for resume, or prepare another directory for new pins.
 You can also supply a manually pinned CSV. Runner and standalone worker require
@@ -108,16 +128,54 @@ Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
   commit. Per-layer fields record source/compute dtype, compute device, weight
   layout and fit status. Visible GPU names alone do not identify where a layer ran.
 
-```python
-import h5py
+### Query models and read a named spectrum
 
-with h5py.File("metrics/org--model.h5", "r") as h5:
-    names = h5["layers/longname"].asstr()[:]
-    alphas = h5["layers/alpha"][:]
-    first_spectrum = h5["eigs"][0]  # Unless --no-save_eigs was used.
+Refresh a run's index with `python esd_experiment/analyze_results.py --results_dir
+<run_directory>` after collection or a retry. It checks the saved pairs without
+reading spectra. Then use pandas for model selection and h5py for a chosen layer.
+This example uses the collected encoder/vision slice:
+
+```python
+from pathlib import Path
+import h5py
+import pandas as pd
+
+run = Path("analysis_runs/phase2/encoder_vision_batch_001")
+index = pd.read_csv(run / "summary.csv", keep_default_na=False)
+ready = index.query("artifact_status == 'valid' and matrix_coverage == 'complete' and analysis_source == 'model'")
+row = ready.loc[ready.model_id == "distilbert/distilbert-base-uncased-finetuned-sst-2-english"].iloc[0]
+
+with h5py.File(row.h5_path, "r") as h5:
+    names = h5["layers/longname"].asstr()[:].tolist()
+    layer = "distilbert.transformer.layer.0.attention.q_lin"
+    i = names.index(layer)  # Exact canonical name; print names to choose another.
+    print(h5["layers/fit_status"].asstr()[i], h5["layers/n_tail"][i])
+    spectrum = h5["eigs"][i]  # Only this layer's spectrum is read.
 ```
 
+The index also exposes `input_config_model_type`, `model_class`, pins and
+measurement settings. To query several collected runs without copying spectra:
+
+```python
+collection = pd.concat([
+    pd.read_csv(path, keep_default_na=False).assign(run=path.parent.name)
+    for path in sorted(Path("analysis_runs/phase2").glob("*/summary.csv"))
+], ignore_index=True)
+```
+
+Keep the run, revision, base pin and conventions when joining or comparing rows.
+Do not deduplicate by model ID: retries, different revisions and measurement
+settings are not interchangeable. Filter valid results for measurement queries;
+retain failed rows for collection coverage. `input_candidate_source` distinguishes
+curated rows from explicit coverage extensions. Indexes are rebuildable, not
+completion evidence; the CSV/HDF5 pairs remain authoritative. Complete coverage
+and finite fits alone do not establish scientific validity.
+
 Current output versions are numerics **7**, loader **10**, HDF5 format **2.0**.
+Layer selection **2** adds declared ViT tables without changing spectral formulas.
+Earlier numerics-7/loader-10 pairs without this field remain readable as selection
+**1**, but do not resume under current selection settings. Keep this convention
+when comparing summaries; use a fresh run directory rather than rewriting history.
 Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
 aligned alpha values and requested measurement settings must match. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
@@ -173,6 +231,15 @@ not load eigenvalues or use the derived `/alpha` view. Measurement counts are
 not model depth.
 Alpha and other fit-derived summaries include only finite fitted `alpha > 1`;
 other metrics use their finite values across all measured rows.
+
+`matrix_coverage` is `complete`, `partial` or `unknown`. Complete means the
+recorded matrix candidates were measured and, in model mode, the loaded-tensor
+inventory has no skipped/unresolved tensors or unlinked measurements. Ordinary
+vectors do not count as gaps. Missing inventories stay unknown. This is coverage
+within the recorded model/checkpoint scope, not proof of architecture support or
+scientific validity. Partial/unknown rows keep their scalar values but are
+excluded from the console's pooled alpha statistic. `outcome=success` still
+means a valid artifact pair, so filter on both fields when selecting results.
 
 Incomplete or incompatible pairs remain as `artifact_status=invalid` rows with
 an `artifact_error`. Incomplete outputs or malformed terminal records make the
@@ -256,6 +323,25 @@ requested/loaded base references plus adapter configuration/tensor hashes.
 An unspecified historical training-base revision cannot be reconstructed from
 these checks.
 
+Legacy BERT adapters have one narrow task-transfer path: a base declared as
+`BertForMaskedLM` must match the complete `BertForPreTraining` layout, including
+the historical LayerNorm `gamma`/`beta` aliases. Rename collisions and unexplained
+keys fail. The full pretraining model is loaded and checked first. A `SEQ_CLS`
+adapter then uses its saved classifier weight/bias to determine the output count;
+an adapter explicitly mapping to built-in `BertForMaskedLM` retains the stored
+MLM head. Every retained backbone/head parameter comes from the verified base
+or adapter, never a random task head. Ordinary standalone loading still honors
+the declaration and rejects this conflict.
+
+Unused pretraining-head keys are listed in `base_loading_info.bert_adapter_transfer`,
+with the source/target classes and transfer policy version. `summary.csv` exposes
+`base_transfer_policy` and `excluded_base_key_count` (names, not unique parameter
+counts). Complete coverage here means the reconstructed **adapted task model**,
+not every tensor in the pretraining file. This follows the adapter class/task and
+saved payload evidence in the [PEFT checkpoint format](https://huggingface.co/docs/peft/v0.18.0/en/developer_guides/checkpoint).
+Only previously rejected base-layout conflicts gain this path; accepted model
+measurements and loader version 10 remain unchanged. No new mode or registry is added.
+
 DoRA, other PEFT types, `bias="lora_only"`, embedding/convolution LoRA,
 unconfigured embedding dumps and unvalidated topology/initializer variants fail
 explicitly. Adapter validation covers materialized CPU/GPU bases, not Accelerate
@@ -285,17 +371,27 @@ performing projections elsewhere. Optional `bias_k`/`bias_v` vectors are not
 projection matrices; they remain visible as unresolved in loaded-tensor usage.
 The layout follows [PyTorch's implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/torch/nn/modules/activation.py).
 
-For an explicit broader pass over a successfully loaded model, add
-`--no-filter_type` to the runner or worker command in a fresh output directory.
-This exposes the estimator's existing dense-matrix fallback: other ordinary
+Built-in HF `ViTEmbeddings` tables are measured as `[tokens, hidden]`, selecting
+`[0]` from their singleton broadcast axis. The attribute name, original shape
+and slice are recorded. This covers positional embeddings, CLS and optional mask
+tokens; one-row token tables retain a rank-one spectrum and a missing power-law
+fit, not a meaningful tail estimate. Patch projections remain Conv2d matrices.
+Shapes must match the declared patch count and hidden width; custom subclasses
+and arbitrary 3D parameters are not reshaped. See the
+[Transformers ViT implementation](https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/vit/modeling_vit.py).
+
+Full supported-matrix inclusion is now the default (`filter_type=False`) in the
+runner, worker and Python estimator. Other ordinary
 floating, dense 2D `.weight` tensors become eligible, and the legacy Linear
 aspect-ratio skip is disabled. Standard convolution layouts remain supported;
 unknown higher-dimensional layouts, packed/quantized representations and
 undeclared nonstandard attributes are still skipped. This is not
 architecture recovery or permission to use a partially loaded checkpoint.
 Inspect coverage and weight-usage records for remaining gaps. `filter_type` is
-stored in HDF5 and the summary, and must match on resume; the default remains
-`True`, so existing compatible runs continue with their original selection.
+stored in HDF5 and the summary, and must match on resume. Use `--filter_type` to
+explicitly resume an older restricted run; use a fresh directory for wider
+coverage. No numerical/version bump is needed: the existing recorded setting
+already distinguishes these conventions and rejects mismatched resume.
 
 Coverage also inventories loaded registered parameters and buffers, including
 non-persistent buffers, without reading/copying their values. Each tensor has its
@@ -486,8 +582,21 @@ reported as successful.
 - `heartbeat_timeout_seconds` detects stopped heartbeats.
 - `stage_timeout_seconds` limits load/analyze/save stages even while heartbeats
   continue. `termination_grace_seconds` controls shutdown grace.
-- Keep `stale_process_action="log"` while tuning; choose `terminate` only after
-  timeout windows are trusted.
+- The runner defaults to `stale_process_action="terminate"`. Set `log`
+  explicitly to observe expired timeouts without stopping workers.
+- The default is one worker. Increase `--max_concurrent_jobs` explicitly after
+  reviewing memory/storage costs; per-worker caps are not an aggregate host cap.
+- `--max_worker_ram_gib 16` samples summed worker-tree RSS and
+  `--max_worker_cache_gib 12` samples allocated private-cache bytes every five
+  seconds in the existing supervisor. Zero disables each cap. These are sampled
+  safety stops, not hard OS quotas: fast allocation spikes can overshoot, and
+  slow filesystem reads can delay a sample. Monitoring errors stop the affected
+  worker rather than silently removing its guard. Cap breaches use existing
+  group termination, status recording and cleanup, then permit the next worker
+  if cleanup succeeds. Infrastructure/cleanup failures still stop dispatch.
+- HF and legacy Transformers cache paths share the same private Hub cache;
+  Xet and remote-module caches are also kept inside the worker directory, even
+  if the parent environment points elsewhere. No shared cache is deleted.
 - `logs/current_state.json` records PID, PGID, assigned GPUs, stage and paths.
   `logs/failure_records.jsonl`, `logs/failed_models.txt` and
   `logs/terminal_status/*.json` retain terminal results, including preflight
@@ -500,6 +609,10 @@ Cache removal is deliberate: checkpoint storage previously grew without bound,
 even over a few models. Re-downloading can be an acceptable tradeoff on this
 shared HPC server. GPU availability checks, runtime signals, scoped shutdown
 and resume from completed outputs are also intentional operating safeguards.
+Availability checks are not a reservation against other users or runners:
+another job can start after a GPU passes the idle checks. Coordinate an exclusive
+window for isolated performance measurements. Device-wide GPU memory includes
+other processes and must not be reported as worker-only memory.
 
 ## Validation
 
@@ -507,10 +620,13 @@ Offline regression tests cover numerical edge cases, layer identity, coverage,
 checkpoint/adapter integrity and persistence:
 
 ```bash
-python -m pytest esd_experiment/tests -q \
-  --ignore=esd_experiment/tests/test_gpu.py \
-  --ignore=esd_experiment/tests/test_setup.py
+python -m pytest esd_experiment/tests -q
 ```
+
+Install pytest separately for development; it is not needed by workers. The
+[installation recipe](../../README.md#1--create-the-environment) uses one root
+dependency list. `python esd_experiment/tests/test_setup.py` checks imports and
+a tiny CPU spectrum without accessing tokens, downloading weights or using GPUs.
 
 The reusable matrix check needs no downloads. It compares against SciPy float64
 and records precision/filter/cutoff sensitivity, with a timeout per case:
@@ -619,115 +735,58 @@ worker with `--no-filter_type`, under recorded settings and unchanged defaults.
 Declared PyTorch MultiheadAttention projections now use the same estimator and
 writer, with per-weight identities and module-grouped coverage counts.
 
-### 1. Now: small correctness and operability steps
+### 1. Now: ordinary bounded collection
 
-Continue architecture fallback and checkpoint-to-measurement weight accounting.
-Alongside it, inspect the broader workflow below so the roadmap does not become
-only a loader project. These are hypotheses to check, not diagnosed faults or
-commitments to build every proposed feature. Prioritize demonstrated risks to
-measurement identity, data durability and recovery, then measured cost and human
-effort. Each slice should have a concrete check and a small, understandable diff.
+The baseline is ready for supported families: prepare, review, run, query.
+Preparation checks pinned file sizes and access, counts adapter bases, retains
+holds and deletes its JSON caches. The normal supervisor enforces sampled
+worker RAM/cache bounds and terminating stage/heartbeat timeouts. Held rows are
+visible in the existing index without running a worker. The pilot observer is
+not an operational dependency; its duplicate RAM/cache stop logic is retired.
 
-#### Architecture fallback and weight usage
+Current defaults are one worker, 6 GiB selected-weight budget, 16 GiB worker-tree
+RSS and 12 GiB private cache. These are configurable operational safeguards, not
+proof of memory feasibility or scientific validity. Existing numerical
+conventions and authoritative measurements are unchanged.
 
-- [ ] **Map the remaining fallback cases.** Separate missing/contradictory
-  architecture metadata, unsupported classes, backend failures and resource
-  limits. Preserve declared classes when consistent. Use pinned config and
-  checkpoint keys/shapes to narrow supported alternatives, without repeatedly
-  loading full models. Add one recorded architecture override only where needed
-  for ambiguity; an override must still pass weight-integrity checks. Backend
-  recovery must not silently change architecture, precision, base or revision.
-- [ ] **Account for checkpoint-to-measurement usage.** Compare checkpoint contents
-  with loaded named modules, parameters, relevant buffers and shared aliases, then
-  with the tensors actually passed to ESD and the saved records. Each in-scope
-  weight must be accounted for as measured, shared with an identified measurement,
-  deliberately skipped with a reason, or unresolved. Distinguish non-weight
-  buffers and non-matrix parameters from missing analyzable weights. Preserve task
-  heads and full names; do not confuse physical shared modules with execution
-  depth. Inspecting only the loaded model cannot expose weights already discarded
-  or newly initialized during loading.
-  The loaded registered-tensor portion is implemented; broader checkpoint-name
-  conversions, non-tensor packing and fallback eligibility remain to be checked.
-  The explicit dense `.weight` fallback covers a limited subset of loaded-layer
-  gaps. Declared MultiheadAttention projection attributes are now covered;
-  arbitrary extra loaded parameters remain open. Failed loads follow the narrow
-  automatic-fallback rules above; broader recovery needs pilot evidence.
-- [x] **Direct matrices and narrow automatic fallback.** `--analysis_source auto`
-  is the default; `model` and `checkpoint` remain explicit overrides. Tensor analysis streams
-  ordinary floating safetensors or memory-mapped PyTorch matrices through the existing core/writer, with
-  exact keys, complete stored-key accounting and separate summary/resume scope.
-  Eligibility and limits are defined above. This does not salvage partial model
-  loads, interpret unknown layouts or claim architectural recovery. Keep the
-  strict gate for model mode, preserve failure reasons and do not promote tensor
-  results on resume. Expand formats/layouts or triggers only for demonstrated needs.
-- [ ] **Verify these paths with bounded controls.** Reuse current regression
-  fixtures; add cases for each new fallback and for dropped/new weights, heads,
-  shared aliases, unsupported layouts and partial coverage. Keep declared and
-  inferred loading, and tensor-only measurements, distinguishable in
-  summaries and resume checks. Only claimed-supported tensors should reach ESD.
+Continue bounded collection from curated HF metadata. Use recorded failures,
+coverage and actual costs to choose the next engineering change. No additional
+general-purpose numerical pilot is a prerequisite for every small step.
 
-Acceptance before the next pilot: supported cases produce correctly identified
-measurements, uncertain cases remain explicit, and no fallback silently changes
-the measured object. Record the selection reason, analysis source and coverage
-in existing outputs. Verify time/memory bounds and failure/resume behavior; bump
-the relevant policy version when behavior changes. Universal architecture support
-is not required to proceed, but known gaps must be visible and scoped.
+Remaining work is driven by evidence, not an unchecked list of features:
 
-#### Workflow, storage and efficiency hypotheses
+- **Coverage:** map remaining unsupported/custom/packed layouts and metadata
+  contradictions. Preserve declared classes, heads, shared aliases and exact
+  checkpoint identities. Never salvage an incomplete load or promote tensor-only
+  results to model-layer measurements. Expand support only with an explicit
+  interpretation of the weights and a focused control for the changed path.
+- **Result access:** keep authoritative CSV/HDF5 pairs separate from rebuildable
+  indexes. Query compatible conventions and full layer names, without loading
+  all spectra or deduplicating by model ID. Measure real query/storage costs
+  before adding a catalog service, changing formats or duplicating data.
+- **Loading efficiency:** quantify repeated transfers, especially shared adapter
+  bases. Ephemeral caches remain the baseline. Any reuse needs a bounded budget,
+  ownership and eviction; do not add unbounded shared caches, retries or prefetch.
+- **Scheduling/recovery:** distinguish dispatch/import/download/analysis costs
+  and genuine capacity waits. Preserve idle-device checks, signals, failure
+  records and version-aware resume. Raise concurrency or tune timeout windows
+  only with workload evidence. Reuse the existing supervisor, not another
+  watchdog. A blocked kernel/filesystem or unconfirmed cleanup remains an
+  infrastructure problem, not permission to reuse its resources.
+- **Human upkeep:** simplify confusing defaults, repeated configuration, stale
+  documentation and redundant code as part of each change. Keep one operating
+  guide and clear errors. Existing mechanisms must earn their complexity just
+  as new ones do; preserve useful research outputs when removing disposable
+  artifacts.
 
-- [ ] **Human workflow and cleanup.** Walk through preparing a small input,
-  launching it, checking progress, understanding a failure, resuming and reading
-  one spectrum. Identify confusing defaults, repeated configuration, stale docs,
-  redundant scripts and outputs. Consolidate or remove where that makes this
-  path clearer; keep one primary operating guide. Check that errors explain what
-  happened and what the operator can do next. New abstractions must earn their
-  complexity, just as existing ones must earn their place.
-- [ ] **Database and result access.** Test the existing summary index and HDF5
-  reader against actual research questions: find models by metadata and coverage,
-  compare compatible runs, join canonical layer records, and fetch selected
-  spectra without reading every array. Check checkpoint/revision/measurement
-  identity, duplicate handling, partial writes and rebuilding derived indexes.
-  Separate authoritative measurements from replaceable summaries. Measure query
-  time and storage at representative sizes before choosing whether to keep,
-  simplify or replace the current layout; a new database service is not assumed.
-- [ ] **Input preparation and loading.** Follow HF metadata through selection,
-  pinned inputs, downloads, cache use and loading. Check malformed/duplicate rows,
-  unavailable checkpoints, transient failures, shared adapter bases and cache
-  reuse. Measure download/startup time, bytes transferred and peak host memory.
-  Keep ephemeral cleanup as the baseline: it prevents the disk-growth problem
-  already observed here. Measure repeated-download costs before considering any
-  bounded reuse; preserve safe concurrency, disk limits and reproducibility.
-  Do not add retries or prefetching without evidence and explicit bounds.
-- [ ] **Workers, timeouts and recovery.** Exercise a failed launch, stalled
-  download, slow-but-progressing analysis, worker exit/OOM and interrupted run.
-  Check that stage and heartbeat limits distinguish these cases, release owned
-  processes/resources, preserve completed outputs and leave a clear terminal
-  record. Verify resume does not accept incomplete data or lose failures. Look
-  for overlapping supervision/state mechanisms that can be merged or removed;
-  avoid another watchdog merely to compensate for an unclear existing one.
-- [ ] **Scheduling and idle time.** Separate lack of eligible GPU capacity from
-  download, CPU/SVD, startup and dispatch delays. Measure queue/stage times,
-  useful completed spectra per wall time, wasted work and resource peaks. Only
-  then assess polling intervals, concurrency, placement or overlapping work.
-  High GPU utilization alone is not success, and an idle wait imposed by resource
-  ownership or safety is not automatically waste.
+The real metadata check in `analysis_runs/validation/preparation_20261010/`
+marked seven small checkpoints ready and held OPT-30B for its 6 GiB budget,
+without downloading weights. A CPU worker control verified cap-triggered
+termination, cleanup and subsequent-job progress. The ordinary all-held launch
+recorded the block without creating GPU configuration or artifacts. These are
+operability checks, not predictive-validity evidence.
 
-Start with a bounded workflow audit using existing commands, summaries, logs and
-small failure controls. Add only measurements needed to answer an open question.
-For each finding, record the evidence, smallest useful change (including deletion
-or no change), and how to verify it. Fix critical demonstrated gaps before the
-pilot; let the pilot resolve workload-dependent questions. This is not a mandate
-for a scheduler rewrite, a new monitoring stack or a separate database layer.
-
-Initial workflow inspection: per-worker caches are isolated and removed on exit,
-so cross-worker reuse is not provided by that path, intentionally bounding cache
-accumulation across completed jobs. Measure repeated downloads before proposing
-an alternative with equally clear storage bounds. Heartbeats report liveness;
-stage timeouts bound elapsed stage time, not per-layer progress. Calibrate them against slow valid
-work before changing termination policy. Existing recovery/timeout controls are
-covered by offline tests; workload costs still need pilot measurements.
-
-### 2. Bounded trained-checkpoint pilots
+### 2. Implementation evidence (historical pilots)
 
 Use roughly 20–30 pinned public checkpoints spanning encoders, decoders,
 encoder-decoder models, CNNs and supported adapters. Select against the intended
@@ -789,21 +848,283 @@ Do not stratify by the damaged labels, or change old results to match today's
 metadata. Prepare fresh config labels, keep unknowns separate, and retain explicit
 pilot family/role labels for deliberate coverage controls.
 
-Next: reprepare the existing 20-checkpoint coverage list at the same pins in a
-fresh directory, inspect label gaps and preflight blocks, then run one worker on
-an idle authorized GPU (3–7). Keep GPU checks and ephemeral caches; measure
-representative larger checkpoints before optimizing small-model startup/dispatch
-costs. This preparation/rerun is not a population sample or permission to scale up.
+The loader-10 rerun in `analysis_runs/validation/trained_pilot_20260917/` completed
+on September 29, with the same 20 model pins and adapter-base pin. Config labels
+are present for 18 entries; BERT-tiny and the adapter remain explicitly unlabelled.
+Three rows matched their pinned raw config JSON. The folder date is preparation,
+not execution. `summary.csv` and `pilot_report.json` contain the current results:
 
-### 3. After that: cost and coverage gates for staged scale-up
+- **19 valid pairs, one AWQ block** (`unsupported_backend`; AutoAWQ is absent).
+  All six encoders completed. DeBERTa is explicitly checkpoint-matrix analysis:
+  80 matrices measured, 132 non-matrix tensors skipped. Other results use model
+  mode. Deliberate skips remain visible, including aspect-ratio filtering and
+  two unsupported DeiT attributes; success does not mean exhaustive coverage.
+- **1,405 measurements, 795,639 full-spectrum eigenvalues, 6.68 MiB** of CSV/HDF5.
+  All identities and spectrum lengths aligned; three missing fits were retained.
+  Recorded loaded-tensor reports have zero unresolved tensors/unmapped measurements.
+  The index keeps model/checkpoint conventions separate. Selected spectrum reads
+  took a median of about 0.9 ms with warm filesystem caches, not a 50k-scale benchmark.
+- **GPU checks passed:** four well-conditioned controls and four sensitivity
+  controls completed on L40 GPU 3. Six saved MiniLM/ResNet spectra agreed with
+  pinned-weight SciPy float64 references to below 2e-7 of the largest eigenvalue.
+  Workers used GPUs 5/6, one at a time. Runtime was PyTorch 2.11.0+cu128 and
+  Transformers 5.9.0, not the previous PyTorch build. The pytest suite was not
+  rerun: `pytest` is absent from this environment. No packages were changed.
+- **Recovery passed:** an active load was interrupted and resumed; the final
+  resume launched no workers and left all 38 artifacts byte-for-byte unchanged.
+  Changing compute precision was rejected for all 19 pairs. Worker caches emptied;
+  the four disposable cache roots, including reference-download logs, were removed.
+- **Observed cost:** 23m24s wall time, about 4m34s sampled active-worker time;
+  the remainder includes preflight, capacity waits, dispatch and cleanup.
+  Sampled process-tree RSS peaked at 1.90 GiB and cache allocation at 1.24 GiB.
+  CLIP overlapped an external GPU job: its 11.23 GiB device-memory peak is not
+  worker-only usage. These shared-server timings are not isolated throughput estimates.
 
-Use pilot measurements and the target metadata distribution to estimate storage
-and compute, with uncertainty for larger/untested models. Identify family-level
-missingness and expensive failure patterns. Fix observed critical problems, then
-check that the operating/query path remains simple and retire superseded paths
-and disposable pilot artifacts when no longer useful. Seek approval for the next
-bounded batch. Keep pinned inputs and consistent
-measurement versions; do not grow concurrency or launch 50k models implicitly.
+The installation recipe now has one root list of direct analysis dependencies
+and a Python-only Conda environment, with the matched PyTorch wheel installed
+explicitly. The duplicate experiment requirements and obsolete GPU/download
+setup probe were removed. The small CPU setup check passes in `esd_ind` and
+returns a nonzero status for missing dependencies without inspecting tokens.
+The recipe was also rebuilt in a disposable Conda environment: `pip check`, the
+CPU setup check and all 847 existing tests passed (44 seconds for pytest).
+The environment and package caches were removed afterward; installation logs
+and resolved package versions are in `cost_pilot_20260929/install_retry_*` under
+the validation directory. The verifier's first attempt incorrectly required
+wheels only; allowing gpustat's source distribution, as the documented recipe
+already does, resolved that restriction without changing the pins.
+The shared environment's existing Streamlit/protobuf conflict is outside the
+analysis baseline and was not changed. Optional quantization packages remain separate.
+
+The three-model cost slice in `analysis_runs/validation/cost_pilot_20260929/`
+also ran on September 29: one worker at a time on idle L40 GPU 6, in unchanged
+`esd_ind`. Limits were 12 GiB disposable cache, 16 GiB sampled process-tree RSS,
+and load/analyze/save timeouts of 900/900/120 seconds. No limit was reached.
+`models.csv` retains the pins; `summary.csv` and `pilot_report.json` record results.
+
+| Checkpoint | Outcome | Sampled worker time | Peak RSS / worker GPU / cache (GiB) |
+| --- | --- | --- | --- |
+| RoBERTa-large | 148 measurements, 147 fits | 28 s | 1.53 / 2.69 / 1.32 |
+| Qwen2.5-3B, two shards | 181 measurements, 181 fits | 61 s | 6.66 / 12.33 / 5.75 |
+| Qwen2.5-1.5B-Instruct-GPTQ-Int4 | Load failed before weight download | 7 s | 0.84 / 0 / <0.01 |
+
+The two valid pairs contain **520,707 full-spectrum eigenvalues in 2.79 MiB**.
+Identities, spectrum lengths and finite/nonnegative values passed checks, with
+no unresolved loaded tensors or unmapped measurements. RoBERTa's token-type
+embedding remains present despite having no retained eigenvalues for fitting.
+Source dtypes are float32 for RoBERTa and bfloat16 for Qwen; computation is float32.
+Qwen's default aspect-ratio filter skips all 72 distinct key/value projection
+matrices (256×2048). Its shared output head is also filtered as a module, but the
+tied embedding weight is measured. These are recorded exclusions, not full coverage.
+
+GPTQ passed preflight but failed importing `optimum.gptq` → `datasets`:
+`importlib.metadata.version("fsspec")` returns `None` from an incomplete
+`fsspec-2026.3.0.dist-info`, alongside the working 2026.2.0 module/distribution.
+An independent `datasets` import reproduces the failure. This is an environment
+blocker, not evidence about this checkpoint's quantized-matrix support. The
+failure remains `load/model_load_error`; no shared packages were repaired.
+
+The run took 3m18s wall time; approximately 96 seconds were sampled active-worker
+time, with the rest including preflight, availability checks, dispatch and cleanup.
+No other GPU compute PIDs were observed on the worker device. Peaks are sampled,
+and summed process RSS can double-count shared mappings; this is not an isolated
+throughput benchmark. Resume with `--skip_failed` launched no workers and preserved
+all four artifacts byte-for-byte. Precision-change compatibility checks rejected
+both pairs. All pilot processes exited and both disposable cache roots were removed.
+
+The follow-up in `analysis_runs/validation/qwen_coverage_20260929/` used the same
+Qwen pin and settings except `--no-filter_type`. It recovered all 72 key/value
+matrices plus the tied output-head view: **254 measurements, all fitted**, with
+391,168 eigenvalues and no unresolved or skipped matrix tensors. All 181 common
+spectra were exactly unchanged. The head and embedding spectra are identical
+views of shared weights, not independent tensors; the saved aliases retain this
+distinction. The fitted-alpha mean changed from 2.5172 to 2.8106 solely through
+coverage, illustrating why model aggregates need matching inclusion rules.
+
+Sampled analysis time was 32.9 versus 32.2 seconds; peak worker GPU memory stayed
+12.33 GiB and output size grew from 1.85 to 2.02 MiB. This single shared-server
+comparison supports wider coverage at little observed extra cost, not a general
+performance guarantee. Resume preserved both files; processes exited and caches
+were removed. See `comparison_report.json`. This comparison informed the new
+unrestricted default. This coverage
+filter is separate from the deferred statistical aspect-ratio correction.
+
+The GPTQ recheck in `analysis_runs/validation/gptq_isolated_20260929/` used a fresh
+baseline plus the [official GPTQModel 6.0.3 wheel](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3)
+for Python 3.10 / PyTorch 2.11 / CUDA 12.8, TorchAO 0.17.0+cu128, Optimum 2.1.0,
+Datasets 4.8.2 and fsspec 2026.2.0. Dependency checks, CPU setup and backend import
+passed. The exact install commands and resolved packages are retained with the
+report; no optional backend was added to the root requirements.
+
+The checkpoint loaded on idle GPU 5, but **only `model.embed_tokens` was measured**:
+one fit and 1,536 eigenvalues. All 196 `MarlinQuantLinear.qweight` modules were
+explicitly skipped as unsupported packed attributes; their 196 `scales` parameters
+remain unresolved in tensor coverage. The tied head was filtered, and the remaining
+57 candidates were non-matrix weights. Thus `outcome=success` means valid artifacts,
+not model-wide quantized coverage. Do not use this embedding-only alpha as a model
+quality score or mistake the load success for verified GPTQ spectral support.
+
+The GPTQ worker took about 20 sampled seconds (58 seconds run wall time), peaking
+at 1.84 GiB summed RSS, 6.17 GiB worker GPU memory and 1.08 GiB cache. No other GPU
+compute PIDs were observed. Resume preserved both files with no workers launched;
+all processes exited, and the environment, package caches and checkpoint caches
+were removed. Shared `esd_ind` remains unchanged.
+
+Full supported-matrix inclusion is now the default, and the summary exposes
+`matrix_coverage` without changing artifact or terminal-status formats. The dense
+Qwen comparison reads as complete; the GPTQ control reads as partial and its
+embedding-only alpha is excluded from pooled console statistics.
+Keep packed quantization explicitly unsupported until a backend-specific
+dequantization path has an independent numerical check; do not analyze integer
+packing or scale arrays as weights. No new database service or loader framework is
+needed. These pilots are not population samples, predictive validation, or
+permission to scale up.
+
+### 3. Collection costs and progress
+
+The first operational batch completed on October 10, 2026, using
+`analysis_runs/phase2/dense_batch_001/models.csv`. Use this ordinary pinned manifest
+with the existing runner; no new queue, database service or batch mode was added.
+`batch_review.json` retains input hashes, selection rules, pins, file sizes and
+the excluded candidates. Its one-off preparation script downloads metadata only.
+
+The current input contains 15,000 rows, not the eventual 50,000. Loader hints split
+into 7,436 standard, 4,737 adapter, 2,101 quantized and 726 multimodal rows; they are
+not verified support counts. Only 2,922 rows have numeric parameter-size metadata.
+The damaged architecture labels must not drive selection. After excluding tagged
+adapters/quantization/MoE/multimodal, 517 rows have positive size hints at most 3B.
+These hints screen candidates; pinned config/access/file metadata is then reviewed.
+
+We selected 24 candidates across two size bins, with at most one publisher and
+metadata parent per selection. **16 passed metadata review**: ten at most 1B and
+six between 1B and 3B, spanning fresh config types qwen2 (6), llama (4), gpt2 (2),
+phi (2), gpt_neo (1), and mistral (1). Four candidates were unavailable without
+credentials, two lacked the selected safetensors metadata, one exceeded the
+6.5 GB checkpoint ceiling and one was gated. They remain in the review, not the
+launch manifest. Metadata acceptance is not a guarantee of successful loading.
+
+Plan for 34.5 GB of selected weight files transferred over the batch, not all
+retained simultaneously. The largest is 5.56 GB; ephemeral per-worker cleanup
+remains necessary. As a rough planning allowance, 16 results at the observed
+Qwen size would be about 32 MiB, but architectures and compression vary. The
+observed 32–33 second Qwen analysis and roughly two-minute single-model run are
+anchors, not throughput guarantees. Keep a one-hour whole-batch stop/review limit
+rather than extrapolating these measurements to 50k.
+
+The user authorized GPUs 0–3 for this run. One worker used idle GPU 0 with full
+supported-matrix inclusion and saved eigenvalues. **15 valid pairs have complete
+recorded matrix coverage:** 2,187 measurements/fits, 2,739,840 eigenvalues and
+15.16 MiB of CSV/HDF5 artifacts. The remaining GPT-Neo-125M checkpoint failed
+`load/checkpoint_weight_mismatch`: its legacy attention `bias`/`masked_bias`
+buffers were rejected. The worker failure did not stall the queue. This case
+is now resolved in `analysis_runs/phase2/gpt_neo_retry_001/`: **75 measurements,
+57,600 eigenvalues, complete recorded matrix coverage**, in 41 seconds wall time.
+The loader accepts only built-in GPT-Neo buffer names after checking stored
+causal masks against regenerated masks and scalar float32 `masked_bias` against
+`-1e9`. Missing/mismatched weights and arbitrary extra tensors still fail.
+Accepted buffers are recorded in runtime provenance. This follows the
+[historical Transformers implementation](https://github.com/huggingface/transformers/blob/v4.11.3/src/transformers/models/gpt_neo/modeling_gpt_neo.py).
+Existing successful artifacts remain untouched. Loader version 10 is retained:
+this adds verified acceptance of formerly rejected constants, without changing
+the measured parameters or conventions of any previously accepted checkpoint.
+
+Wall time was 14m16s, with 6m28s sampled active-worker time: roughly 55 seconds
+dispatch/import, 122 seconds load, 199 seconds analysis and 12 seconds save.
+The remaining 7m48s includes preflight, GPU availability checks, dispatch waits
+and cleanup. This makes orchestration delay a concrete efficiency target; inspect
+the existing idle-check setting before adding new scheduling machinery.
+The default is now two consecutive checks, five seconds apart, instead of five:
+five seconds of confirmation per launch rather than twenty. Checks still require
+no GPU processes and memory below the threshold; query failures and config
+reloads reset the confirmation count. `--max_check` remains configurable.
+Sampled peaks were 5.70 GiB summed process RSS, 8.55 GiB worker GPU memory and
+5.18 GiB cache, within the 16/12 GiB RAM/cache limits and 900/900/120-second stage
+timeouts. No overall stop was needed, and no other GPU compute PIDs were observed
+on the worker device. All worker groups exited and the temporary cache root was
+removed; the result index and diagnostics remain.
+
+This session used RTX PRO 6000 Blackwell GPUs, PyTorch 2.10.0+cu130 and
+Transformers 5.9.0, recorded in the artifacts. The shared runtime differed from
+the earlier L40/2.11 pilot; it was not modified. `summary.csv` is the dataset
+index; `batch_result.json` records costs/outcomes and `cleanup_report.json`
+records cleanup. No additional numerical pilot or synthetic tests were run.
+
+The three prepared adapters ran in `analysis_runs/phase2/adapter_batch_001/`:
+two BERT derivatives and one Qwen2-0.5B derivative, with adapter and base pins
+resolved from actual adapter configs. `batch_review.json` records base weight
+sizes (0.44/0.99 GB) and exclusions. A fourth candidate points to a quantized
+base, contrary to its imported metadata hint, and is held out. The 88-second run
+produced one valid Qwen pair: **170 measurements, 115,456 eigenvalues, complete
+recorded matrix coverage**. Its 336 adapter tensors passed payload/value checks
+before safe merge. Both BERT adapters failed `load/checkpoint_weight_mismatch`:
+the pinned base declares `BertForMaskedLM`, but also stores pooler and NSP-head
+weights. No tensors were discarded to force success. Failure did not stall the
+queue. Sampled peaks were 1.90 GiB process RSS, 4.46 GiB worker GPU memory and
+0.94 GiB cache; all owned groups exited and the disposable cache was removed.
+`summary.csv` holds outcomes; `batch_result.json` and `cleanup_report.json` hold
+costs and cleanup evidence. Existing results and the shared environment are unchanged.
+
+The BERT gap is resolved in `analysis_runs/phase2/bert_adapter_retry_002/` using
+the narrow task-transfer rule above. Both adapters succeeded in 66 seconds:
+**154 measurements, 115,462 eigenvalues**, complete recorded coverage of the
+adapted task models. The saved two-label classifier is included. The summary
+records 9 unused pretraining-head keys for classification and 4 for MLM;
+these are key counts, not unique parameters. Sampled peaks were 1.88 GiB RSS,
+1.56 GiB GPU memory and 0.41 GiB cache. All worker groups exited and the temporary
+cache was removed. A first retry safely rejected the historical LayerNorm names;
+its cause is retained in `batch_result.json` and covered by offline controls.
+The original Qwen adapter result and earlier dense results remain unchanged.
+
+The encoder/vision slice is in `analysis_runs/phase2/encoder_vision_batch_001/`:
+curated BERT multiple-choice, plus public DistilBERT classifier, ViT and ResNet-18
+coverage extensions. All four produced valid pairs in 93 seconds: **212
+measurements, 175,512 eigenvalues**, three complete-coverage models and one partial.
+The BERT scalar classifier's missing fit remains stored. ViT's learned
+`cls_token` `[1,1,768]` and `position_embeddings` `[1,197,768]` are explicitly
+skipped as unsupported weight attributes; no reshaping or complete-coverage claim
+was forced. Peak sampled RSS/GPU/cache were 1.74/1.48/0.41 GiB, and the owned
+workers and temporary cache were cleaned up.
+
+The query examples above were exercised on five current run indexes: 26 attempt
+rows, 23 valid measurement pairs, 22 with complete recorded coverage. Reading and
+filtering those indexes took 36 ms; retrieving one named 768-value DistilBERT
+spectrum took 1.5 ms. These are single warm-cache observations, not 50k benchmarks.
+`batch_result.json` records the outcomes, gaps and query check. No new reader
+framework, database service or dependencies were needed.
+
+The gap is resolved in `analysis_runs/phase2/vit_t5_batch_001/`: pinned ViT now
+has **76 measurements** with complete recorded coverage; its original 74
+measurements and spectra are exactly unchanged. Public Flan-T5-small adds **150
+measurements**, retaining distinct encoder, decoder and cross-attention names
+and recorded shared-embedding aliases. Both use selection 2; the CLS spectrum
+is retained without a fit. Together they stored **120,530 eigenvalues** in
+65 seconds, with peak sampled RSS/GPU/cache of 1.71/1.29/0.32 GiB. Owned process
+groups exited and the private cache was removed. Earlier artifacts and the run
+script are unchanged; existing summary indexes now explicitly label selection 1.
+
+The proposed sharded retry was redundant: Fietje-2 already exercised a two-shard,
+5.56 GB checkpoint in the first dense batch. Next, continue bounded collection
+from the curated HF metadata, prioritizing underrepresented families and using
+observed coverage, failures and costs to choose necessary changes. Keep the
+human workflow simple: prepare pins, review the CSV, run, query the summary and
+named spectra. Keep one worker and existing resource limits. Packed
+quantization stays a separately blocked coverage track. The first batch is dense/decoder-heavy,
+not evidence of universal support or a population sample. Use measured failure
+patterns to choose the next change, retire redundant paths, and keep the existing
+CSV index plus HDF5 spectra unless measured query/storage costs justify more.
+Do not grow concurrency or launch 50k models implicitly.
+
+`analysis_runs/phase2/family_batch_001/` adds six models directly from the curated
+metadata: Pythia-160M, BLOOM-560M, OPT-1.3B, StableLM-2-1.6B, a Korean BERT MLM
+derivative and CLIP ViT-B/16. All six succeeded with complete recorded matrix
+coverage and no unresolved loaded parameters: **692 measurements, 940,820 saved
+eigenvalues**, 5.31 MiB of artifacts, in 3m17s. Both checkpoint formats loaded
+without remote code. Peak sampled RSS/GPU/cache were 2.13/7.71/4.90 GiB; owned
+groups exited and the private cache was removed. Preparation's exact `unknown`
+base placeholder handling was the only code fix needed. The indexes now contain
+31 valid pairs across 30 model IDs (including the older partial ViT result);
+these counts do not deduplicate revisions or establish population validity.
+Continue with bounded curated batches; prioritize actual missingness and cost
+evidence over additional loader machinery or repeated numerical pilots.
 
 Predictive validity, alternative-distribution comparisons and aspect-ratio
 correction remain separate research questions. None follows merely from a

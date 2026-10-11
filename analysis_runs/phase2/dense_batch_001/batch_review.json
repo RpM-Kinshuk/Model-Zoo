@@ -1,0 +1,237 @@
+{
+  "source": "data/curated/model_zoo_phase2.csv",
+  "source_sha256": "1b4240f122b054a672a2f5318bef1083b8276c1a8b61d2cba6691159d2f8eeb5",
+  "target_rows": 15000,
+  "rows_with_numeric_size": 2922,
+  "eligible_metadata_rows": 517,
+  "selected": 24,
+  "ready": 16,
+  "loader_counts": {
+    "standard_transformers": 7436,
+    "adapter_requires_base": 4737,
+    "quantized_transformers_native": 2101,
+    "multimodal_transformers": 726
+  },
+  "models": [
+    {
+      "model_id": "BEE-spoke-data/smol_llama-101M-GQA",
+      "revision": "8ee979cdfd512e621f03c0c2c57a7ed1a7948f04",
+      "ready": true,
+      "weight_bytes": 405058720,
+      "weight_files": {
+        "model.safetensors": 405058720
+      },
+      "model_type": "llama"
+    },
+    {
+      "model_id": "CoolSpring/Qwen2-0.5B-Abyme",
+      "revision": "541e78a028bb02eb379aa7cc53caa23f15e0269c",
+      "ready": true,
+      "weight_bytes": 988097824,
+      "weight_files": {
+        "model.safetensors": 988097824
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "Daemontatox/TinySphinx",
+      "revision": "",
+      "ready": false,
+      "hold_reason": "RepositoryNotFoundError: 401 Client Error. (Request ID: Root=1-6abc7caf-3369c5831791bb7577d2858f;a132de88-c511-49b4-864b-bcf84fb2163b)\n\nRepository Not Found for url: https://huggingface.co/api/models/Daemontatox/TinySphinx/revision/main?expand=sha&expand=siblings&expand=config.\nPlease make sure you specified the correct `repo_id` and `repo_type`.\nIf you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.\nFor more details, see https://huggingface.co/docs/huggingface_hub/authentication\nInvalid username or password."
+    },
+    {
+      "model_id": "DeepAutoAI/causal_gpt2",
+      "revision": "995f029f6645dde1ef830406001754b904c49775",
+      "ready": true,
+      "weight_bytes": 248894656,
+      "weight_files": {
+        "model.safetensors": 248894656
+      },
+      "model_type": "gpt2"
+    },
+    {
+      "model_id": "EleutherAI/gpt-neo-125m",
+      "revision": "21def0189f5705e2521767faed922f1f15e7d7db",
+      "ready": true,
+      "weight_bytes": 525979192,
+      "weight_files": {
+        "model.safetensors": 525979192
+      },
+      "model_type": "gpt_neo"
+    },
+    {
+      "model_id": "Felladrin/Llama-160M-Chat-v1",
+      "revision": "3701ea6a1d2fb6e860f758f33787284399d1c591",
+      "ready": true,
+      "weight_bytes": 649681952,
+      "weight_files": {
+        "model.safetensors": 649681952
+      },
+      "model_type": "llama"
+    },
+    {
+      "model_id": "FlofloB/10k_continued_pretraining_Qwen2.5-0.5B-Instruct_Unsloth_merged_16bit",
+      "revision": "1fcf14c5b4d99c8c7d0c2ee6a706ad351fdd7a2e",
+      "ready": true,
+      "weight_bytes": 1260367152,
+      "weight_files": {
+        "model.safetensors": 1260367152
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "Goekdeniz-Guelmez/Josiefied-Qwen2.5-0.5B-Instruct-abliterated-v1",
+      "revision": "a42fe88f75b3ab545466ca5692fef0b4d7bc8009",
+      "ready": true,
+      "weight_bytes": 1260367448,
+      "weight_files": {
+        "model.safetensors": 1260367448
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolLM-135M",
+      "revision": "1d461723eec654e65efdc40cf49301c89c0c92f4",
+      "ready": true,
+      "weight_bytes": 538090408,
+      "weight_files": {
+        "model.safetensors": 538090408
+      },
+      "model_type": "llama"
+    },
+    {
+      "model_id": "JackFram/llama-68m",
+      "revision": "9de84537b6aa98de634ad0fbb1608e9d6a019355",
+      "ready": false,
+      "hold_reason": "No complete safetensors size metadata; review separately"
+    },
+    {
+      "model_id": "JayHyeon/Qwen-0.5B-DPO-1epoch",
+      "revision": "f5569969d307d193798eff52c0527e23f4ac8bb9",
+      "ready": true,
+      "weight_bytes": 1976161736,
+      "weight_files": {
+        "model.safetensors": 1976161736
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "Locutusque/TinyMistral-248M-v2.5",
+      "revision": "99bd765f50ef32f4f93ce0fedc549d46eb690b30",
+      "ready": true,
+      "weight_bytes": 992108712,
+      "weight_files": {
+        "model.safetensors": 992108712
+      },
+      "model_type": "mistral"
+    },
+    {
+      "model_id": "AI4free/Dhanishtha",
+      "revision": "2137043797c28713fc0f28933c800496782122d6",
+      "ready": true,
+      "weight_bytes": 3554214416,
+      "weight_files": {
+        "model.safetensors": 3554214416
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "Arthur-LAGACHERIE/Precis-1B-Instruct",
+      "revision": "",
+      "ready": false,
+      "hold_reason": "RepositoryNotFoundError: 401 Client Error. (Request ID: Root=1-6abc7caf-273fa3e810b4ffd65fff6580;232c0e87-5b45-4ca3-b0ae-f64889d6e4e5)\n\nRepository Not Found for url: https://huggingface.co/api/models/Arthur-LAGACHERIE/Precis-1B-Instruct/revision/main?expand=sha&expand=siblings&expand=config.\nPlease make sure you specified the correct `repo_id` and `repo_type`.\nIf you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.\nFor more details, see https://huggingface.co/docs/huggingface_hub/authentication\nInvalid username or password."
+    },
+    {
+      "model_id": "Artples/L-MChat-Small",
+      "revision": "8be8cc460d2a5a6bfab5ba72eeb2e48f63cc91b3",
+      "ready": true,
+      "weight_bytes": 5559417912,
+      "weight_files": {
+        "model-00001-of-00001.safetensors": 5559417912
+      },
+      "model_type": "phi"
+    },
+    {
+      "model_id": "AtAndDev/Qwen2.5-1.5B-continuous-learnt",
+      "revision": "",
+      "ready": false,
+      "hold_reason": "RepositoryNotFoundError: 401 Client Error. (Request ID: Root=1-6abc7caf-382bcef92a2a0ece1d8273fa;55415b45-190b-4125-9776-2c4ef7ca41f5)\n\nRepository Not Found for url: https://huggingface.co/api/models/AtAndDev/Qwen2.5-1.5B-continuous-learnt/revision/main?expand=sha&expand=siblings&expand=config.\nPlease make sure you specified the correct `repo_id` and `repo_type`.\nIf you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.\nFor more details, see https://huggingface.co/docs/huggingface_hub/authentication\nInvalid username or password."
+    },
+    {
+      "model_id": "Ayush-Singh/Llama1B-sft-2",
+      "revision": "",
+      "ready": false,
+      "hold_reason": "RepositoryNotFoundError: 401 Client Error. (Request ID: Root=1-6abc7caf-1dc7d61f1cf446394233d710;d9528cbf-e221-4fc4-8422-297987d8e1b0)\n\nRepository Not Found for url: https://huggingface.co/api/models/Ayush-Singh/Llama1B-sft-2/revision/main?expand=sha&expand=siblings&expand=config.\nPlease make sure you specified the correct `repo_id` and `repo_type`.\nIf you are trying to access a private or gated repo, make sure you are authenticated and your token has the required permissions.\nFor more details, see https://huggingface.co/docs/huggingface_hub/authentication\nInvalid username or password."
+    },
+    {
+      "model_id": "BrainWave-ML/llama3.2-3B-maths-orpo",
+      "revision": "d149d83d8e8f3883421d800848fec85766181923",
+      "ready": false,
+      "hold_reason": "No complete safetensors size metadata; review separately"
+    },
+    {
+      "model_id": "BramVanroy/fietje-2",
+      "revision": "9ca62700629e98d87f7eb54ffd286ac5454d09dc",
+      "ready": true,
+      "weight_bytes": 5559417856,
+      "weight_files": {
+        "model-00001-of-00002.safetensors": 4995584848,
+        "model-00002-of-00002.safetensors": 563833008
+      },
+      "model_type": "phi"
+    },
+    {
+      "model_id": "Columbia-NLP/LION-Gemma-2b-dpo-v1.0",
+      "revision": "e13991091a75524c333a65762d2c970cd94a5835",
+      "ready": false,
+      "weight_bytes": 10024708536,
+      "weight_files": {
+        "model-00001-of-00003.safetensors": 4911635192,
+        "model-00002-of-00003.safetensors": 4978830584,
+        "model-00003-of-00003.safetensors": 134242760
+      },
+      "model_type": "gemma",
+      "hold_reason": "Weight files exceed this batch's 6.5 GB ceiling"
+    },
+    {
+      "model_id": "Corianas/Quokka_2.7b",
+      "revision": "d9b3274662c2ac6c6058daac90504b5a8ebcac3c",
+      "ready": true,
+      "weight_bytes": 5437387576,
+      "weight_files": {
+        "model.safetensors": 5437387576
+      },
+      "model_type": "gpt2"
+    },
+    {
+      "model_id": "DavieLion/Lllma-3.2-1B",
+      "revision": "5e0d3bc7ca705a41f897a870efd4ff6ce455e20c",
+      "ready": true,
+      "weight_bytes": 2471645608,
+      "weight_files": {
+        "model.safetensors": 2471645608
+      },
+      "model_type": "llama"
+    },
+    {
+      "model_id": "DeepMount00/Qwen2-1.5B-Ita",
+      "revision": "681e6db531df0cc3d7806251659b973ed4ff8c8f",
+      "ready": true,
+      "weight_bytes": 3087467144,
+      "weight_files": {
+        "model.safetensors": 3087467144
+      },
+      "model_type": "qwen2"
+    },
+    {
+      "model_id": "EpistemeAI/Athena-gemma-2-2b-it",
+      "revision": "7527c4d75de0461ed4e1e8da58db1fdc38b68339",
+      "ready": false,
+      "hold_reason": "Requires public ungated pinned access"
+    }
+  ],
+  "weights_downloaded": false,
+  "workers_launched": false,
+  "selection": "Up to 12 per size bin, downloads then model_id; at most one publisher and metadata parent. Operational slice, not representative sampling.",
+  "limits": "One worker; authorized idle GPUs 3-7; 12 GiB cache, 16 GiB sampled RSS, stages 900/900/120 seconds, 1 hour overall stop. No automatic scale-up."
+}

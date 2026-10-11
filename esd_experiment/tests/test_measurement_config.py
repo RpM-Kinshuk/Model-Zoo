@@ -81,12 +81,22 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     assert {"transformers", "peft", "bitsandbytes", "gptqmodel"} <= runtime["installed_loading_library_versions"].keys()
 
 
+def test_older_selection_remains_readable_but_does_not_resume(tmp_path):
+    expected = measurement_config(SimpleNamespace())
+    stored = dict(expected)
+    del stored["layer_selection_version"]
+    csv_path, h5_path = write_pair(tmp_path, stored)
+    assert artifact_compatibility(csv_path, h5_path) == (True, "compatible")
+    assert artifact_compatibility(csv_path, h5_path, expected) == (
+        False, "measurement setting differs: layer_selection_version")
+
+
 @pytest.mark.parametrize("key,value", [
     ("load_dtype", "float16"), ("compute_dtype", "float64"),
     ("evals_thresh", 0.001), ("filter_zeros", False), ("use_svd", False),
     ("fix_fingers", "DKS"), ("save_eigs", False), ("requested_revision", "other"),
     ("source_model", "org/other"), ("trust_remote_code", True),
-    ("filter_type", False), ("analysis_policy", "model"),
+    ("filter_type", True), ("analysis_policy", "model"),
 ])
 def test_changed_measurement_setting_does_not_resume(tmp_path, key, value):
     expected = measurement_config(SimpleNamespace(), model_id="org/model")
@@ -183,7 +193,7 @@ def test_runner_and_worker_share_defaults_and_explicit_negative_flags(monkeypatc
     assert runner_args.load_dtype == "auto"
     assert runner_args.use_svd is True
     assert runner_args.trust_remote_code is False
-    assert runner_args.filter_type is True
+    assert runner_args.filter_type is False
 
     runner_args.filter_zeros = runner_args.filter_type = runner_args.use_svd = runner_args.parallel_esd = False
     runner_args.load_dtype, runner_args.compute_dtype = "bfloat16", "float64"

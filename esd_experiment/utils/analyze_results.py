@@ -88,7 +88,8 @@ def read_model_summary(csv_path, h5_path, expected=None):
         raise ValueError(reason)
     with h5py.File(h5_path, "r") as h5:
         config = json.loads(h5.attrs["measurement_config_json"])
-        settings = {name: config[name] for name in MEASUREMENT_FIELDS}
+        settings = {name: config[name] for name in MEASUREMENT_FIELDS if name != "layer_selection_version"}
+        settings["layer_selection_version"] = config.get("layer_selection_version", "1")
         json.dumps(settings, allow_nan=False)
         model_id = h5.attrs["full_name"]
         if isinstance(model_id, bytes):
@@ -106,6 +107,7 @@ def read_model_summary(csv_path, h5_path, expected=None):
         summary = compute_model_summary(layers)
         runtime = config.get("runtime") or {}
         loading_info = runtime.get("loading_info") or {}
+        transfer = (loading_info.get("base_loading_info") or {}).get("bert_adapter_transfer") or {}
         summary.update(
             model_id=model_id, repo_id=config["repo_id"],
             requested_revision=config["requested_revision"],
@@ -119,8 +121,10 @@ def read_model_summary(csv_path, h5_path, expected=None):
             base_repo_loaded=loading_info.get("base_repo_loaded"),
             base_revision_loaded=loading_info.get("base_revision_loaded"),
             base_resolved_commit_hash=loading_info.get("base_resolved_commit_hash"),
+            base_transfer_policy=(f"bert_pretraining_to_task_v{transfer['policy_version']}" if transfer else None),
+            excluded_base_key_count=len(transfer["excluded_base_keys"]) if transfer else None,
             csv_path=str(csv_path.resolve()), h5_path=str(h5_path.resolve()),
-            coverage_status="unknown", weight_usage_status="unknown", **settings,
+            coverage_status="unknown", weight_usage_status="unknown", matrix_coverage="unknown", **settings,
         )
         summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS, *CHECKPOINT_COUNTS)})
         if runtime["analysis_source"] == "checkpoint":
@@ -141,6 +145,7 @@ def read_model_summary(csv_path, h5_path, expected=None):
                 raise ValueError("Checkpoint coverage disagrees with canonical records")
             summary.update({name: counts[name] for name in CHECKPOINT_COUNTS})
             summary.update(coverage_status="checkpoint_tensors", weight_usage_status="not_applicable")
+            summary["matrix_coverage"] = matrix_coverage(coverage, checkpoint=True)
             return summary
         if "coverage" in h5:
             coverage = json.loads(h5["coverage"].asstr()[()])
@@ -173,7 +178,30 @@ def read_model_summary(csv_path, h5_path, expected=None):
                     raise ValueError("Weight-usage counts exceed available tensors or measurements")
                 summary.update({name: counts[name] for name in WEIGHT_COUNTS})
                 summary["weight_usage_status"] = "recorded"
+            summary["matrix_coverage"] = matrix_coverage(coverage)
     return summary
+
+
+def matrix_coverage(coverage, *, checkpoint=False):
+    """Coverage of recorded matrix candidates, not a claim about model quality.
+
+    Non-matrix vectors are expected exclusions. Missing inventories are unknown;
+    unsupported/filtered matrices or unaccounted loaded weights are partial.
+    """
+    records = coverage.get("tensors" if checkpoint else "modules")
+    if not records:
+        return "unknown"
+    if any(record.get("status") != "analyzed" and record.get("reason") not in
+           {"not_a_matrix", "weight_has_fewer_than_two_dimensions"} for record in records):
+        return "partial"
+    if not checkpoint:
+        usage = coverage.get("weight_usage")
+        if usage is None:
+            return "unknown"
+        if any(usage["counts"][name] for name in
+               ("skipped_tensors", "unresolved_tensors", "unmapped_measurements")):
+            return "partial"
+    return "complete"
 
 
 def read_selected_models(path):
@@ -251,6 +279,9 @@ def summarize_outcome(results_dir, name, selected=None):
     elif row["artifact_status"] == "invalid":
         row.update(outcome="incomplete", outcome_reason="invalid_artifact_pair",
                    outcome_message=row["artifact_error"])
+    elif selected and selected.get("preparation_status") == "held":
+        row.update(outcome="blocked", outcome_stage="prepare", outcome_reason="preparation_held",
+                   outcome_message=selected.get("preparation_reason", ""))
     elif selected and selected.get("pin_status") == "error":
         row.update(outcome="blocked", outcome_stage="prepare", outcome_reason="pin_error",
                    outcome_message=selected.get("pin_error", ""))
@@ -281,6 +312,12 @@ def print_model_stats(summary, verbose=False, mixed_settings=False):
           f"without artifacts: {summary['artifact_status'].eq('missing').sum()}")
     if valid.empty:
         return
+    print("Matrix coverage: " + "; ".join(f"{status}: {count}" for status, count in
+                                         valid["matrix_coverage"].value_counts().items()))
+    incomplete = valid.loc[valid["matrix_coverage"] != "complete"]
+    if not incomplete.empty:
+        print("Partial/unknown coverage: excluded from pooled metrics (per-model values remain in CSV).")
+        print(incomplete[["model_id", "matrix_coverage", "analyzed_measurements"]].head(5).to_string(index=False))
     print(f"Measurements: {valid['analyzed_measurements'].sum():.0f}; "
           f"fitted: {valid['fitted_measurements'].sum():.0f}; "
           f"missing fits: {valid['missing_fit_measurements'].sum():.0f}")
@@ -297,13 +334,13 @@ def print_model_stats(summary, verbose=False, mixed_settings=False):
         warnings.warn("Mixed measurement settings: filter summary.csv by settings before comparing models. "
                       "Pooled metric statistics are not shown.")
         return
-    alpha = valid["alpha_mean"].dropna()
+    alpha = valid.loc[valid["matrix_coverage"] == "complete", "alpha_mean"].dropna()
     if not alpha.empty:
-        print(f"Mean of model fitted-alpha means: {alpha.mean():.4f}")
+        print(f"Mean of model fitted-alpha means: {alpha.mean():.4f} (complete recorded matrix coverage only)")
     if verbose:
         print("First 20 valid models (not a model-quality ranking):")
         print(valid[["model_id", "analyzed_measurements", "fitted_measurements",
-                     "alpha_mean", "coverage_status", "skipped_modules"]].head(20).to_string(index=False))
+                     "alpha_mean", "matrix_coverage", "skipped_modules"]].head(20).to_string(index=False))
 
 
 def write_summary(summary, output_path):

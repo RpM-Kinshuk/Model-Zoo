@@ -51,7 +51,7 @@ def test_dense_fallback_measures_a_loaded_bert_head_without_changing_checkpoint(
     expected.save_pretrained(tmp_path)
     actual, _ = loader.load_model(str(tmp_path), device_map="cpu", torch_dtype="auto")
     assert actual._model_zoo_loading_info["validated"]
-    assert "classifier" not in {name for name, _, _ in iter_eligible_layers(actual)}
+    assert "classifier" not in {name for name, _, _ in iter_eligible_layers(actual, filter_type=True)}
     coverage = []
 
     metrics = net_esd_estimator(actual, filter_type=False, parallel=False,
@@ -629,6 +629,49 @@ def test_known_historical_gpt2_buffers_are_recorded_and_json_safe(monkeypatch):
     assert stored["allowed_unexpected_keys"] == sorted(report["unexpected_keys"])
     assert stored["loading_info"]["unexpected_keys"] == sorted(report["unexpected_keys"])
     json.dumps(stored, allow_nan=False)
+
+
+@pytest.mark.parametrize("corruption", [None, "mask", "constant", "shape", "layer", "weight"])
+def test_legacy_gpt_neo_buffers_require_exact_values(tmp_path, corruption):
+    from safetensors.torch import load_file, save_file
+
+    config = transformers.GPTNeoConfig(vocab_size=32, hidden_size=8, num_layers=2,
+                                      num_heads=2, intermediate_size=12,
+                                      max_position_embeddings=8, window_size=4,
+                                      attention_types=[[["global", "local"], 1]])
+    expected = transformers.GPTNeoForCausalLM(config).eval()
+    expected.save_pretrained(tmp_path)
+    path = tmp_path / "model.safetensors"
+    state = load_file(path)
+    buffers = []
+    for layer in range(2):
+        prefix = f"transformer.h.{layer}.attn.attention"
+        state[f"{prefix}.bias"] = expected.get_buffer(f"{prefix}.bias").to(torch.uint8)
+        state[f"{prefix}.masked_bias"] = torch.tensor(-1e9)
+        buffers.extend([f"{prefix}.bias", f"{prefix}.masked_bias"])
+    if corruption == "mask":
+        state[buffers[0]][0, 0, 0, 1] = 1
+    elif corruption == "constant":
+        state[buffers[1]] = torch.tensor(-123.0)
+    elif corruption == "shape":
+        state[buffers[1]] = torch.tensor([-1e9])
+    elif corruption == "layer":
+        state["transformer.h.99.attn.attention.masked_bias"] = torch.tensor(-1e9)
+    elif corruption == "weight":
+        state["transformer.h.0.attn.attention.custom.weight"] = torch.ones(8, 8)
+    save_file(state, path, metadata={"format": "pt"})
+    if corruption:
+        with pytest.raises(loader.LoaderFailure) as exc:
+            loader._load_checkpoint_checked(transformers.GPTNeoForCausalLM, str(tmp_path), device_map="cpu")
+        assert exc.value.reason == "checkpoint_weight_mismatch"
+    else:
+        actual = loader._load_checkpoint_checked(transformers.GPTNeoForCausalLM, str(tmp_path), device_map="cpu")
+        recorded = actual._model_zoo_loading_info
+        # Transformers can consume local masks itself; verify all reported extras.
+        assert set(recorded["verified_checkpoint_buffers"]) == set(recorded["allowed_unexpected_keys"])
+        assert any(name.endswith("masked_bias") for name in recorded["verified_checkpoint_buffers"])
+        for name, tensor in expected.state_dict().items():
+            assert torch.equal(actual.state_dict()[name], tensor), name
 
 
 @pytest.mark.parametrize("model_type,key", [

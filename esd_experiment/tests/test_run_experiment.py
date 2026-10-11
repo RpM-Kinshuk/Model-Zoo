@@ -80,6 +80,7 @@ def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
     args = run_experiment.parse_args()
 
     assert args.max_concurrent_jobs == 3
+    assert args.max_check == 2
 
 
 @pytest.mark.parametrize("flags,expected", [([], True), (["--save_eigs"], True), (["--no-save_eigs"], False)])

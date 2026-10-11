@@ -1,0 +1,425 @@
+{
+  "manifest_sha256": "0a44ba9519921c58cde9bb20cb353da8a79eeced89cf31c9504694b27ecc26ee",
+  "outcomes": {
+    "success": 15,
+    "failed": 1
+  },
+  "matrix_coverage": {
+    "complete": 15
+  },
+  "measurements": 2187,
+  "fitted_measurements": 2187,
+  "eigenvalues": 2739840,
+  "artifact_bytes": 15899451,
+  "wall_seconds": 855.884190073004,
+  "sampled_worker_seconds": 388.33441981486976,
+  "worker_gpu_indices": [
+    0
+  ],
+  "other_gpu_pids_observed": [],
+  "runtime": [
+    {
+      "torch_version": "2.10.0+cu130",
+      "cuda_version": "13.0",
+      "gpu_names": [
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+      ],
+      "installed_loading_library_versions": {
+        "bitsandbytes": "0.49.1",
+        "compressed-tensors": "0.15.0.1",
+        "gptqmodel": "6.0.3",
+        "optimum": "2.1.0",
+        "peft": "0.18.1",
+        "torchao": "0.17.0",
+        "transformers": "5.9.0"
+      }
+    }
+  ],
+  "costs": [
+    {
+      "model_id": "BEE-spoke-data/smol_llama-101M-GQA",
+      "sampled_worker_seconds": 11.01471274299547,
+      "stages_seconds": {
+        "dispatch": 3.8715239360462874,
+        "load": 4.929099599132314,
+        "analyze": 1.6565129139926285,
+        "save": 0.5575762938242406
+      },
+      "peak_rss_bytes": 1867087872,
+      "peak_worker_gpu_bytes": 1572864000,
+      "peak_cache_bytes": 405127168
+    },
+    {
+      "model_id": "CoolSpring/Qwen2-0.5B-Abyme",
+      "sampled_worker_seconds": 17.679976496845484,
+      "stages_seconds": {
+        "dispatch": 3.8464368528220803,
+        "load": 6.645283987047151,
+        "analyze": 6.628796326927841,
+        "save": 0.5594593300484121
+      },
+      "peak_rss_bytes": 1860653056,
+      "peak_worker_gpu_bytes": 4609540096,
+      "peak_cache_bytes": 988180480
+    },
+    {
+      "model_id": "DeepAutoAI/causal_gpt2",
+      "sampled_worker_seconds": 10.537233499111608,
+      "stages_seconds": {
+        "dispatch": 3.9087884430773556,
+        "load": 3.8731037930119783,
+        "analyze": 2.211325430078432,
+        "save": 0.5440158329438418
+      },
+      "peak_rss_bytes": 1847169024,
+      "peak_worker_gpu_bytes": 1876951040,
+      "peak_cache_bytes": 248958976
+    },
+    {
+      "model_id": "EleutherAI/gpt-neo-125m",
+      "sampled_worker_seconds": 7.176646963926032,
+      "stages_seconds": {
+        "dispatch": 3.2838555050548166,
+        "load": 3.8927914588712156
+      },
+      "peak_rss_bytes": 999763968,
+      "peak_worker_gpu_bytes": 1077936128,
+      "peak_cache_bytes": 526045184
+    },
+    {
+      "model_id": "Felladrin/Llama-160M-Chat-v1",
+      "sampled_worker_seconds": 12.112993472022936,
+      "stages_seconds": {
+        "dispatch": 3.2599697201512754,
+        "load": 4.981111661996692,
+        "analyze": 3.307438181946054,
+        "save": 0.5644739079289138
+      },
+      "peak_rss_bytes": 1855696896,
+      "peak_worker_gpu_bytes": 1822425088,
+      "peak_cache_bytes": 649752576
+    },
+    {
+      "model_id": "FlofloB/10k_continued_pretraining_Qwen2.5-0.5B-Instruct_Unsloth_merged_16bit",
+      "sampled_worker_seconds": 17.149502346059307,
+      "stages_seconds": {
+        "dispatch": 3.3125917960423976,
+        "load": 6.608559529995546,
+        "analyze": 6.66608954500407,
+        "save": 0.5622614750172943
+      },
+      "peak_rss_bytes": 1861451776,
+      "peak_worker_gpu_bytes": 5039456256,
+      "peak_cache_bytes": 1260462080
+    },
+    {
+      "model_id": "Goekdeniz-Guelmez/Josiefied-Qwen2.5-0.5B-Instruct-abliterated-v1",
+      "sampled_worker_seconds": 17.149415676947683,
+      "stages_seconds": {
+        "dispatch": 3.3350270250812173,
+        "load": 6.637974523939192,
+        "analyze": 6.609440651955083,
+        "save": 0.5669734759721905
+      },
+      "peak_rss_bytes": 1865588736,
+      "peak_worker_gpu_bytes": 5039456256,
+      "peak_cache_bytes": 1260457984
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolLM-135M",
+      "sampled_worker_seconds": 11.752890008036047,
+      "stages_seconds": {
+        "dispatch": 3.388153798179701,
+        "load": 3.348145982949063,
+        "analyze": 4.4386806529946625,
+        "save": 0.5779095739126205
+      },
+      "peak_rss_bytes": 1869291520,
+      "peak_worker_gpu_bytes": 1667235840,
+      "peak_cache_bytes": 538161152
+    },
+    {
+      "model_id": "JayHyeon/Qwen-0.5B-DPO-1epoch",
+      "sampled_worker_seconds": 17.9044118730817,
+      "stages_seconds": {
+        "dispatch": 3.3126099628861994,
+        "load": 7.228534342022613,
+        "analyze": 6.220044794026762,
+        "save": 1.1432227741461247
+      },
+      "peak_rss_bytes": 2234687488,
+      "peak_worker_gpu_bytes": 5066719232,
+      "peak_cache_bytes": 1976262656
+    },
+    {
+      "model_id": "Locutusque/TinyMistral-248M-v2.5",
+      "sampled_worker_seconds": 16.40314488997683,
+      "stages_seconds": {
+        "dispatch": 3.374679514905438,
+        "load": 7.883896735031158,
+        "analyze": 4.573872167151421,
+        "save": 0.5706964728888124
+      },
+      "peak_rss_bytes": 1895133184,
+      "peak_worker_gpu_bytes": 1933574144,
+      "peak_cache_bytes": 992194560
+    },
+    {
+      "model_id": "AI4free/Dhanishtha",
+      "sampled_worker_seconds": 31.06402280810289,
+      "stages_seconds": {
+        "dispatch": 3.26980233611539,
+        "load": 11.100995804881677,
+        "analyze": 15.558706881012768,
+        "save": 1.1345177860930562
+      },
+      "peak_rss_bytes": 3667714048,
+      "peak_worker_gpu_bytes": 9185525760,
+      "peak_cache_bytes": 3554340864
+    },
+    {
+      "model_id": "Artples/L-MChat-Small",
+      "sampled_worker_seconds": 58.22258014790714,
+      "stages_seconds": {
+        "dispatch": 3.3542936469893903,
+        "load": 12.801340780919418,
+        "analyze": 40.934889905154705,
+        "save": 1.1320558148436248
+      },
+      "peak_rss_bytes": 6119927808,
+      "peak_worker_gpu_bytes": 9034530816,
+      "peak_cache_bytes": 5559607296
+    },
+    {
+      "model_id": "BramVanroy/fietje-2",
+      "sampled_worker_seconds": 58.48390563693829,
+      "stages_seconds": {
+        "dispatch": 3.899922586977482,
+        "load": 12.691579597070813,
+        "analyze": 40.768843146041036,
+        "save": 1.1235603068489581
+      },
+      "peak_rss_bytes": 4956807168,
+      "peak_worker_gpu_bytes": 9034530816,
+      "peak_cache_bytes": 5559640064
+    },
+    {
+      "model_id": "Corianas/Quokka_2.7b",
+      "sampled_worker_seconds": 46.47865823702887,
+      "stages_seconds": {
+        "dispatch": 3.2856037612073123,
+        "load": 12.14398091379553,
+        "analyze": 29.94223929918371,
+        "save": 1.1068342628423125
+      },
+      "peak_rss_bytes": 5734477824,
+      "peak_worker_gpu_bytes": 8732540928,
+      "peak_cache_bytes": 5437534208
+    },
+    {
+      "model_id": "DavieLion/Lllma-3.2-1B",
+      "sampled_worker_seconds": 25.971369898878038,
+      "stages_seconds": {
+        "dispatch": 3.322362008970231,
+        "load": 7.700593587942421,
+        "analyze": 13.82416178099811,
+        "save": 1.124252520967275
+      },
+      "peak_rss_bytes": 1883758592,
+      "peak_worker_gpu_bytes": 8650752000,
+      "peak_cache_bytes": 2471759872
+    },
+    {
+      "model_id": "DeepMount00/Qwen2-1.5B-Ita",
+      "sampled_worker_seconds": 29.232955117011443,
+      "stages_seconds": {
+        "dispatch": 3.2881761169992387,
+        "load": 9.385169215034693,
+        "analyze": 15.997832706896588,
+        "save": 0.5617770780809224
+      },
+      "peak_rss_bytes": 3712696320,
+      "peak_worker_gpu_bytes": 8719958016,
+      "peak_cache_bytes": 3087585280
+    }
+  ],
+  "models": [
+    {
+      "model_id": "AI4free/Dhanishtha",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "198.0",
+      "fitted_measurements": "198.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/AI4free--Dhanishtha.h5"
+    },
+    {
+      "model_id": "Artples/L-MChat-Small",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "194.0",
+      "fitted_measurements": "194.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/Artples--L-MChat-Small.h5"
+    },
+    {
+      "model_id": "BEE-spoke-data/smol_llama-101M-GQA",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "44.0",
+      "fitted_measurements": "44.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/BEE-spoke-data--smol_llama-101M-GQA.h5"
+    },
+    {
+      "model_id": "BramVanroy/fietje-2",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "194.0",
+      "fitted_measurements": "194.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/BramVanroy--fietje-2.h5"
+    },
+    {
+      "model_id": "CoolSpring/Qwen2-0.5B-Abyme",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "170.0",
+      "fitted_measurements": "170.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/CoolSpring--Qwen2-0.5B-Abyme.h5"
+    },
+    {
+      "model_id": "Corianas/Quokka_2.7b",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "131.0",
+      "fitted_measurements": "131.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/Corianas--Quokka_2.7b.h5"
+    },
+    {
+      "model_id": "DavieLion/Lllma-3.2-1B",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "114.0",
+      "fitted_measurements": "114.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/DavieLion--Lllma-3.2-1B.h5"
+    },
+    {
+      "model_id": "DeepAutoAI/causal_gpt2",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "51.0",
+      "fitted_measurements": "51.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/DeepAutoAI--causal_gpt2.h5"
+    },
+    {
+      "model_id": "DeepMount00/Qwen2-1.5B-Ita",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "198.0",
+      "fitted_measurements": "198.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/DeepMount00--Qwen2-1.5B-Ita.h5"
+    },
+    {
+      "model_id": "EleutherAI/gpt-neo-125m",
+      "outcome": "failed",
+      "outcome_reason": "checkpoint_weight_mismatch",
+      "matrix_coverage": "",
+      "analyzed_measurements": "",
+      "fitted_measurements": "",
+      "unresolved_tensors": "",
+      "analysis_source": "",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/EleutherAI--gpt-neo-125m.h5"
+    },
+    {
+      "model_id": "Felladrin/Llama-160M-Chat-v1",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "86.0",
+      "fitted_measurements": "86.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/Felladrin--Llama-160M-Chat-v1.h5"
+    },
+    {
+      "model_id": "FlofloB/10k_continued_pretraining_Qwen2.5-0.5B-Instruct_Unsloth_merged_16bit",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "170.0",
+      "fitted_measurements": "170.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/FlofloB--10k_continued_pretraining_Qwen2.5-0.5B-Instruct_Unsloth_merged_16bit.h5"
+    },
+    {
+      "model_id": "Goekdeniz-Guelmez/Josiefied-Qwen2.5-0.5B-Instruct-abliterated-v1",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "170.0",
+      "fitted_measurements": "170.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/Goekdeniz-Guelmez--Josiefied-Qwen2.5-0.5B-Instruct-abliterated-v1.h5"
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolLM-135M",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "212.0",
+      "fitted_measurements": "212.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/HuggingFaceTB--SmolLM-135M.h5"
+    },
+    {
+      "model_id": "JayHyeon/Qwen-0.5B-DPO-1epoch",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "169.0",
+      "fitted_measurements": "169.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/JayHyeon--Qwen-0.5B-DPO-1epoch.h5"
+    },
+    {
+      "model_id": "Locutusque/TinyMistral-248M-v2.5",
+      "outcome": "success",
+      "outcome_reason": "valid_artifact_pair",
+      "matrix_coverage": "complete",
+      "analyzed_measurements": "86.0",
+      "fitted_measurements": "86.0",
+      "unresolved_tensors": "0.0",
+      "analysis_source": "model",
+      "h5_path": "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/dense_batch_001/metrics/Locutusque--TinyMistral-248M-v2.5.h5"
+    }
+  ],
+  "interpretation": "Resource peaks and stage time are sampled; summed RSS can double-count shared mappings. Wall minus sampled worker time includes preflight, availability checks, dispatch and cleanup."
+}

@@ -54,6 +54,9 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
     config = {
         "numerics_version": NUMERICS_VERSION,
         "loader_version": LOADER_VERSION,
+        # Selection 2 adds declared ViT tables; spectral formulas are unchanged.
+        # Older records remain readable, but cannot resume a current selection.
+        "layer_selection_version": "2",
         "analysis_policy": getattr(args, "analysis_source", "auto"),
         "fix_fingers": getattr(args, "fix_fingers", "xmin_mid") or "DKS",
         "evals_thresh": float(getattr(args, "evals_thresh", 1e-5)),
@@ -67,7 +70,7 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
         "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
         "xmin_pos": 2,
         "conv_norm": 0.5,
-        "filter_type": bool(getattr(args, "filter_type", True)),
+        "filter_type": bool(getattr(args, "filter_type", False)),
         "spectrum_storage": "full",
     }
     if config["analysis_policy"] not in {"auto", "model", "checkpoint"}:
@@ -115,6 +118,8 @@ def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
                 return False, "missing measurement configuration"
             if config.get("loader_version") != LOADER_VERSION:
                 return False, "different or missing loader_version"
+            if config.get("layer_selection_version", "1") not in {"1", "2"}:
+                return False, "unknown layer_selection_version"
             policy = config.get("analysis_policy")
             runtime = config.get("runtime") or {}
             source = runtime.get("analysis_source")

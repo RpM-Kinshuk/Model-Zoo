@@ -73,6 +73,23 @@ def write_pair(run_dir, stem="org--model", *, coverage=True, loading_info=None, 
     return csv_path, h5_path
 
 
+def test_older_layer_selection_is_readable_and_explicit(tmp_path):
+    csv_path, h5_path = write_pair(tmp_path)
+    with h5py.File(h5_path, "a") as h5:
+        config = json.loads(h5.attrs["measurement_config_json"])
+        del config["layer_selection_version"]
+        h5.attrs["measurement_config_json"] = json.dumps(config)
+    assert analyze_results.read_model_summary(csv_path, h5_path)["layer_selection_version"] == "1"
+
+
+def test_preparation_holds_are_visible_before_launch(tmp_path):
+    row = analyze_results.summarize_outcome(tmp_path, "org--model", {
+        "model_id": "org/model", "revision_norm": "a" * 40, "source_model": "",
+        "pin_status": "pinned", "preparation_status": "held", "preparation_reason": "Over budget"})
+    assert row["outcome"] == "blocked" and row["outcome_stage"] == "prepare"
+    assert row["outcome_message"] == "Over budget"
+
+
 def test_auto_results_from_different_sources_are_not_pooled(tmp_path):
     write_pair(tmp_path, "org--loaded")
     _, h5_path = write_pair(tmp_path, "org--tensors")
@@ -367,7 +384,29 @@ def test_mixed_measurement_warning_ignores_identity_differences(tmp_path, capsys
     captured = capsys.readouterr()
     messages = [str(warning.message).lower() for warning in recwarn]
     assert any("mixed" in message and "settings" in message for message in messages) is mixed
-    assert ("Mean of model fitted-alpha means:" in captured.out) is not mixed
+    # This fixture has no loaded-tensor inventory: never pool unknown coverage.
+    assert "Mean of model fitted-alpha means:" not in captured.out
+
+
+@pytest.mark.parametrize("checkpoint,reason,unresolved,expected", [
+    (False, "weight_has_fewer_than_two_dimensions", 0, "complete"),
+    (False, "linear_aspect_ratio_at_least_8", 0, "partial"),
+    (False, "unsupported_weight_attribute", 196, "partial"),
+    (False, "weight_has_fewer_than_two_dimensions", 1, "partial"),
+    (False, "weight_has_fewer_than_two_dimensions", None, "unknown"),
+    (True, "not_a_matrix", 0, "complete"),
+    (True, "undeclared_tensor_layout", 0, "partial"),
+])
+def test_matrix_coverage_distinguishes_exclusions_from_gaps(checkpoint, reason, unresolved, expected):
+    coverage = {"tensors" if checkpoint else "modules": [
+        {"status": "analyzed"}, {"status": "skipped", "reason": reason},
+    ]}
+    if unresolved is not None:
+        coverage["weight_usage"] = {"counts": {
+            "skipped_tensors": 0, "unresolved_tensors": unresolved, "unmapped_measurements": 0,
+        }}
+    assert analyze_results.matrix_coverage(coverage, checkpoint=checkpoint) == expected
+    assert analyze_results.matrix_coverage({}, checkpoint=checkpoint) == "unknown"
 
 
 def test_summary_joins_selected_models_with_artifacts_and_last_recorded_outcomes(tmp_path):

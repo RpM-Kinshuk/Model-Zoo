@@ -135,15 +135,66 @@ def test_child_thread_sets_worker_cache_environment(tmp_path: Path):
         logger=_Logger(),
         dispatcher=SimpleNamespace(),
     )
-    env = {}
+    env = {"HF_XET_CACHE": "/shared/xet", "HF_MODULES_CACHE": "/shared/modules"}
     record = SimpleNamespace(cache_path=tmp_path / "worker-cache")
 
     thread._apply_worker_cache_env(env, record)
 
     assert env["HF_HOME"] == str(record.cache_path)
     assert env["HF_HUB_CACHE"] == str(record.cache_path / "hub")
-    assert env["TRANSFORMERS_CACHE"] == str(record.cache_path / "transformers")
+    assert env["TRANSFORMERS_CACHE"] == env["HF_HUB_CACHE"]
     assert env["HF_DATASETS_CACHE"] == str(record.cache_path / "datasets")
+    assert env["HF_XET_CACHE"] == str(record.cache_path / "xet")
+    assert env["HF_MODULES_CACHE"] == str(record.cache_path / "modules")
+
+
+@pytest.mark.parametrize("failure", ["ram", "cache", "monitor", None])
+def test_worker_resource_bounds_and_read_failures(tmp_path, monkeypatch, failure):
+    dispatcher = _dispatcher(tmp_path, monkeypatch)
+    dispatcher.config.update(max_worker_ram_gib=1, max_worker_cache_gib=1)
+    thread = ChildThread("test", 1, [0], WorkerJob(command="true", worker_id="worker"),
+                         _Logger(), dispatcher)
+    member = SimpleNamespace(children=lambda **kwargs: [], memory_info=lambda: SimpleNamespace(rss=2 * 1024 ** 3 if failure == "ram" else 100))
+    if failure == "monitor":
+        monkeypatch.setattr(psutil, "Process", lambda pid: (_ for _ in ()).throw(psutil.AccessDenied(pid)))
+    else:
+        monkeypatch.setattr(psutil, "Process", lambda pid: member)
+    if failure == "cache":
+        monkeypatch.setattr(os, "walk", lambda *args, **kwargs: [(str(tmp_path), [], ["blob"])])
+        monkeypatch.setattr(os, "lstat", lambda path: SimpleNamespace(st_blocks=4 * 1024 ** 2))
+    reason, _ = thread._resource_limit_reason(SimpleNamespace(pid=123), SimpleNamespace(cache_path=tmp_path))
+    assert reason == {"ram": "worker_ram_limit", "cache": "worker_cache_limit",
+                      "monitor": "resource_monitor_error", None: None}[failure]
+
+
+def test_cache_bound_stops_owned_worker_cleans_up_and_allows_next_job(tmp_path, monkeypatch):
+    dispatcher = _dispatcher(tmp_path, monkeypatch)
+    dispatcher.config.update(max_worker_ram_gib=0, max_worker_cache_gib=0.000001,
+                             stale_process_action="log")
+    tracker = WorkerStateTracker(log_dir=tmp_path / "logs", cache_root=tmp_path / "cache", run_id="bounded")
+    code = "import os,pathlib,time; (pathlib.Path(os.environ['HF_HOME'])/'blob').write_bytes(b'x'*8192); time.sleep(30)"
+    terminal = tmp_path / "logs/terminal_status/org--model.json"
+    job = WorkerJob(command=shlex.join([sys.executable, "-c", code]), worker_id="bounded-worker",
+                    model_id="org/model", terminal_status_path=str(terminal))
+    dispatcher.occupied_gpus.add(0)
+    thread = ChildThread("test", 1, [0], job, _Logger(), dispatcher, tracker)
+    thread.start()
+    thread.join(timeout=12)
+    try:
+        assert not thread.is_alive()
+        assert json.loads(terminal.read_text())["reason"].startswith("worker_cache_limit")
+        assert not (tmp_path / "cache/bounded/bounded-worker").exists()
+        assert not dispatcher.occupied_gpus and not dispatcher.shutdown_event.is_set()
+        completed = tmp_path / "next_finished"
+        next_command = shlex.join([sys.executable, "-c", f"from pathlib import Path; Path({str(completed)!r}).touch()"])
+        next_job = WorkerJob(command=next_command, worker_id="next", model_id="org/next")
+        following = ChildThread("next", 1, [0], next_job, _Logger(), dispatcher, tracker)
+        following.start()
+        following.join(timeout=5)
+        assert not following.is_alive() and completed.exists() and dispatcher.error is None
+    finally:
+        dispatcher.request_stop()
+        thread.join(timeout=8)
 
 
 def test_dispatcher_loads_minimal_stale_process_config(tmp_path: Path):
@@ -605,3 +656,21 @@ def test_gpu_selection_skips_small_active_jobs(tmp_path, monkeypatch):
                                  {"memory.used": 0, "processes": []}])
     monkeypatch.setattr(gputracker_module.gpustat.GPUStatCollection, "new_query", lambda: stats)
     assert dispatcher.get_free_gpus(1) == [1]
+
+
+def test_gpu_idle_checks_restart_after_query_failure(tmp_path, monkeypatch):
+    dispatcher = _dispatcher(tmp_path, monkeypatch)
+    assert dispatcher.config["max_checks"] == 2
+    stats = SimpleNamespace(gpus=[{"memory.used": 0, "processes": []}])
+    calls = []
+
+    def query():
+        calls.append(None)
+        if len(calls) == 2:
+            raise RuntimeError("temporary NVML failure")
+        return stats
+
+    monkeypatch.setattr(gputracker_module.gpustat.GPUStatCollection, "new_query", query)
+    monkeypatch.setattr(gputracker_module.time, "sleep", lambda _: None)
+    assert dispatcher.get_free_gpus(1) == [0]
+    assert len(calls) == 4

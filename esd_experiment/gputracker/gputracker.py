@@ -7,6 +7,7 @@
 from typing import Optional
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -27,7 +28,7 @@ from .supervision import (
 )
 
 AVAILABLE_GPUS = [0, 1, 2, 3, 4, 5, 6, 7]
-MAX_NCHECK = 10            # number of checks to know if gpu free
+MAX_NCHECK = 2             # consecutive idle checks, five seconds apart
 GPU_MEMORY_THRESHOLD = 500 # MB?
 STALE_PROCESS_ACTIONS = {"log", "terminate"}
 
@@ -68,6 +69,8 @@ class GPUDispatcher:
                 "default": 14400,
             },
             "termination_grace_seconds": 60,
+            "max_worker_ram_gib": 16,
+            "max_worker_cache_gib": 12,
         }
         if not self.load_config():
             raise ValueError(f"Cannot load initial GPU configuration: {self.config_path}")
@@ -121,6 +124,11 @@ class GPUDispatcher:
         merged_config["heartbeat_timeout_seconds"] = max(0, int(merged_config.get("heartbeat_timeout_seconds", 3600)))
         merged_config["stage_timeout_seconds"] = self._normalize_stage_timeouts(merged_config.get("stage_timeout_seconds", {}))
         merged_config["termination_grace_seconds"] = max(1, int(merged_config.get("termination_grace_seconds", 60)))
+        for key in ("max_worker_ram_gib", "max_worker_cache_gib"):
+            limit = float(merged_config.get(key, 0))
+            if not math.isfinite(limit) or limit < 0:
+                raise ValueError(f"{key} must be finite and >= 0")
+            merged_config[key] = limit
         return merged_config
 
     def load_config(self):
@@ -181,6 +189,7 @@ class GPUDispatcher:
             if self.reload_event.is_set():
                 self.reload_event.clear()
                 self.load_config()  # Failed reloads retain the previous settings.
+                counter.clear()
         
             try:
                 #Always read latest config
@@ -216,6 +225,7 @@ class GPUDispatcher:
                 time.sleep(5)
 
             except Exception as e:
+                counter.clear()  # A failed query is not evidence of continued idleness.
                 logging.error(f"Could not query GPU stats: {e}")
                 time.sleep(5)
 
@@ -422,8 +432,12 @@ class ChildThread(threading.Thread):
         cache_path = record.cache_path
         env["HF_HOME"] = str(cache_path)
         env["HF_HUB_CACHE"] = str(cache_path / "hub")
-        env["TRANSFORMERS_CACHE"] = str(cache_path / "transformers")
+        # HF and legacy Transformers downloads share one revision-addressed
+        # cache, rather than keeping two copies of the same checkpoint.
+        env["TRANSFORMERS_CACHE"] = env["HF_HUB_CACHE"]
         env["HF_DATASETS_CACHE"] = str(cache_path / "datasets")
+        env["HF_XET_CACHE"] = str(cache_path / "xet")
+        env["HF_MODULES_CACHE"] = str(cache_path / "modules")
 
     def _current_stale_config(self) -> tuple[str, int, dict[str, int], int]:
         with self.dispatcher.lock:
@@ -502,6 +516,42 @@ class ChildThread(threading.Thread):
             return stage_stale
         return None, None
 
+    def _resource_limit_reason(self, proc, record):
+        """Sample only this worker tree and its private cache; never shared caches."""
+        with self.dispatcher.lock:
+            ram_limit = self.dispatcher.config.get("max_worker_ram_gib", 0) * 1024 ** 3
+            cache_limit = self.dispatcher.config.get("max_worker_cache_gib", 0) * 1024 ** 3
+        try:
+            if ram_limit:
+                process = psutil.Process(proc.pid)
+                rss = 0
+                for member in [process, *process.children(recursive=True)]:
+                    try:
+                        rss += member.memory_info().rss
+                    except psutil.NoSuchProcess:
+                        pass  # A child exited during this sample.
+                if rss > ram_limit:
+                    return "worker_ram_limit", f"Worker tree RSS {rss} bytes exceeds {int(ram_limit)} bytes"
+            if cache_limit and record.cache_path is not None:
+                allocated = 0
+                def raise_walk_error(error):
+                    raise error
+                for directory, _, names in os.walk(record.cache_path, onerror=raise_walk_error):
+                    for name in names:
+                        try:
+                            allocated += os.lstat(os.path.join(directory, name)).st_blocks * 512
+                        except FileNotFoundError:
+                            continue  # HF may rename temporary downloads.
+                        if allocated > cache_limit:
+                            return "worker_cache_limit", f"Private cache exceeds {int(cache_limit)} allocated bytes"
+        except psutil.NoSuchProcess:
+            if proc.poll() is not None:
+                return None, None
+            return "resource_monitor_error", "Worker vanished during resource sampling"
+        except (OSError, psutil.Error) as error:
+            return "resource_monitor_error", f"Cannot verify worker resource bounds: {error}"
+        return None, None
+
     def _wait_for_process(self, proc, record: Optional[WorkerRecord]) -> tuple[Optional[int], Optional[str], Optional[str]]:
         while True:
             self.last_progress = time.monotonic()
@@ -515,6 +565,10 @@ class ChildThread(threading.Thread):
             except subprocess.TimeoutExpired:
                 if record is None:
                     continue
+                reason, message = self._resource_limit_reason(proc, record)
+                if reason:
+                    self.logger.warning(f"Stopping worker {record.job.worker_id}: {message}")
+                    return None, reason, message  # Existing group termination and cleanup handle this failure.
                 action, timeout_seconds, stage_timeouts, _ = self._current_stale_config()
                 reason, message = self._stale_worker_reason(record, timeout_seconds, stage_timeouts)
                 if reason is None:

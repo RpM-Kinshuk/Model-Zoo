@@ -1,0 +1,32 @@
+{
+  "model_id": "EleutherAI/gpt-neo-125m",
+  "revision": "21def0189f5705e2521767faed922f1f15e7d7db",
+  "outcome": "success",
+  "matrix_coverage": "complete",
+  "measurements": 75,
+  "fitted_measurements": 75,
+  "eigenvalues": 57600,
+  "verified_legacy_buffers": [
+    "transformer.h.0.attn.attention.bias",
+    "transformer.h.0.attn.attention.masked_bias",
+    "transformer.h.1.attn.attention.masked_bias",
+    "transformer.h.10.attn.attention.bias",
+    "transformer.h.10.attn.attention.masked_bias",
+    "transformer.h.11.attn.attention.masked_bias",
+    "transformer.h.2.attn.attention.bias",
+    "transformer.h.2.attn.attention.masked_bias",
+    "transformer.h.3.attn.attention.masked_bias",
+    "transformer.h.4.attn.attention.bias",
+    "transformer.h.4.attn.attention.masked_bias",
+    "transformer.h.5.attn.attention.masked_bias",
+    "transformer.h.6.attn.attention.bias",
+    "transformer.h.6.attn.attention.masked_bias",
+    "transformer.h.7.attn.attention.masked_bias",
+    "transformer.h.8.attn.attention.bias",
+    "transformer.h.8.attn.attention.masked_bias",
+    "transformer.h.9.attn.attention.masked_bias"
+  ],
+  "wall_seconds": 40.77885020989925,
+  "artifact_bytes": 445574,
+  "original_batch_artifacts_unchanged": true
+}

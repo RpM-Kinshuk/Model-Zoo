@@ -78,19 +78,20 @@ def _weight_skip_reason(weight):
 
 def iter_eligible_layers(
     net: nn.Module,
-    filter_type: Optional[bool] = True,
+    filter_type: Optional[bool] = False,
     coverage: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[Tuple[str, torch.Tensor, int]]:
     """Yield (name, weight_tensor, params_count) for eligible layers.
 
     Supported layouts are dense Linear/Embedding matrices and Conv1d/2d/3d
     kernels, including subclasses and the declared Hugging Face Conv1D matrix
-    layout, plus the built-in MultiheadAttention's declared projection matrices.
-    With filter_type=False, other ordinary dense 2D weights are an
-    explicit opt-in; unknown higher-dimensional or quantized layouts are never
+    layout, plus the built-in MultiheadAttention's declared projection matrices
+    and HF ViT's token/position tables (removing only their broadcast axis).
+    By default, other ordinary dense 2D weights are also included;
+    unknown higher-dimensional or quantized layouts are never
     guessed. Each eligible matrix is measured whole, including fused attention
     projections: names and aspect ratios do not establish a QKV packing layout.
-    The legacy Linear aspect-ratio filter remains enabled.
+    filter_type=True opts into the legacy module and Linear aspect-ratio filter.
 
     When provided, coverage receives records identified by module and weight
     attribute, including skipped candidates. MultiheadAttention can have several
@@ -104,6 +105,35 @@ def iter_eligible_layers(
     """
     emitted_names = set()
     for name, module in net.named_modules():
+        module_class = type(module)
+        # The official ViT stores token-by-hidden tables with a singleton
+        # batch/broadcast axis. This is not a convolution layout or a rule for
+        # arbitrary 3D parameters. Custom subclasses need their own declaration.
+        if (module_class.__name__ == "ViTEmbeddings"
+                and module_class.__module__ == "transformers.models.vit.modeling_vit"):
+            hidden_size = module.patch_embeddings.projection.out_channels
+            shapes = {"cls_token": (1, 1, hidden_size),
+                      "position_embeddings": (1, module.patch_embeddings.num_patches + 1, hidden_size)}
+            if getattr(module, "mask_token", None) is not None:
+                shapes["mask_token"] = (1, 1, hidden_size)
+            for attribute, shape in shapes.items():
+                weight = getattr(module, attribute, None)
+                record = _weight_record(name, module, attribute, weight)
+                record["weight_layout"] = "matrix"
+                if coverage is not None:
+                    coverage.append(record)
+                record["reason"] = _weight_skip_reason(weight)
+                if not record["reason"] and tuple(weight.shape) != shape:
+                    record["reason"] = "unsupported_weight_shape"
+                if record["reason"]:
+                    continue
+                measurement_name = f"{name}.{attribute}" if name else attribute
+                if measurement_name in emitted_names:
+                    raise ValueError(f"Duplicate ESD measurement name: {measurement_name!r}")
+                emitted_names.add(measurement_name)
+                record.update(status="eligible", measurement_names=[measurement_name], measurement_slices=["[0]"])
+                yield measurement_name, weight.detach()[0], weight.numel()
+            continue  # Patch projection is visited independently.
         # Only this declared implementation is covered. Quantizable/custom MHA
         # subclasses can replace the forward projections but retain unused
         # dense parameters from the base class; do not infer their layout.

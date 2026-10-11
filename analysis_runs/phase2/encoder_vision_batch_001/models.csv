@@ -1,0 +1,5 @@
+model_id,candidate_source,base_model_relation,source_model,revision_norm,loader_scenario,primary_type_bucket,lineage_status,revision_requested,source_model_requested,config_model_type,config_architectures,config_metadata_status,config_revision,pin_status,pin_error
+7k8k7/bert-base-uncased-finetuned-swag,curated_phase2,,,ffe78655517437da932f9b1db663d19ca2d67c22,,,,main,,bert,"[""BertForMultipleChoice""]",recorded,ffe78655517437da932f9b1db663d19ca2d67c22,pinned,
+distilbert/distilbert-base-uncased-finetuned-sst-2-english,coverage_extension,,,714eb0fa89d2f80546fda750413ed43d93601a13,,,,main,,distilbert,"[""DistilBertForSequenceClassification""]",recorded,714eb0fa89d2f80546fda750413ed43d93601a13,pinned,
+google/vit-base-patch16-224,coverage_extension,,,3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3,,,,main,,vit,"[""ViTForImageClassification""]",recorded,3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3,pinned,
+microsoft/resnet-18,coverage_extension,,,65a5785d9156231087c481e0c7dd33a5ff6f7e3e,,,,main,,resnet,"[""ResNetForImageClassification""]",recorded,65a5785d9156231087c481e0c7dd33a5ff6f7e3e,pinned,

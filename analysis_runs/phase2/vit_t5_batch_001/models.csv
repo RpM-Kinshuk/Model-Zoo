@@ -1,0 +1,3 @@
+model_id,candidate_source,base_model_relation,source_model,revision_norm,loader_scenario,primary_type_bucket,lineage_status,revision_requested,source_model_requested,config_model_type,config_architectures,config_metadata_status,config_revision,pin_status,pin_error
+google/vit-base-patch16-224,pinned_coverage_retry,,,3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3,,,,main,,vit,"[""ViTForImageClassification""]",recorded,3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3,pinned,
+google/flan-t5-small,coverage_extension,,,0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab,,,,main,,t5,"[""T5ForConditionalGeneration""]",recorded,0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab,pinned,

@@ -1,0 +1,18 @@
+{
+  "runner_and_worker_pids_exited": [
+    3733234,
+    3733889,
+    3734360,
+    3734797
+  ],
+  "worker_pgids_exited": [
+    3733889,
+    3734360,
+    3734797
+  ],
+  "removed_cache": "/tmp/model-zoo-cost-pilot-5yb_kx6a",
+  "remaining_files_removed": [
+    "metadata/hub/models--kernels-community--quantization_bitsandbytes/refs/main",
+    "metadata/hub/models--kernels-community--quantization_bitsandbytes/.no_exist/fa4365c273b3c3954244482bf6d701dd72b409e7/kernel-status.toml"
+  ]
+}

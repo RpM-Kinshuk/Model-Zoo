@@ -17,8 +17,10 @@ import importlib
 import importlib.util
 import itertools
 import json
+import math
 import os
 import pandas as pd
+import re
 import shlex
 import subprocess
 import sys
@@ -26,7 +28,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Tuple
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 # Add shells directory to path for gputracker
 SCRIPT_DIR = Path(__file__).parent
@@ -275,9 +277,9 @@ def record_preflight_blocks(blocked_df, output_dir):
         model_id = _normalize_text(row["model_id"])
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "model_id": model_id, "status": "blocked", "stage": "preflight",
+            "model_id": model_id, "status": "blocked", "stage": row.get("preflight_stage", "preflight"),
             "reason": row["preflight_reason"],
-            "message": f"Preflight rejected loader {row['preflight_effective_loader']}",
+            "message": row.get("preflight_message") or f"Preflight rejected loader {row['preflight_effective_loader']}",
             "revision": _normalize_text(row.get("revision_norm")) or model_id.partition("@")[2],
             "source_model": _normalize_text(row.get("source_model")),
             "analysis_policy": row["analysis_source"],
@@ -334,10 +336,13 @@ def parse_args():
     # GPU configuration
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
     parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
-    parser.add_argument("--max_concurrent_jobs", type=int, default=None, help="Maximum number of model analysis jobs to run at once (default: GPU-limited)")
+    parser.add_argument("--max_concurrent_jobs", type=int, default=1, help="Maximum model workers at once (default: 1; increase explicitly after reviewing resource costs)")
+    parser.add_argument("--max_worker_ram_gib", type=float, default=16, help="Sampled worker-tree RSS limit in GiB (default: 16; 0 disables)")
+    parser.add_argument("--max_worker_cache_gib", type=float, default=12, help="Sampled private worker cache limit in GiB (default: 12; 0 disables)")
+    parser.add_argument("--max_weight_gib", type=float, default=6, help="Preparation budget for selected model weights plus adapter base in GiB (default: 6; 0 disables size cap, not file/access checks)")
     parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
-    parser.add_argument("--max_check", type=int, default=5, help="Number of checks to confirm GPU is free (default: 5)")
-    parser.add_argument("--stale_process_action", type=str, default="log", choices=["log", "terminate"], help="Action when a worker heartbeat is stale (default: log)")
+    parser.add_argument("--max_check", type=int, default=2, help="Consecutive idle checks, five seconds apart (default: 2)")
+    parser.add_argument("--stale_process_action", type=str, default="terminate", choices=["log", "terminate"], help="Action when a heartbeat/stage timeout expires (default: terminate; log keeps waiting)")
     parser.add_argument("--heartbeat_timeout_seconds", type=int, default=3600, help="Seconds without heartbeat before a worker is stale (default: 3600)")
     parser.add_argument("--termination_grace_seconds", type=int, default=30, help="Seconds to wait after SIGTERM before SIGKILL for stale workers (default: 30)")
     parser.add_argument(
@@ -353,7 +358,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum; saved eigenvalues remain unfiltered")
-    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=True, help="Restrict layer types and skip Linear aspect ratios >= 8 (default); --no-filter_type also allows other dense 2D .weight tensors and keeps wide/tall Linear layers")
+    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=False, help="Optional legacy restriction: declared module types only and skip Linear aspect ratios >= 8; default includes supported dense 2D .weight tensors and wide/tall Linear layers")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD computation across multiple GPUs")
     parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")
@@ -362,12 +367,17 @@ def parse_args():
     
     # Experiment control
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
-    parser.add_argument("--limit", type=int, default=None, help="Limit to first N models (for testing)")
+    parser.add_argument("--limit", type=int, default=None, help="Limit this preparation/run to the first N input rows")
     parser.add_argument("--skip_failed", action="store_true", default=False, help="Skip models that previously failed (default: False)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
     parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
     args = parser.parse_args()
+    for key in ("max_worker_ram_gib", "max_worker_cache_gib", "max_weight_gib"):
+        if not math.isfinite(getattr(args, key)) or getattr(args, key) < 0:
+            parser.error(f"--{key} must be finite and >= 0")
+    if args.max_worker_cache_gib and not args.worker_cache_root:
+        parser.error("A cache limit requires --worker_cache_root; use --max_worker_cache_gib 0 to disable it")
     try:
         measurement_config(args)
     except ValueError as exc:
@@ -501,7 +511,38 @@ def _config_metadata(config):
     return fields
 
 
-def pin_model_revisions(model_df):
+def _review_weight_files(repo_id, revision, files, *, adapter, read_metadata, token):
+    """Select the loader's standard root files; inspect only small shard JSON."""
+    formats = (("safetensors", "adapter_model.safetensors"), ("pytorch", "adapter_model.bin")) if adapter else (
+        ("safetensors", "model.safetensors"), ("pytorch", "pytorch_model.bin"))
+    for weight_format, filename in formats:
+        if filename in files:
+            selected = [filename]
+        elif not adapter and filename + ".index.json" in files:
+            index_name = filename + ".index.json"
+            index_bytes = files[index_name]
+            if type(index_bytes) is not int or not 0 < index_bytes <= 8 * 1024 ** 2:
+                raise ValueError("Missing or oversized checkpoint index metadata")
+            weight_map = read_metadata(repo_id, index_name, revision=revision, token=token).get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError("Missing or empty checkpoint weight_map")
+            suffix = r"\.safetensors" if weight_format == "safetensors" else r"\.bin"
+            if any(not isinstance(name, str) or not re.fullmatch(r"[\w.-]+" + suffix, name)
+                   for name in weight_map.values()):
+                raise ValueError("Unsupported checkpoint shard names")
+            selected = sorted(set(weight_map.values()))
+            if len(selected) > 256:
+                raise ValueError("Checkpoint exceeds 256 shards")
+        else:
+            continue
+        sizes = {name: files.get(name) for name in selected}
+        if any(type(size) is not int or size <= 0 for size in sizes.values()):
+            raise ValueError("Missing checkpoint files or byte sizes")
+        return weight_format, sum(sizes.values()), json.dumps(sizes, sort_keys=True)
+    raise ValueError("No standard safetensors/PyTorch weight files; review this checkpoint layout")
+
+
+def pin_model_revisions(model_df, max_weight_gib=None):
     """Resolve a plain CSV using Hub metadata and adapter JSON, never model code.
 
     Reuse resolutions of shared bases within this preparation. Keep failed rows
@@ -512,18 +553,39 @@ def pin_model_revisions(model_df):
     token = get_hf_token()
     api = HfApi(token=token)
     resolved = {}
+    reviewed = {}
+
+    def read_metadata(repo_id, filename, *, revision, token):
+        # Clean each JSON download immediately, not after a 50k-row preparation.
+        with TemporaryDirectory(prefix="model-zoo-prepare-") as metadata_cache:
+            path = hf_hub_download(repo_id, filename, revision=revision, token=token, cache_dir=metadata_cache)
+            if Path(path).stat().st_size > 8 * 1024 ** 2:
+                raise ValueError("Metadata JSON exceeds 8 MiB")
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def review_weights(repo_id, revision, files, *, adapter):
+        key = (repo_id, revision, adapter)
+        if key not in reviewed:
+            reviewed[key] = _review_weight_files(repo_id, revision, files, adapter=adapter,
+                                                 read_metadata=read_metadata, token=token)
+        return reviewed[key]
 
     def resolve_revision(repo_id, revision):
         key = (repo_id, revision)
         if key not in resolved:
-            info = api.model_info(repo_id, revision=revision, timeout=30, expand=["sha", "siblings", "config"])
+            lookup = {"files_metadata": True} if max_weight_gib is not None else {"expand": ["sha", "siblings", "config"]}
+            info = api.model_info(repo_id, revision=revision, timeout=30, **lookup)
             if not is_commit_sha(info.sha):
                 raise ValueError(f"Hub returned no full commit SHA for {repo_id}@{revision}")
             if is_commit_sha(revision) and info.sha.lower() != revision.lower():
                 raise ValueError(f"Hub commit differs from requested pin for {repo_id}")
             has_adapter = any(item.rfilename == "adapter_config.json" for item in info.siblings or [])
+            if max_weight_gib is not None and (getattr(info, "gated", False) or getattr(info, "private", False)):
+                api.auth_check(repo_id=repo_id, repo_type="model")  # Verify supplied read access, not public metadata alone.
+            files = {item.rfilename: getattr(item, "size", None) for item in info.siblings or []
+                     if "/" not in item.rfilename and item.rfilename.endswith((".safetensors", ".bin", ".index.json"))}
             # Keep only small facts, not every repository's file list/metadata.
-            resolved[key] = (info.sha, has_adapter, _config_metadata(info.config))
+            resolved[key] = (info.sha, has_adapter, _config_metadata(info.config), files)
             resolved[(repo_id, info.sha)] = resolved[key]
         return resolved[key]
 
@@ -538,19 +600,27 @@ def pin_model_revisions(model_df):
         source_model = _normalize_text(row.get("source_model", ""))
         pinned["revision_requested"] = revision
         pinned["source_model_requested"] = source_model
+        # Curated lineage uses this literal placeholder, not a base repository.
+        # Keep the hint above; adapters must still resolve their actual base.
+        if source_model == "unknown":
+            source_model = ""
+            pinned["source_model"] = ""
         # Repreparation must not leave stale labels attached to a changed pin,
         # including when the new metadata request fails.
         pinned.update(_config_metadata(None), config_revision="")
+        if max_weight_gib is not None:
+            pinned.update(preparation_status="held", preparation_reason="", max_weight_gib=max_weight_gib,
+                          weight_format="", weight_bytes="", weight_files="", base_weight_bytes="",
+                          base_weight_files="", download_bytes="")
         try:
-            model_sha, has_adapter, config_fields = resolve_revision(repo_id, revision)
+            model_sha, has_adapter, config_fields, model_files = resolve_revision(repo_id, revision)
             pinned["revision_norm"] = model_sha
             pinned.update(config_fields, config_revision=model_sha)
             is_adapter = (has_adapter
                           or _normalize_text(row.get("base_model_relation", "")).lower() in {"adapter", "lora", "peft"}
                           or _normalize_text(row.get("loader_scenario", "")) == "adapter_requires_base")
             if is_adapter:
-                config_path = hf_hub_download(repo_id, "adapter_config.json", revision=model_sha, token=token)
-                config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+                config = read_metadata(repo_id, "adapter_config.json", revision=model_sha, token=token)
                 if not source_model:
                     base_repo, _, base_revision = str(config.get("base_model_name_or_path") or "").partition("@")
                     base_revision = config.get("revision") or base_revision or "main"
@@ -561,13 +631,31 @@ def pin_model_revisions(model_df):
             if source_model:
                 pinned["source_model_requested"] = pinned["source_model_requested"] or source_model
                 base_repo, _, base_revision = source_model.partition("@")
-                base_sha, _, _ = resolve_revision(base_repo, base_revision or "main")
+                base_sha, _, _, base_files = resolve_revision(base_repo, base_revision or "main")
                 pinned["source_model"] = f"{base_repo}@{base_sha}"
             validate_model_pin(model_id, pinned["revision_norm"], pinned.get("source_model", ""),
                                pinned.get("base_model_relation", ""))
             pinned.update(pin_status="pinned", pin_error="")
+            if max_weight_gib is not None:
+                try:
+                    weight_format, weight_bytes, weight_files = review_weights(repo_id, model_sha, model_files, adapter=is_adapter)
+                    pinned.update(weight_format=weight_format, weight_bytes=weight_bytes, weight_files=weight_files)
+                    base_bytes = 0
+                    if is_adapter:
+                        _, base_bytes, base_weight_files = review_weights(base_repo, base_sha, base_files, adapter=False)
+                        pinned.update(base_weight_bytes=base_bytes, base_weight_files=base_weight_files)
+                    total = weight_bytes + base_bytes
+                    pinned["download_bytes"] = total
+                    if max_weight_gib and total > max_weight_gib * 1024 ** 3:
+                        pinned["preparation_reason"] = f"Selected weights exceed {max_weight_gib:g} GiB budget"
+                    else:
+                        pinned.update(preparation_status="ready", preparation_reason="")
+                except Exception as error:
+                    pinned["preparation_reason"] = f"{type(error).__name__}: {error}"
         except Exception as error:
             pinned.update(pin_status="error", pin_error=f"{type(error).__name__}: {error}")
+            if max_weight_gib is not None:
+                pinned["preparation_reason"] = pinned["pin_error"]
         rows.append(pinned)
         if len(rows) % 100 == 0:
             print(f"Resolved {len(rows)}/{len(model_df)} model rows", flush=True)
@@ -597,6 +685,18 @@ def validate_model_list_pins(model_df):
         validate_model_pin(_normalize_text(row["model_id"]), _normalize_text(row.get("revision_norm", "")),
                            _normalize_text(row.get("source_model", "")), _normalize_text(row.get("base_model_relation", "")),
                            _normalize_text(row.get("loader_scenario", "")))
+
+
+def split_prepared_models(model_df):
+    """Keep explicit preparation holds visible, without dispatching those rows."""
+    if "preparation_status" not in model_df:
+        return model_df, model_df.iloc[:0]
+    if not model_df["preparation_status"].isin({"ready", "held"}).all():
+        raise ValueError("Unknown preparation_status; review or reprepare this model list")
+    held = model_df["preparation_status"].eq("held")
+    if held.any() and "preparation_reason" not in model_df:
+        raise ValueError("Held preparation rows need preparation_reason")
+    return model_df.loc[~held].copy(), model_df.loc[held].copy()
 
 
 def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
@@ -637,7 +737,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         ]
 
         cmd_parts.append("--filter_zeros" if args.filter_zeros else "--no-filter_zeros")
-        cmd_parts.append("--filter_type" if getattr(args, "filter_type", True) else "--no-filter_type")
+        cmd_parts.append("--filter_type" if getattr(args, "filter_type", False) else "--no-filter_type")
         cmd_parts.append("--use_svd" if args.use_svd else "--no-use_svd")
         cmd_parts.append("--parallel_esd" if args.parallel_esd else "--no-parallel_esd")
         cmd_parts.extend(["--load_dtype", getattr(args, "load_dtype", "auto")])
@@ -776,10 +876,12 @@ def create_runtime_config(args, config_path):
         "max_checks": args.max_check,
         "memory_threshold_mb": args.gpu_memory_threshold,
         "max_concurrent_jobs": args.max_concurrent_jobs,
-        "stale_process_action": getattr(args, "stale_process_action", "log"),
+        "stale_process_action": getattr(args, "stale_process_action", "terminate"),
         "heartbeat_timeout_seconds": getattr(args, "heartbeat_timeout_seconds", 3600),
         "stage_timeout_seconds": getattr(args, "stage_timeout_seconds", {}),
         "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
+        "max_worker_ram_gib": getattr(args, "max_worker_ram_gib", 16),
+        "max_worker_cache_gib": getattr(args, "max_worker_cache_gib", 12),
     }
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
@@ -792,6 +894,7 @@ def main():
 
     # Preparation stops before GPU configuration, backend probes or dispatch.
     output_dir = Path(args.output_dir).resolve()
+    held_models = pd.DataFrame()
     try:
         model_df = load_model_list(args.model_list, limit=args.limit)
         if model_df.empty:
@@ -801,10 +904,12 @@ def main():
             if manifest_path.exists():
                 raise ValueError(f"{manifest_path} already exists; use those pins or prepare in a fresh directory")
             print(f"Resolving {len(model_df)} model rows (metadata/config only; no weights)", flush=True)
-            pinned = pin_model_revisions(model_df)
+            pinned = pin_model_revisions(model_df, max_weight_gib=args.max_weight_gib)
             write_pinned_model_list(pinned, manifest_path)
             errors = int(pinned["pin_status"].eq("error").sum())
             print(f"Saved {len(pinned) - errors} pinned models and {errors} unresolved rows to {manifest_path}")
+            ready = int(pinned["preparation_status"].eq("ready").sum())
+            print(f"Weight/access review: {ready} ready, {len(pinned) - ready} held; see preparation_reason.")
             labelled = pinned["config_model_type"].ne("") | pinned["config_architectures"].ne("[]")
             print(f"Config labels: {int(labelled.sum())}/{len(pinned)} rows have a model type or architecture; "
                   "see config_metadata_status for gaps.")
@@ -812,6 +917,7 @@ def main():
             if errors:
                 raise SystemExit(1)
             return
+        model_df, held_models = split_prepared_models(model_df)
         validate_model_list_pins(model_df)
     except (OSError, ValueError) as exc:
         print(f"Cannot prepare or launch: {exc}")
@@ -821,6 +927,16 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(args.log_dir) if args.log_dir else output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    if not held_models.empty:
+        held_models = held_models.assign(
+            preflight_stage="prepare", preflight_reason="preparation_held",
+            preflight_message=held_models["preparation_reason"],
+            preflight_effective_loader=held_models["loader_scenario"], analysis_source=args.analysis_source)
+        record_preflight_blocks(held_models, output_dir)
+        print(f"Holding {len(held_models)} prepared rows without launching workers; see preparation_reason.")
+        if model_df.empty:
+            print("No ready models; preparation holds recorded, no GPU work started.")
+            return
 
     config_path = str(output_dir / "gpu_config.json")
     try:

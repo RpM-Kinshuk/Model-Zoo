@@ -1,0 +1,43 @@
+{
+  "phase": "complete",
+  "runner_pid": 3751421,
+  "returncode": 0,
+  "seconds": 66.03761342098005,
+  "signal_sent": null,
+  "cache_root": "/tmp/model-zoo-cost-pilot-0pogk6d7",
+  "remaining_cache_allocated_bytes": 4096,
+  "initial_artifact_sha256": {},
+  "final_artifact_sha256": {
+    "stats/AK232003--outputs_500.csv": "f0d187e395d90507cef6d86b15ce3568f77dd61fdbd5c4c6c7d1d6c28733e539",
+    "stats/AfnanTS--Bert-base-uncased-finetuned-LoRA.csv": "ef31b6d79777d855fa765f8e9396393814d0b9b5b8733c7e4fb46b961468af4d",
+    "metrics/AK232003--outputs_500.h5": "6acf811e498198accdf43e61a251b9d53596c5652095cd2f83e58304859a23dd",
+    "metrics/AfnanTS--Bert-base-uncased-finetuned-LoRA.h5": "76d5901a7da665a21513bdb882277ec7f7842fc155b231f7ad2f87c9e20b9ad7"
+  },
+  "command": [
+    "/scratch/kinshuk/anaconda3/envs/esd_ind/bin/python",
+    "esd_experiment/run_experiment.py",
+    "--model_list",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/bert_adapter_retry_002/models.csv",
+    "--output_dir",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/bert_adapter_retry_002",
+    "--gpus",
+    "0",
+    "1",
+    "2",
+    "3",
+    "--num_gpus_per_job",
+    "1",
+    "--max_concurrent_jobs",
+    "1",
+    "--worker_cache_root",
+    "/tmp/model-zoo-cost-pilot-0pogk6d7",
+    "--stage_timeout_seconds",
+    "load=900,analyze=900,save=120,default=900",
+    "--heartbeat_timeout_seconds",
+    "180",
+    "--stale_process_action",
+    "terminate",
+    "--termination_grace_seconds",
+    "15"
+  ]
+}

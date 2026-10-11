@@ -1,0 +1,121 @@
+{
+  "selection": "Four public candidates from the curated adapter stratum; bounded operational slice, not a population sample. Base pins resolved from actual adapter configs.",
+  "models": [
+    {
+      "model_id": "AK232003/outputs_500",
+      "revision": "2fd8456e412aad9551e371c1f762eca51e2c6b08",
+      "source_model": "bert-base-uncased@86b5e0934494bd15c9632b12f734a8a67f723594",
+      "ready": true,
+      "adapter_config": {
+        "base_model_name_or_path": "bert-base-uncased",
+        "revision": null,
+        "peft_type": "LORA",
+        "task_type": "SEQ_CLS",
+        "r": 8,
+        "target_modules": [
+          "query",
+          "value"
+        ],
+        "modules_to_save": null,
+        "bias": "none",
+        "use_dora": false,
+        "use_rslora": false
+      },
+      "adapter_bytes": 1192672,
+      "base_weight_bytes": 440449768,
+      "base_weight_files": {
+        "model.safetensors": 440449768
+      },
+      "base_model_type": "bert"
+    },
+    {
+      "model_id": "AfnanTS/Bert-base-uncased-finetuned-LoRA",
+      "revision": "9a2ed054bf31fbbaf54d8b60d45878efa6e1f197",
+      "source_model": "bert-base-uncased@86b5e0934494bd15c9632b12f734a8a67f723594",
+      "ready": true,
+      "adapter_config": {
+        "base_model_name_or_path": "bert-base-uncased",
+        "revision": null,
+        "peft_type": "LORA",
+        "task_type": null,
+        "r": 8,
+        "target_modules": [
+          "value",
+          "query"
+        ],
+        "modules_to_save": null,
+        "bias": "all",
+        "use_dora": null,
+        "use_rslora": null
+      },
+      "adapter_bytes": 1858256,
+      "base_weight_bytes": 440449768,
+      "base_weight_files": {
+        "model.safetensors": 440449768
+      },
+      "base_model_type": "bert"
+    },
+    {
+      "model_id": "sikoraaxd/Qwen2-0.5B-Instruct-ru-lora",
+      "revision": "f1fa56303ae329d2c19f61e2fd51a82c48e32003",
+      "source_model": "Qwen/Qwen2-0.5B-Instruct@c540970f9e29518b1d8f06ab8b24cba66ad77b6d",
+      "ready": true,
+      "adapter_config": {
+        "base_model_name_or_path": "Qwen/Qwen2-0.5B-Instruct",
+        "revision": null,
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+        "r": 16,
+        "target_modules": [
+          "q_proj",
+          "gate_proj",
+          "k_proj",
+          "down_proj",
+          "up_proj",
+          "o_proj",
+          "v_proj"
+        ],
+        "modules_to_save": null,
+        "bias": "none",
+        "use_dora": false,
+        "use_rslora": false
+      },
+      "adapter_bytes": 17640808,
+      "base_weight_bytes": 988097824,
+      "base_weight_files": {
+        "model.safetensors": 988097824
+      },
+      "base_model_type": "qwen2"
+    },
+    {
+      "model_id": "Agnuxo/HAL_9000-QWEN2-0.5_Spanish_English_lora_model",
+      "revision": "0e55af5db29dd22856ff4c100365b39634b75328",
+      "source_model": "unsloth/qwen2-0.5b-bnb-4bit@116cd8ff5ea4baab3905b6a9445fef8c6b4a3590",
+      "ready": false,
+      "adapter_config": {
+        "base_model_name_or_path": "unsloth/qwen2-0.5b-bnb-4bit",
+        "revision": null,
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+        "r": 16,
+        "target_modules": [
+          "gate_proj",
+          "up_proj",
+          "q_proj",
+          "v_proj",
+          "o_proj",
+          "down_proj",
+          "k_proj"
+        ],
+        "modules_to_save": null,
+        "bias": "none",
+        "use_dora": false,
+        "use_rslora": false
+      },
+      "hold_reason": "Quantized/custom-code base held"
+    }
+  ],
+  "weights_downloaded": false,
+  "workers_launched": false,
+  "limits": "One worker on idle authorized GPUs 0\u20133; base <=1.5 GB, adapter <=100 MB, 12 GiB cache, 16 GiB sampled RSS, stages 900/900/120 seconds, 1 hour overall stop."
+}

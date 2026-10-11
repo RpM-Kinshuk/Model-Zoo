@@ -54,7 +54,7 @@ def test_supported_classes_include_subclasses_embeddings_and_declared_hf_conv1d(
 
 @pytest.mark.parametrize("shape", [(4, 4), (4, 4, 3), (4, 4, 3, 3)])
 @pytest.mark.parametrize("filter_type", [True, False])
-def test_unknown_layouts_require_explicit_dense_matrix_opt_in(shape, filter_type):
+def test_unknown_layouts_only_allow_dense_matrices_without_legacy_filter(shape, filter_type):
     layers, coverage = describe(UnknownWeight(shape), filter_type=filter_type)
 
     if not filter_type and len(shape) == 2:
@@ -65,13 +65,59 @@ def test_unknown_layouts_require_explicit_dense_matrix_opt_in(shape, filter_type
         assert coverage[""]["reason"] == "unsupported_module_type"
 
 
-def test_linear_aspect_ratio_filter_is_reported_and_can_be_disabled():
+def test_linear_aspect_ratio_filter_is_opt_in_and_reported():
     model = nn.Linear(4, 32)
-    layers, coverage = describe(model)
+    layers, coverage = describe(model, filter_type=True)
 
     assert layers == []
     assert coverage[""]["reason"] == "linear_aspect_ratio_at_least_8"
-    assert len(describe(model, filter_type=False)[0]) == 1
+    assert len(describe(model)[0]) == 1
+
+
+def test_vit_tables_keep_identity_and_match_matrix_spectra():
+    from transformers import ViTConfig
+    from transformers.models.vit.modeling_vit import ViTEmbeddings
+
+    module = ViTEmbeddings(ViTConfig(hidden_size=8, image_size=8, patch_size=4),
+                           use_mask_token=True).double()
+    before = {name: value.clone() for name, value in module.state_dict().items()}
+    coverage = []
+    metrics = net_esd.net_esd_estimator(module, parallel=False, compute_dtype="float64",
+                                       filter_zeros=False, coverage=coverage)
+    usage = weight_usage_report(module, coverage, metrics["longname"])
+    for attribute in ("cls_token", "position_embeddings", "mask_token"):
+        index = metrics["longname"].index(attribute)
+        reference = torch.linalg.svdvals(before[attribute][0]).square().sort().values
+        torch.testing.assert_close(torch.as_tensor(metrics["eigs"][index]), reference)
+        assert metrics["weight_attribute"][index] == attribute
+        assert metrics["slice"][index] == "[0]"
+        record = next(record for record in coverage if record["weight_attribute"] == attribute)
+        assert record["weight_shape"] == list(before[attribute].shape)
+        assert record["status"] == "analyzed"
+        linked = next(record for record in usage["tensors"] if record["name"] == attribute)
+        assert linked["status"] == "measured"
+        assert linked["measurement_names"] == [attribute]
+    assert math.isnan(metrics["alpha"][metrics["longname"].index("cls_token")])
+    assert usage["counts"]["skipped_tensors"] == usage["counts"]["unresolved_tensors"] == 0
+    for name, value in module.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+
+
+def test_vit_table_shapes_and_custom_subclasses_are_not_guessed():
+    from transformers import ViTConfig
+    from transformers.models.vit.modeling_vit import ViTEmbeddings
+
+    config = ViTConfig(hidden_size=8, image_size=8, patch_size=4)
+    module = ViTEmbeddings(config)
+    module.position_embeddings = nn.Parameter(torch.ones(2, 5, 8))
+    coverage = []
+    layers = list(iter_eligible_layers(module, coverage=coverage))
+    assert "position_embeddings" not in [name for name, _, _ in layers]
+    record = next(record for record in coverage if record["weight_attribute"] == "position_embeddings")
+    assert record["reason"] == "unsupported_weight_shape"
+    custom = type("CustomViTEmbeddings", (ViTEmbeddings,), {})(config)
+    assert all(name not in {"cls_token", "position_embeddings"}
+               for name, _, _ in iter_eligible_layers(custom))
 
 
 def test_known_class_with_unsupported_shape_is_skipped_before_numerics():
@@ -344,7 +390,7 @@ def test_weight_usage_links_tied_heads_even_when_one_module_is_skipped(head_firs
     modules = [("head", head), ("embedding", embedding)]
     model = nn.ModuleDict(modules if head_first else reversed(modules))
     coverage = []
-    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage, filter_type=True)
 
     usage = weight_usage_report(model, coverage, metrics["longname"])
 

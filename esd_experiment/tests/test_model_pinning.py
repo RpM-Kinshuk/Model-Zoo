@@ -29,35 +29,39 @@ def hub(monkeypatch, tmp_path):
     responses = {}
     configs = {}
 
-    def model_info(repo_id, *, revision, timeout, expand):
+    def model_info(repo_id, *, revision, timeout, expand=None, files_metadata=False):
         assert timeout > 0
-        assert set(expand) == {"sha", "siblings", "config"}
+        assert files_metadata or set(expand) == {"sha", "siblings", "config"}
         response = responses[(repo_id, revision)]
         if isinstance(response, Exception):
             raise response
         return response
 
-    def download(repo_id, filename, *, revision, token):
-        assert filename == "adapter_config.json"
+    def download(repo_id, filename, *, revision, token, cache_dir=None):
+        assert filename == "adapter_config.json" or filename.endswith(".index.json")
         assert len(revision) == 40
+        if cache_dir is not None:
+            assert Path(cache_dir).is_dir()
         path = tmp_path / f"adapter-{len(download_mock.call_args_list)}.json"
         path.write_text(json.dumps(configs[(repo_id, revision)]), encoding="utf-8")
         return str(path)
 
     info_mock = Mock(side_effect=model_info)
     download_mock = Mock(side_effect=download)
-    api = SimpleNamespace(model_info=info_mock)
+    auth_mock = Mock()
+    api = SimpleNamespace(model_info=info_mock, auth_check=auth_mock)
     fake_hub = ModuleType("huggingface_hub")
     fake_hub.HfApi = Mock(return_value=api)
     fake_hub.hf_hub_download = download_mock
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
     monkeypatch.setattr(runner, "get_hf_token", lambda: None)
     return SimpleNamespace(responses=responses, configs=configs, info=info_mock,
-                           download=download_mock)
+                           download=download_mock, auth=auth_mock)
 
 
-def model_info(sha=MODEL_SHA, *, adapter=False, config=None):
+def model_info(sha=MODEL_SHA, *, adapter=False, config=None, weights=None):
     files = [SimpleNamespace(rfilename="adapter_config.json")] if adapter else []
+    files.extend(SimpleNamespace(rfilename=name, size=size) for name, size in (weights or {}).items())
     return SimpleNamespace(sha=sha, siblings=files, config=config)
 
 
@@ -137,6 +141,75 @@ def test_adapter_base_is_inferred_and_shared_resolutions_are_cached(hub):
     assert hub.info.call_count == 3
     assert hub.download.call_count == 2
     runner.validate_model_list_pins(pinned)
+
+
+@pytest.mark.parametrize("adapter", [False, True])
+def test_unknown_base_hint_is_not_fetched_and_adapters_still_need_a_pin(hub, adapter):
+    hub.responses[("org/model", "main")] = model_info(adapter=adapter)
+    if adapter:
+        hub.configs[("org/model", MODEL_SHA)] = {"base_model_name_or_path": "org/base"}
+        hub.responses[("org/base", "main")] = model_info(BASE_SHA)
+    pinned = runner.pin_model_revisions(pd.DataFrame([
+        {"model_id": "org/model", "source_model": "unknown"}
+    ])).iloc[0]
+    assert pinned["pin_status"] == "pinned"
+    assert pinned["source_model_requested"] == "unknown"
+    assert pinned["source_model"] == (f"org/base@{BASE_SHA}" if adapter else "")
+    assert all(call.args[0] != "unknown" for call in hub.info.call_args_list)
+
+
+@pytest.mark.parametrize("weights,status,weight_bytes", [
+    ({"model.safetensors": 100, "pytorch_model.bin": 200}, "ready", 100),
+    ({"pytorch_model.bin": 100}, "ready", 100),
+    ({"model.safetensors": 2 * 1024 ** 3}, "held", 2 * 1024 ** 3),
+    ({"model.safetensors": None}, "held", ""), ({}, "held", ""),
+])
+def test_preparation_reviews_selected_files_and_holds_without_losing_pins(hub, weights, status, weight_bytes):
+    hub.responses[("org/model", "main")] = model_info(weights=weights)
+    pinned = runner.pin_model_revisions(pd.DataFrame([{"model_id": "org/model"}]), max_weight_gib=1).iloc[0]
+    assert pinned["pin_status"] == "pinned" and pinned["revision_norm"] == MODEL_SHA
+    assert pinned["preparation_status"] == status and pinned["weight_bytes"] == weight_bytes
+    assert bool(pinned["preparation_reason"]) == (status == "held")
+    hub.download.assert_not_called()
+
+
+def test_preparation_counts_adapter_payload_and_indexed_base_once(hub):
+    hub.responses[("org/adapter", "main")] = model_info(adapter=True, weights={"adapter_model.safetensors": 100})
+    hub.configs[("org/adapter", MODEL_SHA)] = {"base_model_name_or_path": "org/base"}
+    hub.responses[("org/base", "main")] = model_info(BASE_SHA, weights={
+        "model.safetensors.index.json": 100, "a.safetensors": 200, "b.safetensors": 300})
+    hub.configs[("org/base", BASE_SHA)] = {"weight_map": {"w1": "a.safetensors", "w2": "a.safetensors", "w3": "b.safetensors"}}
+    pinned = runner.pin_model_revisions(pd.DataFrame([{"model_id": "org/adapter"}]), max_weight_gib=1).iloc[0]
+    assert pinned["preparation_status"] == "ready"
+    assert pinned["download_bytes"] == 600 and pinned["base_weight_bytes"] == 500
+    assert json.loads(pinned["base_weight_files"]) == {"a.safetensors": 200, "b.safetensors": 300}
+    assert {call.args[1] for call in hub.download.call_args_list} == {"adapter_config.json", "model.safetensors.index.json"}
+    assert all(not Path(call.kwargs["cache_dir"]).exists() for call in hub.download.call_args_list)
+
+
+def test_gated_metadata_is_not_mistaken_for_weight_access(hub):
+    info = model_info(weights={"model.safetensors": 100})
+    info.gated = "manual"
+    hub.responses[("org/model", "main")] = info
+    hub.auth.side_effect = PermissionError("Read access not granted")
+    pinned = runner.pin_model_revisions(pd.DataFrame([{"model_id": "org/model"}]), max_weight_gib=1).iloc[0]
+    assert pinned["preparation_status"] == "held"
+    assert "Read access not granted" in pinned["preparation_reason"]
+    hub.auth.assert_called_once_with(repo_id="org/model", repo_type="model")
+    hub.download.assert_not_called()
+
+
+def test_all_preparation_holds_record_outcomes_without_gpu_work(tmp_path, monkeypatch):
+    source = tmp_path / "models.csv"
+    pd.DataFrame([{"model_id": "org/model", "revision_norm": MODEL_SHA, "pin_status": "pinned",
+                   "preparation_status": "held", "preparation_reason": "Over budget"}]).to_csv(source, index=False)
+    output = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", str(source), "--output_dir", str(output)])
+    forbid_runtime(monkeypatch)
+    runner.main()
+    record = json.loads((output / "logs/terminal_status/org--model.json").read_text())
+    assert record["status"] == "blocked" and record["stage"] == "prepare"
+    assert record["message"] == "Over budget"
 
 
 def test_supplied_base_overrides_adapter_config(hub):

@@ -1,0 +1,43 @@
+{
+  "phase": "complete",
+  "runner_pid": 3778487,
+  "returncode": 0,
+  "seconds": 64.9646598410327,
+  "signal_sent": null,
+  "cache_root": "/tmp/model-zoo-cost-pilot-01_ghoju",
+  "remaining_cache_allocated_bytes": 4096,
+  "initial_artifact_sha256": {},
+  "final_artifact_sha256": {
+    "stats/google--flan-t5-small.csv": "e26f69cd83a80a099a254857da20fa2330d29e34d77c674c57b7d85240e2e897",
+    "stats/google--vit-base-patch16-224.csv": "0200293c7551de3078248388e52c935ff73b01f25de0b1e55aa241c57432f8b7",
+    "metrics/google--flan-t5-small.h5": "e6ede81bac9a86477381b8bef59dbf799a5cd847e4416cb12c4c927716837d58",
+    "metrics/google--vit-base-patch16-224.h5": "d36e93397791bc03a7af35d3fed6d406e6a89222e8657c58c5a35c5e0b6cedf4"
+  },
+  "command": [
+    "/scratch/kinshuk/anaconda3/envs/esd_ind/bin/python",
+    "esd_experiment/run_experiment.py",
+    "--model_list",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/vit_t5_batch_001/models.csv",
+    "--output_dir",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/vit_t5_batch_001",
+    "--gpus",
+    "0",
+    "1",
+    "2",
+    "3",
+    "--num_gpus_per_job",
+    "1",
+    "--max_concurrent_jobs",
+    "1",
+    "--worker_cache_root",
+    "/tmp/model-zoo-cost-pilot-01_ghoju",
+    "--stage_timeout_seconds",
+    "load=900,analyze=900,save=120,default=900",
+    "--heartbeat_timeout_seconds",
+    "180",
+    "--stale_process_action",
+    "terminate",
+    "--termination_grace_seconds",
+    "15"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "runner_returncode": 0,
+  "checked_owned_pids": [
+    4037841,
+    4038376,
+    4038745,
+    4039421,
+    4040274,
+    4041001,
+    4041362
+  ],
+  "checked_owned_process_groups": [
+    4037841,
+    4038376,
+    4038745,
+    4039421,
+    4040274,
+    4041001,
+    4041362
+  ],
+  "remaining_owned_processes": [],
+  "removed_private_cache": "/tmp/model-zoo-cost-pilot-3ivyux1n",
+  "cache_removed": true
+}

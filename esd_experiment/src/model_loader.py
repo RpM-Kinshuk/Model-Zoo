@@ -148,6 +148,7 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
     info = _json_safe_loading_value(info)
     config = getattr(model, "config", None)
     allowed_unexpected = []
+    legacy_buffers = []
     unexpected = []
     for key in info["unexpected_keys"]:
         # These scalar buffers were serialized by old GPT2 versions but are
@@ -156,6 +157,10 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
         if (getattr(config, "model_type", None) == "gpt2"
                 and re.fullmatch(r"transformer\.h\.\d+\.attn\.masked_bias", key)):
             allowed_unexpected.append(key)
+        elif (getattr(config, "model_type", None) == "gpt_neo"
+                and type(model).__module__.startswith("transformers.models.gpt_neo.")
+                and re.fullmatch(r"transformer\.h\.\d+\.attn\.attention\.(bias|masked_bias)", key)):
+            legacy_buffers.append(key)
         else:
             unexpected.append(key)
     restored = []
@@ -178,7 +183,7 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
             f"Checkpoint weights do not match {type(model).__name__}: "
             + "; ".join(f"{key}={value}" for key, value in problems.items() if value),
         )
-    verified_buffers = (architecture_selection or {}).get("position_id_buffers", [])
+    verified_buffers = list((architecture_selection or {}).get("position_id_buffers", []))
     if verified_buffers:
         # Transformers regenerates these nonpersistent buffers. Verify values,
         # not only shapes, before accepting that regeneration as harmless.
@@ -188,6 +193,10 @@ def _load_checkpoint_checked(model_cls, repo_id: str, *, architecture_selection=
             buffer = model.get_buffer(name)
             if tensor.dtype != buffer.dtype or not torch.equal(tensor, buffer.cpu()):
                 raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Stored position IDs differ: {name}")
+    if legacy_buffers:
+        _verify_gpt_neo_buffers(model, repo_id, kwargs.get("revision"), legacy_buffers)
+        allowed_unexpected.extend(legacy_buffers)
+        verified_buffers.extend(legacy_buffers)
     model._model_zoo_loading_info = {
         "model_class": type(model).__name__,
         "loader_class": model_cls.__name__,
@@ -225,6 +234,30 @@ def _read_checkpoint_tensors(index, names):
             values.update({name: state[name].clone() for name in selected})
             del state
     return values
+
+
+def _verify_gpt_neo_buffers(model, repo_id, revision, names):
+    """Old GPT-Neo saved masks and a -1e9 constant, not trained biases.
+
+    The current built-in model regenerates its global/local causal masks.
+    Compare the stored values rather than allowing arbitrary unexpected keys.
+    """
+    index = checkpoint_tensor_index(repo_id, revision, allow_bin=True)
+    if any(name not in index["tensors"] for name in names):
+        raise LoaderFailure("load", "checkpoint_weight_mismatch", "Missing legacy GPT-Neo buffer")
+    for name, tensor in _read_checkpoint_tensors(index, names).items():
+        try:
+            attention = model.get_submodule(name.rsplit(".", 1)[0])
+        except AttributeError as error:
+            raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Unknown attention buffer: {name}") from error
+        if name.endswith(".masked_bias"):
+            valid = (tensor.dtype == torch.float32 and tensor.ndim == 0
+                     and tensor.item() == -1e9)
+        else:
+            valid = (tensor.dtype in (torch.uint8, torch.bool)
+                     and torch.equal(tensor, attention.bias.cpu()))
+        if not valid:
+            raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Stored GPT-Neo buffer differs: {name}")
 
 
 def _restore_albert_pooler(model, repo_id, revision):
@@ -1163,15 +1196,22 @@ def load_and_merge_adapter(
     try:
         if effective_loader == "compressed_tensors":
             ensure_compressed_tensors_backend_compat()
-        base = _load_checkpoint_checked(
-            auto_model_cls,
-            base_repo,
-            device_map=device_map,
-            torch_dtype=torch_dtype,
-            revision=base_revision,
-            trust_remote_code=trust_remote_code,
-            architecture_selection=architecture_selection,
-        )
+        base = None
+        if auto_model_cls is transformers.BertForMaskedLM:
+            base = _load_legacy_bert_adapter_base(
+                base_repo, base_revision, adapter_repo, revision,
+                device_map=device_map, torch_dtype=torch_dtype,
+            )
+        if base is None:
+            base = _load_checkpoint_checked(
+                auto_model_cls,
+                base_repo,
+                device_map=device_map,
+                torch_dtype=torch_dtype,
+                revision=base_revision,
+                trust_remote_code=trust_remote_code,
+                architecture_selection=architecture_selection,
+            )
     except LoaderFailure:
         raise
     except Exception as exc:
@@ -1239,6 +1279,101 @@ def load_and_merge_adapter(
     }
     
     return merged
+
+
+def _load_legacy_bert_adapter_base(repo_id, revision, adapter_repo, adapter_revision, **kwargs):
+    """Resolve the observed MLM declaration / complete pretraining-file conflict.
+
+    This is task transfer, not a generic architecture override: load and check
+    every pretraining weight first, then retain the requested adapter model's
+    backbone/head. The normal adapter validator must fill any new task head.
+    """
+    from peft import load_peft_weights
+
+    config = AutoConfig.from_pretrained(repo_id, revision=revision, token=get_hf_token())
+    if (type(config) is not transformers.BertConfig or config.is_decoder
+            or getattr(config, "auto_map", None) or getattr(config, "quantization_config", None)):
+        return None
+    adapter = PeftConfig.from_pretrained(adapter_repo, revision=adapter_revision, token=get_hf_token())
+    mapping = getattr(adapter, "auto_mapping", None) or {}
+    if adapter.task_type == "SEQ_CLS":
+        target_cls = transformers.BertForSequenceClassification
+    elif (adapter.task_type is None and isinstance(mapping, dict)
+          and mapping.get("base_model_class") == "BertForMaskedLM"
+          and mapping.get("parent_library") == "transformers.models.bert.modeling_bert"):
+        target_cls = transformers.BertForMaskedLM
+    else:
+        return None
+    shapes, inspection = _checkpoint_tensor_shapes(repo_id, revision)
+    # The historical file uses TensorFlow LayerNorm gamma/beta names.
+    # Transformers converts these during loading; apply the same narrow aliases
+    # for layout verification, rejecting duplicate logical tensors.
+    normalized, renames = {}, {}
+    for name, shape in shapes.items():
+        mapped = re.sub(r"\.LayerNorm\.(gamma|beta)$",
+                        lambda match: ".LayerNorm." + ("weight" if match[1] == "gamma" else "bias"), name)
+        if mapped in normalized:
+            raise LoaderFailure("load", "checkpoint_weight_mismatch", f"Duplicate BERT tensor after rename: {mapped}")
+        normalized[mapped] = shape
+        if mapped != name:
+            renames[name] = mapped
+    shapes = normalized
+    inspection["legacy_key_renames"] = renames
+    if _matching_encoder_classes(config, shapes) != [transformers.BertForPreTraining]:
+        return None  # Never explain arbitrary extras as unused pretraining heads.
+
+    head_keys = []
+    if target_cls is transformers.BertForSequenceClassification:
+        head_keys = ["base_model.model.classifier.weight", "base_model.model.classifier.bias"]
+        weights = load_peft_weights(adapter_repo, device="cpu", revision=adapter_revision, token=get_hf_token())
+        weight, bias = (weights.get(key) for key in head_keys)
+        if (weight is None or bias is None or weight.ndim != 2 or weight.shape[0] < 1
+                or weight.shape[1] != config.hidden_size or bias.shape != (weight.shape[0],)):
+            raise LoaderFailure("load", "adapter_checkpoint_mismatch",
+                                "BERT classification transfer requires a complete saved classifier weight and bias")
+        config = copy.deepcopy(config)
+        config.num_labels = weight.shape[0]
+        del weights, weight, bias
+
+    source = _load_checkpoint_checked(
+        transformers.BertForPreTraining, repo_id, revision=revision,
+        architecture_selection=dict(inspection, method="checkpoint_shapes", model_class="BertForPreTraining"),
+        **kwargs,
+    )
+    if any(parameter.is_meta for parameter in source.parameters()):
+        raise LoaderFailure("load", "unsupported_adapter_integrity",
+                            "BERT task transfer requires materialized base weights, not disk/meta offloading")
+    # Construct only the task structure, not a second random dense backbone.
+    with torch.device("meta"):
+        target = target_cls(copy.deepcopy(config))
+    source_keys = set(source.state_dict())
+    target.bert = source.bert
+    if target_cls is transformers.BertForMaskedLM:
+        target.bert.pooler = None
+        target.cls.predictions = source.cls.predictions
+    else:
+        parameter = source.bert.embeddings.word_embeddings.weight
+        target.classifier.to_empty(device=parameter.device)
+        target.classifier.to(dtype=parameter.dtype)
+        # Placeholders are overwritten and value-checked by _load_adapter_checked.
+        # Both saved head tensors are mandatory; none is measured at this stage.
+        with torch.no_grad():
+            target.classifier.weight.zero_()
+            target.classifier.bias.zero_()
+    target.tie_weights()
+    target.config.architectures = [target_cls.__name__]
+    target._model_zoo_loading_info = source._model_zoo_loading_info
+    target._model_zoo_loading_info["bert_adapter_transfer"] = {
+        "policy_version": "1",
+        "declared_base_class": "BertForMaskedLM",
+        "verified_base_class": "BertForPreTraining",
+        "target_class": target_cls.__name__,
+        "excluded_base_keys": sorted(source_keys - set(target.state_dict())),
+        "required_adapter_head_keys": head_keys,
+        "scope": "task-specific adapted model, not all tensors in the pretraining base",
+    }
+    print(f"Verified BERT pretraining base; reconstructing adapter task model {target_cls.__name__}.")
+    return target
 
 
 def load_model(

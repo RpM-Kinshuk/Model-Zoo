@@ -1,0 +1,29 @@
+{
+  "selection": "Pinned ViT layout retry plus public encoder-decoder coverage extension; not a representative sample. Sharded loading already covered by Fietje-2 in dense_batch_001; no redundant larger retry.",
+  "models": [
+    {
+      "model_id": "google/vit-base-patch16-224",
+      "revision": "3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3",
+      "candidate_source": "coverage_extension",
+      "ready": true,
+      "weight_bytes": 346293852,
+      "weight_files": {
+        "model.safetensors": 346293852
+      },
+      "format": "safetensors",
+      "model_type": "vit",
+      "architectures": [
+        "ViTForImageClassification"
+      ]
+    },
+    {
+      "model_id": "google/flan-t5-small",
+      "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+      "weight_files": {
+        "model.safetensors": 307867048
+      },
+      "weight_bytes": 307867048,
+      "candidate_source": "coverage_extension"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+model_id,metadata_params_billion,size_bin,metadata_parent,candidate_source,primary_type_bucket,base_model_relation,source_model,revision_norm,loader_scenario,lineage_status,revision_requested,source_model_requested,config_model_type,config_architectures,config_metadata_status,config_revision,pin_status,pin_error
+EleutherAI/gpt-neo-125m,0.15,0-1B,EleutherAI/gpt-neo-125m,leaderboard_dataset,finetune,,,21def0189f5705e2521767faed922f1f15e7d7db,,,main,,gpt_neo,"[""GPTNeoForCausalLM""]",recorded,21def0189f5705e2521767faed922f1f15e7d7db,pinned,

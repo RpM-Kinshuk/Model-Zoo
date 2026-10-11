@@ -449,7 +449,7 @@ def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_wo
     csv_path, h5_path = case.output / "stats/org--control.csv", case.output / "metrics/org--control.h5"
     with case.worker.h5py.File(h5_path) as h5:
         config = json.loads(h5.attrs["measurement_config_json"])
-        assert config["analysis_policy"] == "auto" and config["filter_type"] is True
+        assert config["analysis_policy"] == "auto" and config["filter_type"] is False
         assert config["runtime"]["analysis_source"] == "checkpoint"
         assert config["runtime"]["filter_type"] is False
         assert config["runtime"]["model_class"] is None
@@ -570,7 +570,7 @@ def test_auto_does_not_fill_in_partial_or_empty_module_analysis(auto_worker, kee
     case = auto_worker
     model = torch.nn.Module()
     model.unknown = torch.nn.Module()
-    model.unknown.weight = torch.nn.Parameter(torch.eye(4))
+    model.unknown.kernel = torch.nn.Parameter(torch.eye(4))  # Undeclared attribute, even without the legacy filter.
     if keep_standard:
         model.standard = torch.nn.Linear(4, 4)
     case.load.side_effect = None

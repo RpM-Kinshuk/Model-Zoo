@@ -16,7 +16,6 @@
   <img alt="Python 3.10" src="https://img.shields.io/badge/Python-3.10-003262?style=for-the-badge&logo=python&logoColor=FDB515">
   <img alt="PyTorch and CUDA" src="https://img.shields.io/badge/PyTorch-CUDA-003B95?style=for-the-badge&logo=pytorch&logoColor=white">
   <img alt="Hugging Face" src="https://img.shields.io/badge/Hugging_Face-Models-006CE4?style=for-the-badge&logo=huggingface&logoColor=white">
-  <img alt="Tests: 146 passing" src="https://img.shields.io/badge/Tests-146_passing-00693E?style=for-the-badge&logo=pytest&logoColor=white">
 </p>
 
 ---
@@ -37,8 +36,28 @@
 git clone https://github.com/RpM-Kinshuk/Model-Zoo.git
 cd Model-Zoo
 conda env create -f environment.yml
-conda activate esd_ind
+conda activate model_zoo
+python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python esd_experiment/tests/test_setup.py
 ```
+
+Run these commands from the repository root, in a **new** environment. Do not
+update the shared `esd_ind` environment in place. Conda supplies Python; pip owns
+the analysis packages, so there is only one PyTorch installation.
+
+The direct dependency pins match the September 29 pilot; they are not a full
+transitive lock. The CUDA 12.8 wheel pairing follows the
+[official PyTorch recipe](https://pytorch.org/get-started/previous-versions/#v2110).
+For CPU-only work, use its `cpu` wheel index instead. Hardware/build differences
+remain recorded provenance, not an equivalence guarantee.
+
+Optional quantization backends are deliberately separate: install only what a
+selected checkpoint needs in a separate environment and recheck it. An installed
+backend is not proof of support. Dashboard dependencies have their own
+[requirements](clustering/unsupervised/requirements.txt); they are not needed to
+build or query the ESD dataset. See the [analysis guide](docs/operations/analysis.md)
+for the current coverage and validation limits.
 
 For gated or private repositories:
 
@@ -213,13 +232,17 @@ The dispatcher considers a physical GPU free when:
 
 ```text
 used memory < --gpu_memory_threshold
+AND no GPU processes are reported
 AND it is not reserved by this run
 AND it passes --max_check consecutive polls
 ```
 
-It atomically reserves `--num_gpus_per_job` devices, exposes only those devices through `CUDA_VISIBLE_DEVICES`, and releases them in a `finally` block on every exit path.
+It tracks `--num_gpus_per_job` assigned devices within this runner and exposes
+them through `CUDA_VISIBLE_DEVICES`. This is not a reservation against other
+users or runners. Assignments are released after confirmed worker termination;
+an unconfirmed termination keeps its cache and assignment for inspection.
 
-`--max_concurrent_jobs` adds a separate cap for host RAM, network, filesystem, or API-rate constraints. Without it, free GPUs determine concurrency.
+`--max_concurrent_jobs` defaults to one worker; increase it explicitly after reviewing host RAM, network and storage costs. The normal runner also has sampled per-worker RAM/cache caps and preparation weight budgets; see the [operating limits](docs/operations/analysis.md#scheduling-and-monitoring).
 
 > [!NOTE]
 > GPU IDs on the CLI are physical IDs. CUDA remaps them inside a worker: a worker assigned physical GPU 6 will usually see it as local `cuda:0`.
@@ -310,10 +333,10 @@ One dispatch thread walks the queue. Each active model gets a lightweight contro
 
 | Mechanism | What it handles |
 | --- | --- |
-| Loader fallback | Meta-tensor reload, corrected model-class routing, spectral-only `AutoModel` fallback |
+| Loader fallback | Strict weight-preserving class selection; checkpoint matrices for narrowly identified architecture failures |
 | Worker retry | CUDA OOM, load errors, analysis exceptions, finalization errors |
 | Terminal failure | Unsupported formats, unresolved adapter bases, gated/missing repos, empty analysis |
-| Resume | Skips complete work; clears and regenerates partial work |
+| Resume | Skips compatible CSV/HDF5 pairs; stops on incomplete or incompatible outputs without deleting them |
 
 > [!IMPORTANT]
 > The direct worker supports `--max_retries` and defaults to zero. The batch runner does not currently forward a whole-job retry count, so batch jobs make one attempt while still using loader-level corrective fallbacks. On the next batch run, failures are retried unless `--skip_failed` is set.
@@ -590,12 +613,16 @@ net_esd/
 ## Verify the installation
 
 ```bash
-python -m pytest esd_experiment/tests -q \
-  --ignore=esd_experiment/tests/test_setup.py \
-  --ignore=esd_experiment/tests/test_gpu.py
 python esd_experiment/tests/test_setup.py
-python esd_experiment/tests/test_gpu.py
+# Optional developer checks; pytest is not a runtime dependency.
+python -m pip install 'pytest>=8,<9'
+python -m pytest esd_experiment/tests -q
 ```
+
+The setup check is offline and CPU-only. For a bounded GPU numerical check,
+use `esd_experiment/scripts/backend_pilot.py` on an idle authorized device;
+see [validation](docs/operations/analysis.md#validation). It replaces the old
+unbounded GPU/download setup probe.
 
 ## Read next
 
