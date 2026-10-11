@@ -23,14 +23,18 @@ python esd_experiment/run_experiment.py \
 ```
 
 Eigenvalues are saved by default; use `--no-save_eigs` for scalar-only output.
-Supported matrices, including wide/tall Linear layers and other dense 2D
-`.weight` tensors, are included by default. `--filter_type` restores the older
+Supported matrices, including wide/tall Linear layers and ordinary dense 2D
+registered parameters beyond `.weight`, are included by default. New parameter
+matrices retain their full names and `weight_layout=parameter_matrix`: they
+describe stored parameters, not inferred linear operators. Shared parameters
+already accounted for are not measured again by this pass. `--filter_type` restores the older
 restricted selection; it must be explicit when resuming runs made with that setting.
 Built-in ViT token/position tables are also included with explicit `[0]` slices;
 HF Swin's declared relative-position bias tables are measured as stored 2D
-tables, not as attention operators. Selection 3 records this addition; older
+tables, not as attention operators. Selection 4 records generic parameter discovery; older
 results remain readable but require a fresh directory under the new selection.
-Unknown 3D parameters are not reshaped.
+Unknown higher-dimensional parameters are not reshaped. Quantization/adapter
+helpers and parametrization internals are excluded with recorded reasons.
 Results are per-layer CSV and canonical HDF5 records with spectra, missing-fit
 status and coverage. Use a fresh output directory when settings change.
 Model and adapter-base revisions must be full commit SHAs. Remote code is off;

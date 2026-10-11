@@ -181,8 +181,8 @@ completion evidence; the CSV/HDF5 pairs remain authoritative. Complete coverage
 and finite fits alone do not establish scientific validity.
 
 Current output versions are numerics **7**, loader **10**, HDF5 format **2.0**.
-Layer selection **3** adds declared Swin position tables after ViT in selection
-**2**, without changing spectral formulas.
+Layer selection **4** adds otherwise unhandled registered parameter matrices,
+after Swin tables in **3** and ViT tables in **2**, without changing spectral formulas.
 Earlier numerics-7/loader-10 pairs without this field remain readable as selection
 **1**, but do not resume under current selection settings. Keep this convention
 when comparing summaries; use a fresh run directory rather than rewriting history.
@@ -397,27 +397,37 @@ and Swin V2's computed continuous-position bias do not gain this interpretation.
 See the [official implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/swin/modeling_swin.py).
 
 Full supported-matrix inclusion is now the default (`filter_type=False`) in the
-runner, worker and Python estimator. Other ordinary
-floating, dense 2D `.weight` tensors become eligible, and the legacy Linear
-aspect-ratio skip is disabled. Standard convolution layouts remain supported;
-unknown higher-dimensional layouts, packed/quantized representations and
-undeclared nonstandard attributes are still skipped. This is not
+runner, worker and Python estimator. Ordinary floating, dense 2D parameters
+become eligible regardless of their attribute names, and the legacy Linear
+aspect-ratio skip is disabled. Declared module layouts and identities are handled
+first. A second pass inventories otherwise unhandled registered parameters,
+preserving exact names such as `custom.kernel` and recording
+`weight_layout=parameter_matrix` in CSV/HDF5. These are stored-parameter matrix
+descriptors, not inferred operators or invented QKV splits. It does not select
+arbitrary buffers, reshape higher-dimensional tensors, unpack quantized weights,
+measure adapter factors or treat parametrization internals as extra model weights.
+Those skips retain reasons. Known quantization/compression owners and their
+descendants are excluded from generic discovery, including floating scales.
+Standard convolution layouts remain supported. This is not
 architecture recovery or permission to use a partially loaded checkpoint.
 Inspect coverage and weight-usage records for remaining gaps. `filter_type` is
 stored in HDF5 and the summary, and must match on resume. Use `--filter_type` to
 explicitly resume an older restricted run; use a fresh directory for wider
-coverage. No numerical/version bump is needed: the existing recorded setting
-already distinguishes these conventions and rejects mismatched resume.
+coverage. Selection 4 distinguishes the expanded measured set; older selections
+remain readable but cannot resume as selection 4. Spectral formulas are unchanged.
 
 Coverage also inventories loaded registered parameters and buffers, including
 non-persistent buffers, without reading/copying their values. Each tensor has its
 full name, shared aliases, shape/dtype and measurement links or a reason it was
 not measured. Shared aliases mean the same Tensor object, not equal values or
-overlapping storage; existing per-module measurements are not deduplicated.
+overlapping storage; existing declared per-module measurements are not deduplicated.
+Generic discovery visits shared parameter objects once and does not add another
+measurement for aliases of an already accounted-for declared weight.
 Scalar/vector parameters and buffers not selected as weights are distinguished
-from skipped weights and unresolved parameters. For example, an extra matrix
-parameter beside a module's `.weight` is unresolved if the selector overlooked
-it. Computed/unregistered weights can leave measurements explicitly unmapped.
+from skipped weights and unresolved parameters. Extra ordinary 2D parameters
+beside a module's `.weight` now get their own measurement and link.
+Computed/unregistered weights can leave measurements explicitly unmapped; a raw
+parameter and a computed view are not declared equivalent from shared provenance.
 Callable/packed non-tensor helpers remain in module coverage; this inventory
 does not unpack them or prove that all checkpoint weights survived loading.
 The loader's integrity gate remains separate and required. See

@@ -81,6 +81,74 @@ def iter_eligible_layers(
     filter_type: Optional[bool] = False,
     coverage: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[Tuple[str, torch.Tensor, int]]:
+    """Declared module weights, then otherwise unhandled stored parameter matrices.
+
+    Generic matrices keep their full registered names and parameter_matrix layout;
+    they are not inferred linear operators. Shared aliases already accounted for
+    by a declared weight are not measured again. Unknown higher-dimensional,
+    packed/quantized, adapter and parametrization representations remain excluded.
+    """
+    records = coverage if coverage is not None else []
+    yield from _iter_module_weights(net, filter_type, records)
+    if not filter_type:
+        modules = dict(net.named_modules())
+        handled_parameters = set()
+        blocked_modules = set()
+        # Rejected declared weights stay rejected; aliases cannot bypass that check.
+        for record in records:
+            module = modules[record["module_name"]]
+            attributes = record.get("unsupported_weight_attributes") or [record["weight_attribute"]]
+            for attribute in attributes:
+                parameter = module._parameters.get(attribute)
+                if parameter is not None:
+                    handled_parameters.add(id(parameter))
+            if record["reason"] in {"weight_is_not_a_tensor", "unsupported_weight_representation"}:
+                blocked_modules.add(record["module_name"])
+        for name, module in modules.items():
+            config = getattr(module, "config", None)
+            quantization = (config.get("quantization_config") if isinstance(config, dict)
+                            else getattr(config, "quantization_config", None))
+            compression = (config.get("compression_config") if isinstance(config, dict)
+                           else getattr(config, "compression_config", None))
+            if (isinstance(module, nn.utils.parametrize.ParametrizationList)
+                    or (isinstance(module, nn.MultiheadAttention) and type(module) is not nn.MultiheadAttention)
+                    or getattr(module, "hf_quantizer", None) is not None
+                    or getattr(module, "is_quantized", False)
+                    or quantization or compression
+                    or any(getattr(module, attribute, None) is not None for attribute in (
+                        "qweight", "qzeros", "weight_packed", "packed_weight", "quant_state",
+                        "weight_scale", "weight_scale_inv", "weight_zero_point", "quantization_config",
+                        "compression_config", "lora_A", "lora_B", "ia3_l",
+                    ))):
+                blocked_modules.add(name)
+
+        measurement_names = {measurement for record in records for measurement in record["measurement_names"]}
+        for full_name, parameter in net.named_parameters():
+            if id(parameter) in handled_parameters or (not nn.parameter.is_lazy(parameter) and parameter.ndim < 2):
+                continue
+            module_name, _, attribute = full_name.rpartition(".")
+            record = _weight_record(module_name, modules[module_name], attribute, parameter)
+            records.append(record)
+            record["reason"] = _weight_skip_reason(parameter)
+            if any(not name or module_name == name or module_name.startswith(name + ".") for name in blocked_modules):
+                record["reason"] = "unsupported_parameter_owner"
+            elif not record["reason"] and parameter.ndim != 2:
+                record["reason"] = "undeclared_tensor_layout"
+            if record["reason"]:
+                continue
+            if full_name in measurement_names:
+                raise ValueError(f"Duplicate ESD measurement name: {full_name!r}")
+            measurement_names.add(full_name)
+            record.update(weight_layout="parameter_matrix", status="eligible",
+                          measurement_names=[full_name], measurement_slices=[""])
+            yield full_name, parameter.detach(), parameter.numel()
+
+
+def _iter_module_weights(
+    net: nn.Module,
+    filter_type: Optional[bool],
+    coverage: List[Dict[str, Any]],
+) -> Iterator[Tuple[str, torch.Tensor, int]]:
     """Yield (name, weight_tensor, params_count) for eligible layers.
 
     Supported layouts are dense Linear/Embedding matrices and Conv1d/2d/3d
@@ -97,9 +165,9 @@ def iter_eligible_layers(
     When provided, coverage receives records identified by module and weight
     attribute, including skipped candidates. MultiheadAttention can have several
     weight records in one module; module counts must group by module_name.
-    Known packed attributes and other direct matrix
-    parameters with nonstandard names are recorded, but never unpacked or
-    interpreted as supported layouts. Packed recurrent weights are recorded at
+    Known packed attributes are recorded, never unpacked. The legacy filter
+    also records unsupported direct parameters; otherwise the caller inventories
+    those after declared module weights. Packed recurrent weights are recorded at
     their owning module, not again at each storage helper. Arbitrary buffers
     are not weight candidates. The estimator changes eligible records to
     analyzed after computation; absence of a power-law fit is not a skip.
@@ -206,7 +274,7 @@ def iter_eligible_layers(
                 module, (nn.quantized.dynamic.LSTM, nn.quantized.dynamic.GRU)
             ) and getattr(module, "_all_weight_values", None) is not None:
                 unsupported_attributes = ["_all_weight_values"]
-            if not unsupported_attributes:
+            if not unsupported_attributes and filter_type:
                 unsupported_attributes = [
                     attribute for attribute, parameter in module.named_parameters(recurse=False)
                     if not isinstance(parameter, torch.nn.parameter.UninitializedParameter)

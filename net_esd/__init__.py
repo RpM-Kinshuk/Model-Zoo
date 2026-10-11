@@ -212,7 +212,7 @@ def net_esd_estimator(
                 raise ValueError(f"Unknown backend: {backend}. Expected 'thread' or 'process'.")
 
         identity = {
-            measurement_name: (record["module_name"], record["weight_attribute"], slice_name)
+            measurement_name: (record["module_name"], record["weight_attribute"], slice_name, record["weight_layout"])
             for record in coverage_records
             for measurement_name, slice_name in zip(record["measurement_names"], record["measurement_slices"])
         }
@@ -222,7 +222,7 @@ def net_esd_estimator(
                 continue
             if result.get("longname") != name:
                 raise ValueError(f"ESD result identity does not match requested layer {name!r}")
-            result["module_name"], result["weight_attribute"], result["slice"] = identity[name]
+            result["module_name"], result["weight_attribute"], result["slice"], result["weight_layout"] = identity[name]
             # Multiprocess transport can cast checkpoint-native bfloat16 to
             # numpy-compatible float32; record the actual input, not transport.
             result["source_dtype"] = str(weight.dtype).removeprefix("torch.")

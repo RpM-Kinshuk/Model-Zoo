@@ -28,6 +28,62 @@ def describe(model, **kwargs):
     return layers, {record["module_name"]: record for record in coverage}
 
 
+def test_generic_parameters_keep_names_spectra_and_shared_aliases():
+    module = nn.Module()
+    module.kernel = nn.Parameter(torch.diag(torch.arange(1., 5.)).double())
+    module.table = nn.Parameter(torch.arange(24.).reshape(6, 4).double())
+    module.alias = module.kernel
+    module.register_buffer("buffer_matrix", torch.eye(4))
+    coverage = []
+    model = nn.ModuleDict({"custom": module})
+    metrics = net_esd.net_esd_estimator(model, parallel=False, compute_dtype="float64",
+                                       filter_zeros=False, coverage=coverage)
+    assert metrics["longname"] == ["custom.kernel", "custom.table"]
+    assert metrics["weight_layout"] == ["parameter_matrix", "parameter_matrix"]
+    assert metrics["module_name"] == ["custom", "custom"]
+    for index, parameter in enumerate((module.kernel, module.table)):
+        reference = torch.linalg.svdvals(parameter.detach()).square().sort().values
+        torch.testing.assert_close(torch.as_tensor(metrics["eigs"][index]), reference)
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+    assert usage["tensors"][0]["aliases"] == ["custom.alias"]
+    assert usage["counts"]["measured_tensors"] == 2
+    assert usage["counts"]["unresolved_tensors"] == usage["counts"]["unmapped_measurements"] == 0
+    assert list(iter_eligible_layers(model, filter_type=True)) == []
+
+
+def test_generic_alias_of_declared_weight_is_not_an_extra_measurement():
+    linear = nn.Linear(4, 4, bias=False)
+    holder = nn.Module()
+    holder.kernel = linear.weight
+    model = nn.ModuleDict({"holder": holder, "linear": linear})
+    coverage = []
+    metrics = net_esd.net_esd_estimator(model, parallel=False, coverage=coverage)
+    assert metrics["longname"] == ["linear"]
+    usage = weight_usage_report(model, coverage, metrics["longname"])
+    assert usage["tensors"][0]["name"] == "holder.kernel"
+    assert usage["tensors"][0]["aliases"] == ["linear.weight"]
+    assert usage["tensors"][0]["measurement_names"] == ["linear"]
+
+
+@pytest.mark.parametrize("marker", ["qweight", "lora_A", "quantization_config", "parametrization"])
+def test_generic_pass_does_not_measure_encoded_or_parametrized_helpers(marker):
+    if marker == "parametrization":
+        module = nn.utils.parametrizations.weight_norm(nn.Linear(4, 4, bias=False))
+        expected = ["custom"]  # Effective weight remains the declared Linear measurement.
+    else:
+        module = nn.Module()
+        module.scales = nn.Parameter(torch.ones(4, 4))
+        if marker == "quantization_config":
+            module.config = SimpleNamespace(quantization_config={"quant_method": "gptq"})
+        else:
+            module.register_buffer(marker, torch.ones(4, 4))
+        expected = []
+    coverage = []
+    layers = list(iter_eligible_layers(nn.ModuleDict({"custom": module}), coverage=coverage))
+    assert [name for name, _, _ in layers] == expected
+    assert any(record["reason"] == "unsupported_parameter_owner" for record in coverage)
+
+
 def test_supported_classes_include_subclasses_embeddings_and_declared_hf_conv1d():
     hf_conv_class = type("Conv1D", (UnknownWeight,), {"__module__": "transformers.pytorch_utils"})
     model = nn.ModuleDict({
@@ -151,7 +207,9 @@ def test_swin_malformed_tables_and_custom_subclasses_are_not_guessed():
     assert list(iter_eligible_layers(module, coverage=coverage)) == []
     assert coverage[0]["reason"] == "unsupported_weight_shape"
     custom = type("CustomSwinBias", (SwinRelativePositionBias,), {})(3, (2, 3))
-    assert list(iter_eligible_layers(custom)) == []
+    records = []
+    assert [name for name, _, _ in iter_eligible_layers(custom, coverage=records)] == ["relative_position_bias_table"]
+    assert records[0]["weight_layout"] == "parameter_matrix"  # Stored matrix, not an inherited Swin layout.
 
 
 def test_known_class_with_unsupported_shape_is_skipped_before_numerics():
@@ -265,7 +323,7 @@ def test_known_packed_attributes_are_visible_without_unpacking(attribute):
     assert coverage[""]["measurement_names"] == []
 
 
-def test_custom_kernel_parameters_are_reported_but_arbitrary_buffers_are_not():
+def test_custom_kernel_matrices_are_measured_without_reshaping_or_selecting_buffers():
     custom = nn.Module()
     custom.kernel = nn.Parameter(torch.ones(4, 4))
     custom.other_kernel = nn.Parameter(torch.ones(4, 4, 3))
@@ -274,13 +332,13 @@ def test_custom_kernel_parameters_are_reported_but_arbitrary_buffers_are_not():
     buffer_only.register_buffer("running_matrix", torch.ones(4, 4))
     model = nn.ModuleDict({"custom": custom, "buffer_only": buffer_only})
 
-    layers, coverage = describe(model)
-
-    assert layers == []
-    assert list(coverage) == ["custom"]  # Neither containers nor arbitrary buffers.
-    assert coverage["custom"]["weight_attribute"] == "kernel"
-    assert coverage["custom"]["unsupported_weight_attributes"] == ["kernel", "other_kernel"]
-    assert coverage["custom"]["reason"] == "unsupported_weight_attribute"
+    coverage = []
+    layers = list(iter_eligible_layers(model, coverage=coverage))
+    assert [name for name, _, _ in layers] == ["custom.kernel"]
+    assert [record["module_name"] for record in coverage] == ["custom", "custom"]
+    assert coverage[0]["status"] == "eligible"
+    assert coverage[1]["weight_attribute"] == "other_kernel"
+    assert coverage[1]["reason"] == "undeclared_tensor_layout"
 
 
 @pytest.mark.parametrize("kdim,vdim,attributes", [
@@ -358,15 +416,17 @@ def test_mha_subclasses_do_not_inherit_an_unverified_projection_layout(module_cl
 
     assert all(name != "in_proj_weight" for name, _, _ in layers)
     original_projection = next(record for record in coverage if record["module_name"] == "")
-    assert original_projection["reason"] == "unsupported_weight_attribute"
+    assert original_projection["reason"] == "unsupported_parameter_owner"
 
 
-def test_attention_weight_attribute_names_alone_do_not_enable_selection():
+def test_generic_attention_parameter_is_one_stored_matrix_without_qkv_inference():
     model = nn.Module()
     model.in_proj_weight = nn.Parameter(torch.ones(24, 8))
     layers, coverage = describe(model, filter_type=False)
-    assert layers == []
-    assert coverage[""]["reason"] == "unsupported_weight_attribute"
+    assert [name for name, _, _ in layers] == ["in_proj_weight"]
+    assert layers[0][1].shape == (24, 8)
+    assert coverage[""]["weight_layout"] == "parameter_matrix"
+    assert describe(model, filter_type=True)[0] == []
 
 
 def test_attention_bias_vectors_are_not_interpreted_as_projection_matrices():
@@ -378,7 +438,8 @@ def test_attention_bias_vectors_are_not_interpreted_as_projection_matrices():
     usage = weight_usage_report(module, coverage, metrics["longname"])
     for name in ("bias_k", "bias_v"):
         record = next(record for record in usage["tensors"] if record["name"] == name)
-        assert record["status"] == "unresolved" and record["measurement_names"] == []
+        assert record["status"] == "skipped" and record["measurement_names"] == []
+        assert record["reason"] == "undeclared_tensor_layout"
 
 
 def test_standard_weight_selection_is_unchanged_when_packed_metadata_exists():
@@ -403,16 +464,17 @@ def test_weight_usage_exposes_extra_parameters_and_shared_module_aliases():
     usage = weight_usage_report(model, coverage, metrics["longname"])
     records = {record["name"]: record for record in usage["tensors"]}
 
-    assert metrics["longname"] == ["first"]  # No change in selection or computation.
+    assert metrics["longname"] == ["first", "first.extra_projection"]
+    assert metrics["weight_layout"] == ["matrix", "parameter_matrix"]
     assert records["first.weight"]["aliases"] == ["shared.weight"]
     assert records["first.weight"]["measurement_names"] == ["first"]
     extra = records["first.extra_projection"]
     assert extra["aliases"] == ["shared.extra_projection"]
-    assert extra["status"] == "unresolved"
-    assert extra["reason"] == "parameter_not_in_module_coverage"
-    assert usage["counts"] == dict(registered_tensors=2, measured_tensors=1,
+    assert extra["status"] == "measured"
+    assert extra["measurement_names"] == ["first.extra_projection"]
+    assert usage["counts"] == dict(registered_tensors=2, measured_tensors=2,
                                    skipped_tensors=0, not_applicable_tensors=0,
-                                   unresolved_tensors=1, shared_tensors=2,
+                                   unresolved_tensors=0, shared_tensors=2,
                                    unmapped_measurements=0)
 
 
@@ -507,7 +569,8 @@ def test_weight_usage_does_not_invent_links_for_computed_weight_properties():
     metrics = net_esd.net_esd_estimator(model, filter_type=False, parallel=False, coverage=coverage)
     usage = weight_usage_report(model, coverage, metrics["longname"])
 
-    assert usage["tensors"][0]["status"] == "unresolved"
+    assert usage["tensors"][0]["status"] == "measured"
+    assert usage["tensors"][0]["measurement_names"] == ["kernel"]
     assert usage["unmapped_measurements"] == [""]  # Root module identity.
     assert usage["counts"]["unmapped_measurements"] == 1
 

@@ -358,7 +358,7 @@ def parse_args():
     parser.add_argument("--evals_thresh", type=float, default=1e-5, help="Threshold for filtering eigenvalues (default: 1e-5)")
     parser.add_argument("--bins", type=int, default=100, help="Number of bins for histogram (default: 100)")
     parser.add_argument("--filter_zeros", action=argparse.BooleanOptionalAction, default=True, help="Filter the measurement/fit spectrum; saved eigenvalues remain unfiltered")
-    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=False, help="Optional legacy restriction: declared module types only and skip Linear aspect ratios >= 8; default includes supported dense 2D .weight tensors and wide/tall Linear layers")
+    parser.add_argument("--filter_type", action=argparse.BooleanOptionalAction, default=False, help="Legacy restriction: declared module weights and skip Linear aspect ratios >= 8; default also discovers ordinary dense 2D registered parameters")
     parser.add_argument("--use_svd", action=argparse.BooleanOptionalAction, default=True, help="Use SVD (default); --no-use_svd selects Gram eigenvalues")
     parser.add_argument("--parallel_esd", action=argparse.BooleanOptionalAction, default=True, help="Use parallel ESD computation across multiple GPUs")
     parser.add_argument("--save_eigs", action=argparse.BooleanOptionalAction, default=True, help="Save full computed spectra in HDF5 (default); --no-save_eigs stores scalars only")

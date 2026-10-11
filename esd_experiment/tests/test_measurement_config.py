@@ -81,7 +81,7 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     assert {"transformers", "peft", "bitsandbytes", "gptqmodel"} <= runtime["installed_loading_library_versions"].keys()
 
 
-@pytest.mark.parametrize("selection", [None, "2"])
+@pytest.mark.parametrize("selection", [None, "2", "3"])
 def test_older_selection_remains_readable_but_does_not_resume(tmp_path, selection):
     expected = measurement_config(SimpleNamespace())
     stored = dict(expected)

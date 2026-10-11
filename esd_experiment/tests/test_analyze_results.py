@@ -211,11 +211,14 @@ def test_weight_usage_survives_real_spectra_writer_and_summary_round_trip(tmp_pa
 
     assert summary["weight_usage_status"] == "recorded"
     assert summary["registered_tensors"] == summary["shared_tensors"] == 2
-    assert summary["measured_tensors"] == summary["unresolved_tensors"] == 1
+    assert summary["measured_tensors"] == 2 and summary["unresolved_tensors"] == 0
+    assert summary["matrix_coverage"] == "complete"
     assert summary["unmapped_measurements"] == 0
     with h5py.File(h5_path) as h5:
         assert json.loads(h5["coverage"].asstr()[()]) == coverage
         np.testing.assert_array_equal(h5["eigs"][0], metrics["eigs"][0])
+        assert h5["layers/weight_layout"].asstr()[:].tolist() == ["matrix", "parameter_matrix"]
+        assert h5["layers/longname"].asstr()[:].tolist() == ["first", "first.extra"]
 
 
 @pytest.mark.parametrize("defect", [None, "shape", "no_spectrum"])
