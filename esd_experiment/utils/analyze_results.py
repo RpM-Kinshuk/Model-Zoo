@@ -31,10 +31,10 @@ CHECKPOINT_COUNTS = ("stored_tensors", "analyzed_tensors", "skipped_tensors")
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results_dir", type=Path, required=True,
-                        help="Run root containing models.csv, logs/ and/or stats/ and metrics/")
+    parser.add_argument("--results_dir", type=Path, nargs="+", required=True,
+                        help="One or more run roots containing models.csv, logs/ and/or stats/ and metrics/")
     parser.add_argument("--output", type=Path,
-                        help="Summary CSV path (default: results_dir/summary.csv)")
+                        help="Summary CSV path (default: summary.csv for one run; required for multiple runs)")
     parser.add_argument("--model_list", type=Path,
                         help="Selected pinned CSV (default: results_dir/models.csv, if present)")
     parser.add_argument("--verbose", action="store_true", help="Show the first 20 valid model summaries")
@@ -358,38 +358,61 @@ def write_summary(summary, output_path):
             temporary_path.unlink(missing_ok=True)
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    results_dir = args.results_dir.resolve()
+def read_run_summaries(results_dir, model_list=None):
+    """Rebuild one run's rows from authoritative artifacts and recorded outcomes."""
     stats_dir, metrics_dir = results_dir / "stats", results_dir / "metrics"
     terminal_dir = results_dir / "logs" / "terminal_status"
-    model_list = args.model_list or results_dir / "models.csv"
-    output_path = (args.output or results_dir / "summary.csv").resolve()
-    if output_path.suffix.lower() != ".csv" or any(
-        output_path.is_relative_to(directory.resolve()) for directory in (stats_dir, metrics_dir, results_dir / "logs")
-    ) or output_path in (model_list.resolve(), (results_dir / "models.csv").resolve()):
-        print("Summary output must be a .csv outside stats/, metrics/ and logs/, and cannot replace the model list.")
-        return 1
-    try:
-        selected = read_selected_models(model_list) if args.model_list or model_list.exists() else {}
-    except (OSError, ValueError) as error:
-        print(f"Cannot read selected models: {error}; existing summary left unchanged.")
-        return 1
+    explicit_model_list = model_list is not None
+    model_list = model_list or results_dir / "models.csv"
+    selected = read_selected_models(model_list) if explicit_model_list or model_list.exists() else {}
     model_names = sorted(set(selected) | {
         path.stem for directory, suffix in ((stats_dir, "*.csv"), (metrics_dir, "*.h5"), (terminal_dir, "*.json"))
         for path in directory.glob(suffix) if path.is_file() and not path.name.startswith(".")
     })
     if not model_names:
-        print("No selected models, artifacts or terminal records found; existing summary left unchanged.")
+        raise ValueError(f"{results_dir}: no selected models, artifacts or terminal records found")
+    return [dict(summarize_outcome(results_dir, name, selected.get(name)), run_dir=str(results_dir))
+            for name in model_names], len(selected)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    # Deduplicate repeated directory arguments, never model IDs or revisions.
+    results_dirs = list(dict.fromkeys(path.resolve() for path in args.results_dir))
+    multiple_runs = len(results_dirs) > 1
+    if multiple_runs and (not args.output or args.model_list):
+        print("Multiple runs require --output and use each run's models.csv; --model_list is for a single run.")
+        return 1
+    output_path = (args.output or results_dirs[0] / "summary.csv").resolve()
+    for results_dir in results_dirs:
+        model_list = args.model_list or results_dir / "models.csv"
+        if not results_dir.is_dir():
+            print(f"Not a run directory: {results_dir}; existing summary left unchanged.")
+            return 1
+        if output_path.suffix.lower() != ".csv" or any(
+            output_path.is_relative_to((results_dir / name).resolve()) for name in ("stats", "metrics", "logs")
+        ) or output_path in (model_list.resolve(), (results_dir / "models.csv").resolve()) or (
+            multiple_runs and output_path.is_relative_to(results_dir)
+        ):
+            print("Summary output must be a .csv outside stats/, metrics/ and logs/, and cannot replace the model list. "
+                  "A multi-run index must be outside the supplied run directories.")
+            return 1
+
+    summaries, selected_count = [], 0
+    try:
+        for results_dir in results_dirs:
+            rows, count = read_run_summaries(results_dir, args.model_list)
+            summaries.extend(rows)
+            selected_count += count
+    except (OSError, ValueError) as error:
+        print(f"Cannot read run: {error}; existing summary left unchanged.")
         return 1
 
-    summaries, measurement_settings = [], set()
-    for name in model_names:
-        summary = summarize_outcome(results_dir, name, selected.get(name))
+    measurement_settings = set()
+    for summary in summaries:
         if summary["artifact_status"] == "valid":
             comparison_fields = (*MEASUREMENT_FIELDS, "analysis_source", "effective_filter_type")
             measurement_settings.add(json.dumps({key: summary[key] for key in comparison_fields}, sort_keys=True))
-        summaries.append(summary)
 
     # Only small per-model rows accumulate; layer tables are released after
     # each model, and eigenvalues remain in their original HDF5 files.
@@ -399,8 +422,9 @@ def main(argv=None):
     summary = summary[first_columns + [name for name in summary if name not in first_columns]]
     write_summary(summary, output_path)
     print(f"Saved summary to: {output_path}")
-    if selected:
-        print(f"Selected models: {len(selected)}; additional stored models: {len(summary) - len(selected)}")
+    print(f"Run directories: {len(results_dirs)}")
+    if selected_count:
+        print(f"Selected rows: {selected_count}; additional stored models: {len(summary) - selected_count}")
     print_model_stats(summary, args.verbose, mixed_settings=len(measurement_settings) > 1)
     return int(summary["outcome"].eq("incomplete").any() or summary["terminal_error"].ne("").any())
 

@@ -54,9 +54,10 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
     config = {
         "numerics_version": NUMERICS_VERSION,
         "loader_version": LOADER_VERSION,
-        # Selection 2 adds declared ViT tables; spectral formulas are unchanged.
+        # Selection 3 adds declared Swin tables after ViT in selection 2.
+        # Spectral formulas are unchanged.
         # Older records remain readable, but cannot resume a current selection.
-        "layer_selection_version": "2",
+        "layer_selection_version": "3",
         "analysis_policy": getattr(args, "analysis_source", "auto"),
         "fix_fingers": getattr(args, "fix_fingers", "xmin_mid") or "DKS",
         "evals_thresh": float(getattr(args, "evals_thresh", 1e-5)),
@@ -118,7 +119,7 @@ def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
                 return False, "missing measurement configuration"
             if config.get("loader_version") != LOADER_VERSION:
                 return False, "different or missing loader_version"
-            if config.get("layer_selection_version", "1") not in {"1", "2"}:
+            if config.get("layer_selection_version", "1") not in {"1", "2", "3"}:
                 return False, "unknown layer_selection_version"
             policy = config.get("analysis_policy")
             runtime = config.get("runtime") or {}

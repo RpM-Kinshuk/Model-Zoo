@@ -1,0 +1,2 @@
+model_id,candidate_source,base_model_relation,source_model,revision_norm
+facebook/wav2vec2-base-960h,public_family_extension_checkpoint_scope,source,,22aad52d435eb6dbaf354bdad9b0da84ce7d6156

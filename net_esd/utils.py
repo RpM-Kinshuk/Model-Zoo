@@ -86,7 +86,8 @@ def iter_eligible_layers(
     Supported layouts are dense Linear/Embedding matrices and Conv1d/2d/3d
     kernels, including subclasses and the declared Hugging Face Conv1D matrix
     layout, plus the built-in MultiheadAttention's declared projection matrices
-    and HF ViT's token/position tables (removing only their broadcast axis).
+    and HF ViT's token/position tables (removing only their broadcast axis),
+    plus Swin's declared relative-position bias tables measured as stored.
     By default, other ordinary dense 2D weights are also included;
     unknown higher-dimensional or quantized layouts are never
     guessed. Each eligible matrix is measured whole, including fused attention
@@ -106,6 +107,30 @@ def iter_eligible_layers(
     emitted_names = set()
     for name, module in net.named_modules():
         module_class = type(module)
+        # A learned relative-position-by-head table, not the attention operator
+        # produced by indexing it. Do not apply this rule to arbitrary biases,
+        # custom subclasses or Swin V2's computed continuous-position bias.
+        if (module_class.__name__ == "SwinRelativePositionBias"
+                and module_class.__module__ == "transformers.models.swin.modeling_swin"):
+            attribute = "relative_position_bias_table"
+            weight = getattr(module, attribute, None)
+            record = _weight_record(name, module, attribute, weight)
+            record["weight_layout"] = "matrix"
+            if coverage is not None:
+                coverage.append(record)
+            record["reason"] = _weight_skip_reason(weight)
+            rows = (2 * module.window_size[0] - 1) * (2 * module.window_size[1] - 1)
+            if not record["reason"] and (weight.ndim != 2 or weight.shape[0] != rows):
+                record["reason"] = "unsupported_weight_shape"
+            if record["reason"]:
+                continue
+            measurement_name = f"{name}.{attribute}" if name else attribute
+            if measurement_name in emitted_names:
+                raise ValueError(f"Duplicate ESD measurement name: {measurement_name!r}")
+            emitted_names.add(measurement_name)
+            record.update(status="eligible", measurement_names=[measurement_name], measurement_slices=[""])
+            yield measurement_name, weight.detach(), weight.numel()
+            continue
         # The official ViT stores token-by-hidden tables with a singleton
         # batch/broadcast axis. This is not a convolution layout or a rule for
         # arbitrary 3D parameters. Custom subclasses need their own declaration.

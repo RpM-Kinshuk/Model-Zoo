@@ -92,16 +92,16 @@ python esd_experiment/run_experiment.py \
   --output_dir analysis_runs/my_run --limit 5 --prepare_only
 ```
 
-Preparation fetches metadata and adapter config JSON, not weights. Review the
-generated `models.csv`; fix or remove rows marked `pin_status=error`, then launch:
+Preparation fetches metadata and adapter/index JSON, not weights. Review the
+generated `models.csv`, especially `preparation_status` and `preparation_reason`.
+Held rows remain visible but are not dispatched. Launch the ready rows:
 
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list analysis_runs/my_run/models.csv \
   --output_dir analysis_runs/my_run \
   --gpus 0 1 2 3 \
-  --num_gpus_per_job 1 \
-  --max_concurrent_jobs 3
+  --num_gpus_per_job 1
 ```
 
 The prepared list pins full model and adapter-base commit SHAs. Keep it for

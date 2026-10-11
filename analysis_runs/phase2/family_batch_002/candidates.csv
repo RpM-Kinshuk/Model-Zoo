@@ -1,0 +1,5 @@
+model_id,candidate_source,base_model_relation,source_model,revision_norm
+FacebookAI/roberta-base,public_family_extension,source,,main
+facebook/bart-base,public_family_extension,source,,main
+microsoft/swin-tiny-patch4-window7-224,public_family_extension,source,,main
+facebook/wav2vec2-base-960h,public_family_extension,source,,main

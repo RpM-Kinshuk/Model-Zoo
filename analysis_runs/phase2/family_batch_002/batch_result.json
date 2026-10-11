@@ -1,0 +1,37 @@
+{
+  "scope": "Four small public-family additions, not a population sample or predictive-validation study",
+  "original_swin_measurements_unchanged": 77,
+  "added_swin_tables": 12,
+  "named_spectrum_query": {
+    "name": "swin.encoder.layers.0.blocks.0.attention.relative_position_bias.relative_position_bias_table",
+    "eigenvalues": 3
+  },
+  "failed_model": "facebook/wav2vec2-base-960h",
+  "failure_reason": "checkpoint_weight_mismatch: missing wav2vec2.masked_spec_embed; no loader exception or fabricated replacement",
+  "runs": {
+    "family_batch_002": {
+      "outcomes": {
+        "success": 3,
+        "failed": 1
+      },
+      "coverage": {
+        "complete": 2,
+        "partial": 1
+      },
+      "measurements": 255,
+      "eigenvalues": 164339,
+      "artifact_bytes": 1385620
+    },
+    "swin_tables_001": {
+      "outcomes": {
+        "success": 1
+      },
+      "coverage": {
+        "complete": 1
+      },
+      "measurements": 89,
+      "eigenvalues": 28794,
+      "artifact_bytes": 368876
+    }
+  }
+}

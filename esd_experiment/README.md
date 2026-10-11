@@ -27,7 +27,10 @@ Supported matrices, including wide/tall Linear layers and other dense 2D
 `.weight` tensors, are included by default. `--filter_type` restores the older
 restricted selection; it must be explicit when resuming runs made with that setting.
 Built-in ViT token/position tables are also included with explicit `[0]` slices;
-their selection version is recorded. Unknown 3D parameters are not reshaped.
+HF Swin's declared relative-position bias tables are measured as stored 2D
+tables, not as attention operators. Selection 3 records this addition; older
+results remain readable but require a fresh directory under the new selection.
+Unknown 3D parameters are not reshaped.
 Results are per-layer CSV and canonical HDF5 records with spectra, missing-fit
 status and coverage. Use a fresh output directory when settings change.
 Model and adapter-base revisions must be full commit SHAs. Remote code is off;
@@ -61,6 +64,17 @@ artifact paths, without loading spectra:
 ```bash
 python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/my_run
 ```
+
+Build a collection-wide CSV index from multiple runs (spectra stay in HDF5):
+
+```bash
+python esd_experiment/analyze_results.py \
+  --results_dir analysis_runs/phase2/*/ --output analysis_runs/phase2/catalog.csv
+```
+
+Each row keeps `run_dir`, pins, settings and artifact paths. Repeated model IDs
+and failed attempts remain separate; mixed settings are not pooled. This reads
+the original pairs and outcomes, not potentially stale per-run summaries.
 
 Check `matrix_coverage` as well as `outcome`: a valid result can still be partial
 (for example, embeddings measured but packed quantized projections skipped).

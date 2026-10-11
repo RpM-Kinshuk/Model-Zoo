@@ -1,0 +1,2 @@
+model_id,candidate_source,base_model_relation,source_model,revision_norm
+microsoft/swin-tiny-patch4-window7-224,public_family_extension,source,,d00d478bfaf1f417d34a1186673ad4b4be264c51

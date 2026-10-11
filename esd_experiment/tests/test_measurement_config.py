@@ -81,10 +81,14 @@ def test_runtime_records_actual_class_and_checkpoint_loading_report():
     assert {"transformers", "peft", "bitsandbytes", "gptqmodel"} <= runtime["installed_loading_library_versions"].keys()
 
 
-def test_older_selection_remains_readable_but_does_not_resume(tmp_path):
+@pytest.mark.parametrize("selection", [None, "2"])
+def test_older_selection_remains_readable_but_does_not_resume(tmp_path, selection):
     expected = measurement_config(SimpleNamespace())
     stored = dict(expected)
-    del stored["layer_selection_version"]
+    if selection is None:
+        del stored["layer_selection_version"]
+    else:
+        stored["layer_selection_version"] = selection
     csv_path, h5_path = write_pair(tmp_path, stored)
     assert artifact_compatibility(csv_path, h5_path) == (True, "compatible")
     assert artifact_compatibility(csv_path, h5_path, expected) == (

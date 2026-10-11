@@ -359,6 +359,38 @@ def test_output_cannot_overwrite_input_artifacts(tmp_path, output):
     assert (csv_path.read_bytes(), h5_path.read_bytes()) == original
 
 
+def test_multi_run_index_retains_repeat_models_and_reads_authoritative_pairs(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    write_pair(first)
+    write_pair(second)
+    # An old index is not input or completion evidence.
+    (first / "summary.csv").write_text("stale index\n")
+    output = tmp_path / "catalog.csv"
+    assert analyze_results.main(["--results_dir", str(first), str(second), str(first),
+                                 "--output", str(output)]) == 0
+    summary = pd.read_csv(output)
+    assert len(summary) == 2 and summary.model_id.nunique() == 1
+    assert set(summary.run_dir) == {str(first), str(second)}
+    assert summary.artifact_status.eq("valid").all()
+    assert (first / "summary.csv").read_text() == "stale index\n"
+
+
+def test_multi_run_index_preserves_output_on_bad_input_or_output_target(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    write_pair(first)
+    write_pair(second)
+    output = tmp_path / "catalog.csv"
+    output.write_text("previous index\n")
+    args = ["--results_dir", str(first), str(second)]
+    assert analyze_results.main(args) == 1  # No implicit write into either run.
+    assert analyze_results.main(args + ["--output", str(first / "summary.csv")]) == 1
+    assert analyze_results.main(args + ["--model_list", str(first / "models.csv"),
+                                        "--output", str(output)]) == 1
+    assert analyze_results.main(["--results_dir", str(first), str(tmp_path / "missing"),
+                                 "--output", str(output)]) == 1
+    assert output.read_text() == "previous index\n"
+
+
 def test_failed_summary_write_preserves_previous_output(tmp_path, monkeypatch):
     output_path = tmp_path / "summary.csv"
     analyze_results.write_summary(pd.DataFrame({"model_id": ["previous"]}), output_path)

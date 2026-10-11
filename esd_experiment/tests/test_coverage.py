@@ -120,6 +120,40 @@ def test_vit_table_shapes_and_custom_subclasses_are_not_guessed():
                for name, _, _ in iter_eligible_layers(custom))
 
 
+def test_swin_table_is_measured_as_stored_and_linked_to_coverage():
+    from transformers.models.swin.modeling_swin import SwinRelativePositionBias
+
+    module = SwinRelativePositionBias(num_heads=3, window_size=(2, 3)).double()
+    with torch.no_grad():
+        module.relative_position_bias_table.copy_(torch.arange(45).reshape(15, 3) / 10)
+    original = module.relative_position_bias_table.detach().clone()
+    coverage = []
+    metrics = net_esd.net_esd_estimator(nn.ModuleDict({"positions": module}), parallel=False,
+                                       compute_dtype="float64", filter_zeros=False, coverage=coverage)
+    name = "positions.relative_position_bias_table"
+    assert metrics["longname"] == [name]
+    assert metrics["slice"] == [""]
+    reference = torch.linalg.svdvals(original).square().sort().values
+    torch.testing.assert_close(torch.as_tensor(metrics["eigs"][0]), reference)
+    usage = weight_usage_report(nn.ModuleDict({"positions": module}), coverage, metrics["longname"])
+    table = next(record for record in usage["tensors"] if record["name"] == name)
+    assert table["status"] == "measured" and table["measurement_names"] == [name]
+    assert usage["counts"]["unresolved_tensors"] == usage["counts"]["unmapped_measurements"] == 0
+    torch.testing.assert_close(module.relative_position_bias_table, original, rtol=0, atol=0)
+
+
+def test_swin_malformed_tables_and_custom_subclasses_are_not_guessed():
+    from transformers.models.swin.modeling_swin import SwinRelativePositionBias
+
+    module = SwinRelativePositionBias(num_heads=3, window_size=(2, 3))
+    module.relative_position_bias_table = nn.Parameter(torch.ones(14, 3))
+    coverage = []
+    assert list(iter_eligible_layers(module, coverage=coverage)) == []
+    assert coverage[0]["reason"] == "unsupported_weight_shape"
+    custom = type("CustomSwinBias", (SwinRelativePositionBias,), {})(3, (2, 3))
+    assert list(iter_eligible_layers(custom)) == []
+
+
 def test_known_class_with_unsupported_shape_is_skipped_before_numerics():
     layer = nn.Linear(4, 4)
     layer.weight = nn.Parameter(torch.ones(4, 4, 3))
