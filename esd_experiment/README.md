@@ -19,7 +19,8 @@ weight sizes), then run it. Held rows remain in the list but are not dispatched:
 python esd_experiment/run_experiment.py \
   --model_list analysis_runs/phase2/my_run/models.csv \
   --output_dir analysis_runs/phase2/my_run \
-  --gpus 5 6 7 --num_gpus_per_job 1
+  --gpus 0 1 2 3 --num_gpus_per_job 1 \
+  --worker_cache_root /scratch/$USER/model_zoo_worker_cache
 ```
 
 Eigenvalues are saved by default; use `--no-save_eigs` for scalar-only output.

@@ -16,7 +16,8 @@ Held preparation rows stay visible but are not dispatched:
 python esd_experiment/run_experiment.py \
   --model_list analysis_runs/phase2/my_run/models.csv \
   --output_dir analysis_runs/phase2/my_run \
-  --gpus 5 6 7 --num_gpus_per_job 1
+  --gpus 0 1 2 3 --num_gpus_per_job 1 \
+  --worker_cache_root /scratch/$USER/model_zoo_worker_cache
 ```
 
 `run_script.sh` is the local HPC wrapper; check its paths and flags before use.
@@ -707,8 +708,9 @@ availability checks even when optimizing overhead.
 
 Implementation controls and historical checks live in
 `analysis_runs/validation/`; collected measurements live in
-`analysis_runs/phase2/`. Their manifests, reports, coverage and saved pairs retain
-the detailed evidence. Use the collection catalog to inspect current outcomes
+`analysis_runs/phase2/`. Keep manifests, outcome/cleanup reports, coverage and saved
+pairs; obsolete one-off observers and raw polling samples need not accumulate.
+Use the collection catalog to inspect current outcomes
 instead of maintaining a second narrative tally here.
 
 Collected families include BERT derivatives and other encoders, dense decoders,
