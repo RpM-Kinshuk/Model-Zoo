@@ -182,7 +182,8 @@ python esd_experiment/run_experiment.py \
 Increase concurrency after checking model-loading costs. Model sharding and ESD
 share the assigned devices; additional visible GPUs do not guarantee enough
 analysis memory. Checkpoint mode processes files/matrices sequentially on one
-selected device rather than using the model-mode layer thread pool.
+selected device rather than using the model-mode layer thread pool. Explicit
+`--analysis_source checkpoint` requires `--num_gpus_per_job 1`.
 
 ## Runtime controls and cache lifecycle
 
@@ -196,8 +197,9 @@ selected device rather than using the model-mode layer thread pool.
 | `--stale_process_action` | **`terminate`**; `log` marks a stale worker and keeps waiting |
 | `--termination_grace_seconds` | **30 s** after TERM before KILL |
 
-Zero disables an individual weight/RAM/cache cap or timeout. RAM/cache limits
-are sampled, can overshoot and do not predict GPU memory.
+Zero disables a weight/RAM/cache cap, the heartbeat timeout or an individual
+stage timeout. The termination grace period must remain at least one second.
+RAM/cache limits are sampled, can overshoot and do not predict GPU memory.
 
 | Signal to the runner | Behavior |
 | --- | --- |
@@ -214,8 +216,16 @@ Transformers downloads share the same revision-addressed cache; dataset, Xet
 and remote-module caches also stay under that private root. The supervisor
 confirms the process group has exited before removing its cache or releasing
 its GPUs. Unconfirmed termination retains evidence and stops new dispatch.
-An empty `--worker_cache_root` inherits the surrounding shared cache, which the
-runner does not delete.
+To inherit the surrounding shared Hugging Face cache, disable both private-cache
+creation and its size limit:
+
+```bash
+# Add these together to the launch command:
+--worker_cache_root "" --max_worker_cache_gib 0
+```
+
+Shared caches are not deleted or counted against the private-cache cap. The RAM
+limit and other worker supervision remain active.
 
 ## Loading, fallback and retries
 
@@ -236,14 +246,17 @@ flowchart TB
     TENSORS --> STORED["Stored floating 2D matrices<br/>no inferred module semantics"]
     MODULES --> ESD["SVD → retained spectrum → power-law fit"]
     STORED --> ESD
+    MODULES -.-> COVERAGE["Unsupported matrices stay explicit<br/>no checkpoint backfill after a successful load"]
     classDef decision fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
     classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
     classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
     classDef failure fill:#FDECEC,stroke:#B42318,color:#7A271A,stroke-width:2px;
+    classDef coverage fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
     class POLICY decision;
     class LOAD,TENSORS,MODULES,STORED control;
     class ESD execute;
     class FAIL failure;
+    class COVERAGE coverage;
 ```
 
 `auto` falls back once for explicitly recognized architecture-support failures;
@@ -251,6 +264,11 @@ flowchart TB
 memory-mappable PyTorch ZIP state dicts with `weights_only=True`. It does not
 merge adapters, unpack quantized representations or recover a verified model.
 See the [exact fallback rules](docs/operations/analysis.md#architecture-independent-checkpoint-matrices).
+
+Once model loading succeeds, analysis stays with that model. Partial or empty
+module analysis does not trigger checkpoint fallback, and skipped weights are
+not backfilled from checkpoint tensors. A model with no usable spectra fails
+explicitly.
 
 Batch workers make one whole-job attempt. The standalone worker exposes
 `--max_retries` (default **0**) for classified retryable failures; loader
@@ -280,6 +298,22 @@ adapter factors and parametrization internals are excluded with reasons.
 `--filter_type` opts into the older restricted selection and Linear aspect-ratio
 skip; **full supported-matrix inclusion is the default**.
 
+### Selection in practice
+
+| Candidate | Default selection | With `--filter_type` |
+| --- | --- | --- |
+| Ordinary dense 2D parameter such as `custom.extra` | Included under its exact parameter name | Excluded by the legacy selection |
+| Linear projection with aspect ratio ≥ 8 | Included whole | Skipped by the legacy aspect-ratio rule |
+| Undeclared 3D parameter such as `custom.kernel` | Skipped with a reason | Skipped with a reason |
+| Packed or quantized storage helper | No automatic unpacking | No automatic unpacking |
+
+Matrix discovery reads the loaded parameters without changing their values.
+It does not guess a tensor layout from its name or invent QKV slices from a
+3:1 shape. A stored parameter matrix describes that parameter, not a verified
+linear operator.
+
+### Numerical settings
+
 | Measurement option | Default |
 | --- | --- |
 | `--analysis_source` | `auto` |
@@ -303,19 +337,41 @@ use a fresh directory to collect the expanded matrix set.
 [Coverage and loader rules](docs/operations/analysis.md#loading-and-coverage) ·
 [Metric definitions](docs/operations/analysis.md#interpreting-the-metrics)
 
-## For maintainers
+## Verification and maintenance
+
+Choose the check that matches the work:
+
+| Check | Purpose |
+| --- | --- |
+| `python esd_experiment/tests/test_setup.py` | Offline imports and a tiny CPU spectrum; no token access, downloads or GPU use |
+| Worker, checkpoint and loader regressions | Matrix selection, fallback boundaries and model-loading behavior |
+| Full test suite | Numerical, integrity, coverage, persistence and process-ownership regressions |
+
+```bash
+# Run inside the installed model_zoo environment.
+python -m pip install 'pytest>=8,<9'
+
+# Focused matrix-selection and fallback regressions:
+python -m pytest \
+  esd_experiment/tests/test_worker.py \
+  esd_experiment/tests/test_checkpoint_tensors.py \
+  esd_experiment/tests/test_model_loader.py -q
+
+# Full regression suite:
+python -m pytest esd_experiment/tests -q
+```
+
+For optional CPU/GPU spectral checks against an independent SciPy float64
+reference, see the [validation guide](docs/operations/analysis.md#validation).
+These checks are separate from collection and do not establish model quality.
 
 Keep commands, names and helpers simple. Add support for recurring consequential
 collection failures, not speculative universal machinery. Keep regression tests
 for integrity, numerics, persistence and process ownership; general probes are
 not a prerequisite for every collection batch.
 
-```bash
-python esd_experiment/run_experiment.py --help
-# Optional development dependency; not needed by workers:
-python -m pip install 'pytest>=8,<9'
-python -m pytest esd_experiment/tests -q
-```
+Pytest is a development dependency, not a worker requirement. Use
+`python esd_experiment/run_experiment.py --help` for the complete CLI reference.
 
 Code: `esd_experiment/src/` loads and runs one model; `gputracker/` supervises
 workers; `net_esd/` discovers weights and computes spectra;
