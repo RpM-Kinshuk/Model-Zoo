@@ -83,7 +83,7 @@ def load_worker_module():
     return worker
 
 
-@pytest.mark.parametrize("flags,filter_type", [([], True), (["--filter_type"], True), (["--no-filter_type"], False)])
+@pytest.mark.parametrize("flags,filter_type", [([], False), (["--filter_type"], True), (["--no-filter_type"], False)])
 def test_worker_dense_fallback_uses_loaded_weights_and_records_selection(tmp_path, monkeypatch, flags, filter_type):
     import torch
     import net_esd
@@ -116,19 +116,20 @@ def test_worker_dense_fallback_uses_loaded_weights_and_records_selection(tmp_pat
 
     assert worker.main() == 0
 
-    expected = ["standard"] if filter_type else ["standard", "custom", "tall_head"]
+    expected = ["standard"] if filter_type else ["standard", "custom", "tall_head", "custom.extra"]
     with worker.h5py.File(tmp_path / "metrics/org--control.h5") as h5:
         assert h5["layers/longname"].asstr()[:].tolist() == expected
         config = json.loads(h5.attrs["measurement_config_json"])
         assert config["filter_type"] is filter_type
         coverage = json.loads(h5["coverage"].asstr()[()])
-        assert coverage["weight_usage"]["counts"]["unresolved_tensors"] == 1
+        assert coverage["weight_usage"]["counts"]["unresolved_tensors"] == (1 if filter_type else 0)
         skipped = {record["module_name"]: record["reason"] for record in coverage["modules"]
                    if record["status"] == "skipped"}
         assert skipped["packed"] == "unsupported_weight_attribute"
         assert skipped["unknown_kernel"] == "unsupported_module_type"
         for index, name in enumerate(expected):
-            reference = torch.linalg.svdvals(before[f"{name}.weight"].double()).square().sort().values.numpy()
+            parameter_name = name if name == "custom.extra" else f"{name}.weight"
+            reference = torch.linalg.svdvals(before[parameter_name].double()).square().sort().values.numpy()
             worker.np.testing.assert_allclose(h5["eigs"][index], reference, rtol=5e-5, atol=1e-7)
     for name, tensor in model.state_dict().items():
         torch.testing.assert_close(tensor, before[name], rtol=0, atol=0)

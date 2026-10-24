@@ -570,7 +570,8 @@ def test_auto_does_not_fill_in_partial_or_empty_module_analysis(auto_worker, kee
     case = auto_worker
     model = torch.nn.Module()
     model.unknown = torch.nn.Module()
-    model.unknown.kernel = torch.nn.Parameter(torch.eye(4))  # Undeclared attribute, even without the legacy filter.
+    # Ordinary 2D parameters are eligible now; an undeclared 3D layout remains unsupported.
+    model.unknown.kernel = torch.nn.Parameter(torch.ones(4, 4, 2))
     if keep_standard:
         model.standard = torch.nn.Linear(4, 4)
     case.load.side_effect = None

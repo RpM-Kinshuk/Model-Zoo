@@ -31,6 +31,7 @@ fake_torch.nn = ModuleType("torch.nn")
 fake_torch.nn.Module = object
 
 fake_transformers = ModuleType("transformers")
+fake_transformers.BertForMaskedLM = type("BertForMaskedLM", (), {})
 fake_transformers.AutoModelForCausalLM = type(
     "AutoModelForCausalLM",
     (),
