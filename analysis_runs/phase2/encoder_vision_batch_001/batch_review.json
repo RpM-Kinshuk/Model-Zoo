@@ -1,0 +1,68 @@
+{
+  "selection": "Four-model operational coverage slice: one curated BERT task derivative plus public DistilBERT, ViT and ResNet coverage extensions; not representative sampling.",
+  "models": [
+    {
+      "model_id": "7k8k7/bert-base-uncased-finetuned-swag",
+      "revision": "ffe78655517437da932f9b1db663d19ca2d67c22",
+      "candidate_source": "curated_phase2",
+      "ready": true,
+      "weight_bytes": 437955572,
+      "weight_files": {
+        "model.safetensors": 437955572
+      },
+      "format": "safetensors",
+      "model_type": "bert",
+      "architectures": [
+        "BertForMultipleChoice"
+      ]
+    },
+    {
+      "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+      "revision": "714eb0fa89d2f80546fda750413ed43d93601a13",
+      "candidate_source": "coverage_extension",
+      "ready": true,
+      "weight_bytes": 267832558,
+      "weight_files": {
+        "model.safetensors": 267832558
+      },
+      "format": "safetensors",
+      "model_type": "distilbert",
+      "architectures": [
+        "DistilBertForSequenceClassification"
+      ]
+    },
+    {
+      "model_id": "google/vit-base-patch16-224",
+      "revision": "3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3",
+      "candidate_source": "coverage_extension",
+      "ready": true,
+      "weight_bytes": 346293852,
+      "weight_files": {
+        "model.safetensors": 346293852
+      },
+      "format": "safetensors",
+      "model_type": "vit",
+      "architectures": [
+        "ViTForImageClassification"
+      ]
+    },
+    {
+      "model_id": "microsoft/resnet-18",
+      "revision": "65a5785d9156231087c481e0c7dd33a5ff6f7e3e",
+      "candidate_source": "coverage_extension",
+      "ready": true,
+      "weight_bytes": 46812324,
+      "weight_files": {
+        "model.safetensors": 46812324
+      },
+      "format": "safetensors",
+      "model_type": "resnet",
+      "architectures": [
+        "ResNetForImageClassification"
+      ]
+    }
+  ],
+  "weights_downloaded": false,
+  "workers_launched": false,
+  "limits": "One worker on idle authorized GPUs 0\u20133, <=1.5 GB selected weights each; 16 GiB sampled RSS, 12 GiB cache, stages 900/900/120 seconds, 1 hour stop."
+}

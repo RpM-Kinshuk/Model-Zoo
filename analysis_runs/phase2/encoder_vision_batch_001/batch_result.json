@@ -1,0 +1,169 @@
+{
+  "manifest_sha256": "ebacfde50bcfc045763f8e8e55fc77bc90f14fdda265c14eb7418f713836dcfe",
+  "outcomes": {
+    "success": 4
+  },
+  "matrix_coverage": {
+    "complete": 3,
+    "partial": 1
+  },
+  "measurements": 212,
+  "fitted_measurements": 211,
+  "missing_fits": 1,
+  "eigenvalues": 175512,
+  "artifact_bytes": 1391493,
+  "wall_seconds": 92.81384890899062,
+  "worker_gpu_indices": [
+    0
+  ],
+  "other_gpu_pids_observed": [],
+  "peak_rss_bytes": 1867362304,
+  "peak_worker_gpu_bytes": 1591738368,
+  "peak_cache_bytes": 438018048,
+  "runtime": [
+    {
+      "torch_version": "2.10.0+cu130",
+      "cuda_version": "13.0",
+      "gpu_names": [
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+      ],
+      "installed_loading_library_versions": {
+        "bitsandbytes": "0.49.1",
+        "compressed-tensors": "0.15.0.1",
+        "gptqmodel": "6.0.3",
+        "optimum": "2.1.0",
+        "peft": "0.18.1",
+        "torchao": "0.17.0",
+        "transformers": "5.9.0"
+      }
+    },
+    {
+      "torch_version": "2.10.0+cu130",
+      "cuda_version": "13.0",
+      "gpu_names": [
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+      ],
+      "installed_loading_library_versions": {
+        "bitsandbytes": "0.49.1",
+        "compressed-tensors": "0.15.0.1",
+        "gptqmodel": "6.0.3",
+        "optimum": "2.1.0",
+        "peft": "0.18.1",
+        "torchao": "0.17.0",
+        "transformers": "5.9.0"
+      }
+    },
+    {
+      "torch_version": "2.10.0+cu130",
+      "cuda_version": "13.0",
+      "gpu_names": [
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+      ],
+      "installed_loading_library_versions": {
+        "bitsandbytes": "0.49.1",
+        "compressed-tensors": "0.15.0.1",
+        "gptqmodel": "6.0.3",
+        "optimum": "2.1.0",
+        "peft": "0.18.1",
+        "torchao": "0.17.0",
+        "transformers": "5.9.0"
+      }
+    },
+    {
+      "torch_version": "2.10.0+cu130",
+      "cuda_version": "13.0",
+      "gpu_names": [
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+      ],
+      "installed_loading_library_versions": {
+        "bitsandbytes": "0.49.1",
+        "compressed-tensors": "0.15.0.1",
+        "gptqmodel": "6.0.3",
+        "optimum": "2.1.0",
+        "peft": "0.18.1",
+        "torchao": "0.17.0",
+        "transformers": "5.9.0"
+      }
+    }
+  ],
+  "models": [
+    {
+      "model_id": "7k8k7/bert-base-uncased-finetuned-swag",
+      "revision": "ffe78655517437da932f9b1db663d19ca2d67c22",
+      "matrix_coverage": "complete",
+      "measurements": 77,
+      "missing_fits": 1,
+      "gaps": []
+    },
+    {
+      "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+      "revision": "714eb0fa89d2f80546fda750413ed43d93601a13",
+      "matrix_coverage": "complete",
+      "measurements": 40,
+      "missing_fits": 0,
+      "gaps": []
+    },
+    {
+      "model_id": "google/vit-base-patch16-224",
+      "revision": "3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3",
+      "matrix_coverage": "partial",
+      "measurements": 74,
+      "missing_fits": 0,
+      "gaps": [
+        {
+          "name": "vit.embeddings.cls_token",
+          "aliases": [],
+          "kind": "parameter",
+          "shape": [
+            1,
+            1,
+            768
+          ],
+          "dtype": "float32",
+          "status": "skipped",
+          "reason": "unsupported_weight_attribute",
+          "measurement_names": []
+        },
+        {
+          "name": "vit.embeddings.position_embeddings",
+          "aliases": [],
+          "kind": "parameter",
+          "shape": [
+            1,
+            197,
+            768
+          ],
+          "dtype": "float32",
+          "status": "skipped",
+          "reason": "unsupported_weight_attribute",
+          "measurement_names": []
+        }
+      ]
+    },
+    {
+      "model_id": "microsoft/resnet-18",
+      "revision": "65a5785d9156231087c481e0c7dd33a5ff6f7e3e",
+      "matrix_coverage": "complete",
+      "measurements": 21,
+      "missing_fits": 0,
+      "gaps": []
+    }
+  ],
+  "query_check": {
+    "run_indexes": 5,
+    "attempt_rows": 26,
+    "valid_measurement_pairs": 23,
+    "complete_coverage_pairs": 22,
+    "index_read_query_seconds": 0.035910210106521845,
+    "index_dataframe_bytes": 183113,
+    "named_spectrum_read_seconds": 0.001529030967503786,
+    "model_id": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+    "layer": "distilbert.transformer.layer.0.attention.q_lin",
+    "spectrum_length": 768,
+    "fit_status": "fitted",
+    "n_tail": 382,
+    "deduplication": "No automatic deduplication. Failed attempts remain distinguishable by run; valid model IDs happen to be unique in this slice.",
+    "interpretation": "Single warm-cache local observation; not a 50k storage or throughput benchmark."
+  },
+  "next_step": "Explicit handling of ViT positional/token parameter layouts; larger/sharded coverage next. Keep current pandas/CSV/HDF5 workflow until measured query or storage costs justify a change."
+}

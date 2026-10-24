@@ -1,0 +1,12 @@
+{
+  "runner_and_worker_pids_exited": [
+    3751421,
+    3751927,
+    3752405
+  ],
+  "worker_pgids_exited": [
+    3751927,
+    3752405
+  ],
+  "removed_cache": "/tmp/model-zoo-cost-pilot-0pogk6d7"
+}

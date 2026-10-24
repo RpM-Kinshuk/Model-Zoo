@@ -1,0 +1,3 @@
+model_id,loader_scenario,base_model_relation,source_model,revision_norm,primary_type_bucket,lineage_status,candidate_source,revision_requested,source_model_requested,config_model_type,config_architectures,config_metadata_status,config_revision,pin_status,pin_error
+AK232003/outputs_500,adapter_requires_base,adapter,bert-base-uncased@86b5e0934494bd15c9632b12f734a8a67f723594,2fd8456e412aad9551e371c1f762eca51e2c6b08,,,,main,bert-base-uncased@main,,[],recorded,2fd8456e412aad9551e371c1f762eca51e2c6b08,pinned,
+AfnanTS/Bert-base-uncased-finetuned-LoRA,adapter_requires_base,adapter,bert-base-uncased@86b5e0934494bd15c9632b12f734a8a67f723594,9a2ed054bf31fbbaf54d8b60d45878efa6e1f197,,,,main,bert-base-uncased@main,,[],recorded,9a2ed054bf31fbbaf54d8b60d45878efa6e1f197,pinned,

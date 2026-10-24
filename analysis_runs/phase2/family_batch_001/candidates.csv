@@ -1,0 +1,7 @@
+model_id,source_model,base_model_relation,revision_norm,candidate_source,loader_scenario,primary_type_bucket,lineage_status
+EleutherAI/pythia-160m,EleutherAI/pythia-160m,finetune,,leaderboard_dataset,standard_transformers,finetune,known
+bigscience/bloom-560m,bigscience/bloom-560m,finetune,,leaderboard_dataset,standard_transformers,finetune,known
+facebook/opt-1.3b,facebook/opt-1.3b,finetune,,leaderboard_dataset,standard_transformers,finetune,known
+stabilityai/stablelm-2-1_6b,stabilityai/stablelm-2-1_6b,finetune,,leaderboard_dataset,standard_transformers,finetune,known
+Definite/klue-bert-mlm-bible,klue/bert-base,finetune,,seed_metadata,standard_transformers,finetune,known
+openai/clip-vit-base-patch16,unknown,source,,seed_metadata,standard_transformers,base_source,unknown

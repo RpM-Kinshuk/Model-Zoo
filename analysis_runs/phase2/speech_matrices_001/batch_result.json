@@ -1,0 +1,15 @@
+{
+  "scope": "Stored floating 2D checkpoint matrices only; not a reconstructed or complete speech model",
+  "model_id": "facebook/wav2vec2-base-960h",
+  "revision": "22aad52d435eb6dbaf354bdad9b0da84ce7d6156",
+  "analysis_source": "checkpoint",
+  "matrix_coverage": "partial",
+  "measurements": 74,
+  "saved_eigenvalues": 55840,
+  "skipped_tensor_reasons": {
+    "not_a_matrix": 129,
+    "undeclared_tensor_layout": 9
+  },
+  "strict_model_failure_retained": "analysis_runs/phase2/family_batch_002/logs/terminal_status/facebook--wav2vec2-base-960h.json",
+  "named_query_values": 768
+}

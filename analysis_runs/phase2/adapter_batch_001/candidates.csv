@@ -1,0 +1,5 @@
+model_id,loader_scenario,base_model_relation
+AK232003/outputs_500,adapter_requires_base,adapter
+AfnanTS/Bert-base-uncased-finetuned-LoRA,adapter_requires_base,adapter
+sikoraaxd/Qwen2-0.5B-Instruct-ru-lora,adapter_requires_base,adapter
+Agnuxo/HAL_9000-QWEN2-0.5_Spanish_English_lora_model,adapter_requires_base,adapter

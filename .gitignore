@@ -155,6 +155,7 @@ venv.bak/
 # *results/
 example_results/
 test_results/
+analysis_runs/validation/
 # *.csv
 !examples/*.csv
 

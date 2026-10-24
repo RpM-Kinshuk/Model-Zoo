@@ -1,0 +1,87 @@
+{
+  "selection": "Six underrepresented-family models from the curated phase-2 CSV, not representative sampling. One worker; <=6.5GB selected weights per model; existing 16GiB RSS/12GiB cache and stage timeouts.",
+  "source": "data/curated/model_zoo_phase2.csv",
+  "models": [
+    {
+      "model_id": "EleutherAI/pythia-160m",
+      "revision": "50f5173d932e8e61f858120bcb800b97af589f46",
+      "model_type": "gpt_neox",
+      "architectures": [
+        "GPTNeoXForCausalLM"
+      ],
+      "weight_files": {
+        "model.safetensors": 374998696
+      },
+      "weight_bytes": 374998696,
+      "public_ungated": true
+    },
+    {
+      "model_id": "bigscience/bloom-560m",
+      "revision": "ac2ae5fab2ce3f9f40dc79b5ca9f637430d24971",
+      "model_type": "bloom",
+      "architectures": [
+        "BloomForCausalLM"
+      ],
+      "weight_files": {
+        "model.safetensors": 1118459525
+      },
+      "weight_bytes": 1118459525,
+      "public_ungated": true
+    },
+    {
+      "model_id": "facebook/opt-1.3b",
+      "revision": "3f5c25d0bc631cb57ac65913f76e22c2dfb61d62",
+      "model_type": "opt",
+      "architectures": [
+        "OPTForCausalLM"
+      ],
+      "weight_files": {
+        "pytorch_model.bin": 2631639353
+      },
+      "weight_bytes": 2631639353,
+      "public_ungated": true
+    },
+    {
+      "model_id": "stabilityai/stablelm-2-1_6b",
+      "revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
+      "model_type": "stablelm",
+      "architectures": [
+        "StableLmForCausalLM"
+      ],
+      "weight_files": {
+        "model.safetensors": 3289069520
+      },
+      "weight_bytes": 3289069520,
+      "public_ungated": true
+    },
+    {
+      "model_id": "Definite/klue-bert-mlm-bible",
+      "revision": "4a433c101f9bb9644cd94a151f1f25346cf54f4c",
+      "model_type": "bert",
+      "architectures": [
+        "BertForMaskedLM"
+      ],
+      "weight_files": {
+        "model.safetensors": 442627224
+      },
+      "weight_bytes": 442627224,
+      "public_ungated": true
+    },
+    {
+      "model_id": "openai/clip-vit-base-patch16",
+      "revision": "57c216476eefef5ab752ec549e440a49ae4ae5f3",
+      "model_type": "clip",
+      "architectures": [
+        "CLIPModel"
+      ],
+      "weight_files": {
+        "pytorch_model.bin": 598641023
+      },
+      "weight_bytes": 598641023,
+      "public_ungated": true
+    }
+  ],
+  "source_sha256": "1b4240f122b054a672a2f5318bef1083b8276c1a8b61d2cba6691159d2f8eeb5",
+  "preparation_note": "Initial CLIP row failed because curated source_model=unknown was fetched as a repo. Exact placeholder handling now retains the hint and leaves the full model base unspecified; pinned adapter bases remain mandatory. Reprepared only CLIP at its already resolved SHA; all six rows passed pin validation.",
+  "trust_remote_code": false
+}

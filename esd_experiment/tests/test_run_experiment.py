@@ -1,14 +1,13 @@
 import sys
+import shlex
 import importlib.util
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from types import ModuleType
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+from test_worker import _worker_module_context
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -28,69 +27,24 @@ apply_preflight = run_experiment.apply_preflight
 collect_run_outcomes = run_experiment.collect_run_outcomes
 
 
-@contextmanager
-def _worker_module_context():
-    fake_torch = ModuleType("torch")
-    fake_torch.float16 = object()
-    fake_torch.cuda = SimpleNamespace(
-        is_available=lambda: False,
-        device_count=lambda: 0,
-        empty_cache=lambda: None,
-        get_device_name=lambda index: "cpu",
-        get_device_properties=lambda index: SimpleNamespace(total_memory=0, major=0, minor=0),
-    )
-    fake_torch.nn = SimpleNamespace(Module=object)
+def _write_compatible_h5(path, config=None):
+    import h5py
+    from measurement_config import FORMAT_VERSION, NUMERICS_VERSION
+    config = dict(config or run_experiment.measurement_config(SimpleNamespace()))
+    config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
-    fake_numpy = ModuleType("numpy")
-    fake_numpy.ndarray = object
-    fake_numpy.full = lambda *args, **kwargs: None
-    fake_numpy.nan = float("nan")
-
-    fake_h5py = ModuleType("h5py")
-    fake_h5py.File = lambda *args, **kwargs: None
-
-    @dataclass
-    class _FakeLoaderFailure(Exception):
-        stage: str
-        reason: str
-        message: str
-
-        def __post_init__(self) -> None:
-            super().__init__(self.message)
-
-    fake_model_loader = ModuleType("model_loader")
-    fake_model_loader.LoaderFailure = _FakeLoaderFailure
-    fake_model_loader.load_model = lambda *args, **kwargs: None
-    fake_model_loader.parse_model_string = lambda model_id: (
-        model_id.split("@", 1)[0],
-        model_id.split("@", 1)[1] if "@" in model_id else "",
-    )
-    fake_model_loader.safe_filename = lambda value: value.replace("/", "--").replace("@", "__")
-
-    fake_net_esd = ModuleType("net_esd")
-    fake_net_esd.net_esd_estimator = lambda *args, **kwargs: None
-
-    original_modules = {
-        "torch": sys.modules.get("torch"),
-        "numpy": sys.modules.get("numpy"),
-        "h5py": sys.modules.get("h5py"),
-        "model_loader": sys.modules.get("model_loader"),
-        "net_esd": sys.modules.get("net_esd"),
-        "pandas": sys.modules.get("pandas"),
-    }
-    try:
-        sys.modules["torch"] = fake_torch
-        sys.modules["numpy"] = fake_numpy
-        sys.modules["h5py"] = fake_h5py
-        sys.modules["model_loader"] = fake_model_loader
-        sys.modules["net_esd"] = fake_net_esd
-        yield
-    finally:
-        for name, module in original_modules.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
+    csv_path = path.parent.parent / "stats" / f"{path.stem}.csv"
+    csv_path.write_text("longname,alpha\nmodel.layers.0.proj,2\n")
+    with h5py.File(path, "w") as h5:
+        h5.attrs["format_version"] = FORMAT_VERSION
+        h5.attrs["numerics_version"] = NUMERICS_VERSION
+        h5.attrs["measurement_config_json"] = run_experiment.json.dumps(
+            config
+        )
+        h5.create_dataset("layers/longname", data=["model.layers.0.proj"], dtype=h5py.string_dtype())
+        h5.create_dataset("layers/alpha", data=[2.0])
+        if config is None or config.get("save_eigs"):
+            h5.create_dataset("eigs", (1,), dtype=h5py.vlen_dtype("float32"))[0] = [1., 2.]
 
 
 def test_available_backends_includes_compressed_tensors(monkeypatch):
@@ -126,6 +80,27 @@ def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
     args = run_experiment.parse_args()
 
     assert args.max_concurrent_jobs == 3
+    assert args.max_check == 2
+
+
+@pytest.mark.parametrize("flags,expected", [([], True), (["--save_eigs"], True), (["--no-save_eigs"], False)])
+def test_eigenvalue_storage_default_and_opt_out_reach_worker(monkeypatch, tmp_path, flags, expected):
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", "models.csv",
+                                    "--output_dir", str(tmp_path), *flags])
+    args = run_experiment.parse_args()
+    assert args.save_eigs is expected
+    assert run_experiment.measurement_config(args)["save_eigs"] is expected
+    command = generate_commands(pd.DataFrame([{"model_id": "org/model", "source_model": "",
+                                              "base_model_relation": ""}]), tmp_path, args)[0]
+    assert ("--save_eigs" if expected else "--no-save_eigs") in command
+
+    with _worker_module_context():
+        spec = importlib.util.spec_from_file_location("worker_storage_default_test", PROJECT_ROOT / "src/worker.py")
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        monkeypatch.setattr(sys, "argv", ["worker.py", "--model_id", "org/model",
+                                        "--revision", "a" * 40, "--output_dir", str(tmp_path), *flags])
+        assert worker.parse_args().save_eigs is expected
 
 
 def test_parse_args_accepts_stage_timeout_seconds(monkeypatch):
@@ -181,6 +156,8 @@ def test_create_runtime_config_includes_max_concurrent_jobs(tmp_path):
     assert config_path.read_text()
     config = run_experiment.json.loads(config_path.read_text())
     assert config["max_concurrent_jobs"] == 3
+    with pytest.raises(OSError):
+        run_experiment.create_runtime_config(args, tmp_path / "missing" / "gpu_config.json")
 
 
 
@@ -424,9 +401,10 @@ def test_generate_commands_passes_curated_loader_fields(tmp_path: Path):
 
     commands = generate_commands(df, tmp_path, args)
 
-    assert "--revision 'rev-a'" in commands[0]
-    assert "--loader_scenario 'adapter_requires_base'" in commands[0]
-    assert "--primary_type_bucket 'adapter'" in commands[0]
+    tokens = shlex.split(commands[0])
+    assert tokens[tokens.index("--revision") + 1] == "rev-a"
+    assert tokens[tokens.index("--loader_scenario") + 1] == "adapter_requires_base"
+    assert tokens[tokens.index("--primary_type_bucket") + 1] == "adapter"
 
 
 def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_path: Path):
@@ -455,8 +433,9 @@ def test_generate_commands_prefers_preflight_effective_loader_when_present(tmp_p
 
     commands = generate_commands(df, tmp_path, args)
 
-    assert "--loader_scenario 'seq2seq'" in commands[0]
-    assert "--loader_scenario 'multimodal_transformers'" not in commands[0]
+    tokens = shlex.split(commands[0])
+    assert tokens[tokens.index("--loader_scenario") + 1] == "seq2seq"
+    assert "multimodal_transformers" not in tokens
 
 
 
@@ -500,7 +479,7 @@ def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
 
     completed = get_completed_models(tmp_path, skip_failed=False)
@@ -517,7 +496,7 @@ def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Pat
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_loader_scenario\tunsupported\n"
     )
@@ -617,6 +596,19 @@ def test_apply_preflight_uses_loader_resolution_metadata_for_backend_status():
     assert blocked_df.iloc[0]["preflight_effective_loader"] == "awq"
 
 
+def test_preflight_blocks_are_recorded_with_pins_without_counting_as_worker_failures(tmp_path):
+    blocked = pd.DataFrame([dict(model_id="org/model", revision_norm="a" * 40, source_model="",
+                                analysis_source="auto", preflight_reason="unsupported_backend",
+                                preflight_effective_loader="awq")])
+    run_experiment.record_preflight_blocks(blocked, tmp_path)
+    path = tmp_path / "logs/terminal_status/org--model.json"
+    record = run_experiment.json.loads(path.read_text())
+    assert record["status"] == "blocked" and record["stage"] == "preflight"
+    assert record["revision"] == "a" * 40
+    assert record["reason"] == "unsupported_backend"
+    assert collect_run_outcomes(tmp_path).failure_count == 0
+
+
 def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"
@@ -627,7 +619,7 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
     (terminal_dir / "org--model-b.json").write_text(
         "{\"model_id\": \"org/model-b\", \"status\": \"success\"}\n"
@@ -654,7 +646,7 @@ def test_collect_run_outcomes_prefers_success_over_stale_failure_history(tmp_pat
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
     (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    (metrics_dir / "org--model-a.h5").write_text("ok")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_backend\tstale failure\n"
         "org/model-b\tload\tunsupported_backend\tfresh failure\n"
@@ -724,7 +716,7 @@ def test_worker_threads_loader_scenario_into_load_model(tmp_path: Path):
             max_retries=0,
         )
         worker.load_model = Mock(return_value=(_FakeModel(), False))
-        worker.net_esd_estimator = Mock(return_value={"longname": ["layer.0"], "alpha": [1.0]})
+        worker.net_esd_estimator = Mock(return_value={"longname": ["layer.0"], "alpha": [2.0]})
         worker.save_results = Mock(
             side_effect=lambda metrics, output_path, *args, **kwargs: (
                 output_path.parent.mkdir(parents=True, exist_ok=True),

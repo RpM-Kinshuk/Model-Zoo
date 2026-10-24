@@ -1,0 +1,41 @@
+{
+  "phase": "complete",
+  "runner_pid": 3733234,
+  "returncode": 0,
+  "seconds": 88.18686486105435,
+  "signal_sent": null,
+  "cache_root": "/tmp/model-zoo-cost-pilot-5yb_kx6a",
+  "remaining_cache_allocated_bytes": 4096,
+  "initial_artifact_sha256": {},
+  "final_artifact_sha256": {
+    "stats/sikoraaxd--Qwen2-0.5B-Instruct-ru-lora.csv": "3ab88de2f46d1ec17c731e270a8e4796c4b713162e16f10403e413c7adc5c6d9",
+    "metrics/sikoraaxd--Qwen2-0.5B-Instruct-ru-lora.h5": "3c4fcdc250dc61d39af27d1a3a37c45785094f4d4a95c78df38771a7da6f790b"
+  },
+  "command": [
+    "/scratch/kinshuk/anaconda3/envs/esd_ind/bin/python",
+    "esd_experiment/run_experiment.py",
+    "--model_list",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/adapter_batch_001/models.csv",
+    "--output_dir",
+    "/jumbo/yaoqingyang/kinshuk/Model-Zoo/analysis_runs/phase2/adapter_batch_001",
+    "--gpus",
+    "0",
+    "1",
+    "2",
+    "3",
+    "--num_gpus_per_job",
+    "1",
+    "--max_concurrent_jobs",
+    "1",
+    "--worker_cache_root",
+    "/tmp/model-zoo-cost-pilot-5yb_kx6a",
+    "--stage_timeout_seconds",
+    "load=900,analyze=900,save=120,default=900",
+    "--heartbeat_timeout_seconds",
+    "180",
+    "--stale_process_action",
+    "terminate",
+    "--termination_grace_seconds",
+    "15"
+  ]
+}

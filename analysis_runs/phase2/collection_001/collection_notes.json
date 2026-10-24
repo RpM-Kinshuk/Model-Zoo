@@ -1,0 +1,44 @@
+{
+  "source": "data/curated/model_zoo_phase2.csv",
+  "source_sha256": "1b4240f122b054a672a2f5318bef1083b8276c1a8b61d2cba6691159d2f8eeb5",
+  "selection": "First 12 uncollected standard-transformers models by downloads descending then model_id, metadata size (0,1] billion parameters; excludes adapter/quantized/MoE/multimodal metadata. Operational convenience sample, not representative.",
+  "selected": 12,
+  "candidate_pool": 194,
+  "limits": "One worker; idle GPUs 0\u20133; 6 GiB weights, 16 GiB sampled RSS, 12 GiB sampled private cache; 900-second load/analyze stage limits; no scale-up.",
+  "results": {
+    "selected": 12,
+    "success": 10,
+    "held": 2,
+    "worker_failures": 0,
+    "complete_recorded_matrix_coverage": 10,
+    "measurements": 1040,
+    "fits": 1040,
+    "csv_hdf5_bytes": 5251416,
+    "logged_runner_seconds": 251,
+    "model_type_counts": {
+      "llama": 4,
+      "gpt2": 2,
+      "qwen2": 2,
+      "gpt_neox": 1,
+      "mistral": 1
+    },
+    "layer_selection_version": "4",
+    "numerics_version": "7",
+    "loader_version": "10",
+    "gpu": 0,
+    "workers": 1,
+    "actual_source_counts": {
+      "model": 10
+    },
+    "scale_claim": "Small dense-decoder convenience sample; not evidence of universal support or 50k-scale operation.",
+    "saved_eigenvalues": 702080
+  },
+  "cleanup": {
+    "private_cache_root": "/tmp/model-zoo-collection-001-cu8py4yb",
+    "active_workers": 0,
+    "remaining_pipeline_processes": 0,
+    "private_cache_files": 0,
+    "empty_private_root_removed": true,
+    "shared_caches_removed": false
+  }
+}

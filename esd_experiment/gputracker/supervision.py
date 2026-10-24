@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import json
 import logging
 import os
@@ -22,10 +22,16 @@ def _utc_now() -> str:
 def _write_json_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    temp_path.replace(path)
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        temp_path.replace(path)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass  # Do not mask the write failure when storage is unavailable.
 
 
 def safe_worker_name(value: str, default: str = "worker") -> str:
@@ -34,19 +40,26 @@ def safe_worker_name(value: str, default: str = "worker") -> str:
     return safe or default
 
 
-def _tail_text(path: Path, max_chars: int = 65536) -> str:
+def _tail_text(path: Path, max_bytes: int = 65536) -> str:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - max_bytes))
+            text = f.read(max_bytes).decode("utf-8", errors="replace")
     except FileNotFoundError:
         return ""
     except Exception as exc:
         return f"<could not read log: {exc}>"
-    return text[-max_chars:]
+    return text
 
 
 def _read_json_optional(path: Path) -> Optional[dict]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as f:
+            raw = f.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return None
+        payload = json.loads(raw)
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
@@ -161,6 +174,7 @@ class WorkerStateTracker:
         refresh_interval_seconds: int = 30,
         cache_root=None,
         cleanup_worker_cache: bool = True,
+        on_failure: Optional[Callable[[str], None]] = None,
     ):
         self.log_dir = Path(log_dir)
         self.run_id = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
@@ -170,42 +184,67 @@ class WorkerStateTracker:
         self.current_state_path = self.log_dir / "current_state.json"
         self.records: dict[str, WorkerRecord] = {}
         self.lock = threading.Lock()
+        self._state_write_lock = threading.Lock()
+        self.error: Optional[str] = None
+        self.on_failure = on_failure
+        self.refresh_started_at: Optional[float] = None
         self.refresh_interval_seconds = refresh_interval_seconds
         self.cache_root = Path(cache_root) if cache_root else None
         self.cleanup_worker_cache = cleanup_worker_cache
         self._stop_event = threading.Event()
         self.active_dir.mkdir(parents=True, exist_ok=True)
-        self._write_current_state_locked()
+        self._write_current_state()
         self._refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._refresh_thread.start()
 
-    def _write_current_state_locked(self) -> None:
-        active_workers = []
-        for record in self.records.values():
-            state = record.to_state()
-            heartbeat = _read_json_optional(record.heartbeat_path)
-            if heartbeat is not None:
-                state["heartbeat"] = heartbeat
-            active_workers.append(state)
-        payload = {
-            "updated_at": _utc_now(),
-            "run_id": self.run_id,
-            "runner_pid": self.runner_pid,
-            "active_count": len(active_workers),
-            "active_workers": active_workers,
-        }
-        _write_json_atomic(self.current_state_path, payload)
+    def _fail(self, message: str) -> None:
+        with self.lock:
+            if self.error is None:
+                self.error = message
+        if self.on_failure is not None:
+            self.on_failure(self.error)
+
+    def _write_current_state(self) -> None:
+        # Serialize snapshots, but never hold the records lock across disk I/O.
+        try:
+            with self._state_write_lock:
+                with self.lock:
+                    snapshots = [(record.to_state(), record.heartbeat_path) for record in self.records.values()]
+                active_workers = []
+                for state, heartbeat_path in snapshots:
+                    heartbeat = _read_json_optional(heartbeat_path)
+                    if heartbeat is not None:
+                        state["heartbeat"] = heartbeat
+                    active_workers.append(state)
+                payload = {
+                    "updated_at": _utc_now(),
+                    "run_id": self.run_id,
+                    "runner_pid": self.runner_pid,
+                    "active_count": len(active_workers),
+                    "active_workers": active_workers,
+                }
+                _write_json_atomic(self.current_state_path, payload)
+        except Exception as exc:
+            self._fail(f"Could not update worker state: {exc}")
+            raise
 
     def _refresh_loop(self) -> None:
         while not self._stop_event.wait(self.refresh_interval_seconds):
-            with self.lock:
-                self._write_current_state_locked()
+            self.refresh_started_at = time.monotonic()
+            try:
+                self._write_current_state()
+            except Exception:
+                return  # The sticky error and callback stop further dispatch.
+            finally:
+                self.refresh_started_at = None
 
     def close(self) -> None:
         self._stop_event.set()
         self._refresh_thread.join(timeout=1)
-        with self.lock:
-            self._write_current_state_locked()
+        if self._refresh_thread.is_alive():
+            self._fail("Worker-state refresh did not stop; storage may be stalled")
+            raise TimeoutError(self.error)
+        self._write_current_state()
 
     def _worker_id_for(self, job: WorkerJob) -> str:
         return safe_worker_name(job.worker_id or job.label or job.model_id or job.command)
@@ -225,8 +264,6 @@ class WorkerStateTracker:
             terminal_status_path=job.terminal_status_path,
         )
         cache_path = self._cache_path_for(worker_id)
-        if cache_path is not None:
-            cache_path.mkdir(parents=True, exist_ok=True)
         record = WorkerRecord(
             job=normalized_job,
             cuda_devices=list(cuda_devices),
@@ -235,11 +272,14 @@ class WorkerStateTracker:
             log_path=self.active_dir / f"{worker_id}.log",
             pid=pid,
             pgid=pgid,
-            terminal_status_mtime_ns=self._terminal_status_mtime_ns(normalized_job.terminal_status_path),
             cache_path=cache_path,
         )
         with self.lock:
             self.records[worker_id] = record
+        try:
+            record.terminal_status_mtime_ns = self._terminal_status_mtime_ns(normalized_job.terminal_status_path)
+            if cache_path is not None:
+                cache_path.mkdir(parents=True, exist_ok=True)
             _write_json_atomic(record.active_path, record.to_state())
             _write_json_atomic(
                 record.heartbeat_path,
@@ -256,7 +296,12 @@ class WorkerStateTracker:
             )
             record.log_path.parent.mkdir(parents=True, exist_ok=True)
             record.log_path.touch(exist_ok=True)
-            self._write_current_state_locked()
+            self._write_current_state()
+        except Exception as exc:
+            self._fail(f"Could not prepare worker {worker_id}: {exc}")
+            # The caller has not received this record yet, so undo our setup.
+            self.finish_worker(worker_id, returncode=1, reason="worker_start_failed", message=str(exc))
+            raise
         return record
 
     def update_worker_pid(self, worker_id: str, pid: Optional[int], pgid: Optional[int]) -> None:
@@ -266,8 +311,13 @@ class WorkerStateTracker:
                 return
             record.pid = pid
             record.pgid = pgid
-            _write_json_atomic(record.active_path, record.to_state())
-            self._write_current_state_locked()
+            state = record.to_state()
+        try:
+            _write_json_atomic(record.active_path, state)
+            self._write_current_state()
+        except Exception as exc:
+            self._fail(f"Could not record worker PID for {worker_id}: {exc}")
+            raise
 
     def mark_worker(self, worker_id: str, state: str, reason: str = "") -> None:
         with self.lock:
@@ -276,8 +326,13 @@ class WorkerStateTracker:
                 return
             record.state = state
             record.reason = reason
-            _write_json_atomic(record.active_path, record.to_state())
-            self._write_current_state_locked()
+            snapshot = record.to_state()
+        try:
+            _write_json_atomic(record.active_path, snapshot)
+            self._write_current_state()
+        except Exception as exc:
+            self._fail(f"Could not mark worker {worker_id}: {exc}")
+            raise
 
     def _terminal_status_mtime_ns(self, terminal_status_path: str) -> Optional[int]:
         if not terminal_status_path:
@@ -358,21 +413,36 @@ class WorkerStateTracker:
             record = self.records.pop(worker_id, None)
         if record is None:
             return
+        errors = []
+        status_saved = True
         if returncode != 0 or reason:
-            self._write_fallback_terminal_status(record, returncode, reason, message)
-        for path in (record.active_path, record.heartbeat_path, record.log_path):
             try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+                self._write_fallback_terminal_status(record, returncode, reason, message)
             except Exception as exc:
-                self.logger.warning(f"Could not remove active worker file {path}: {exc}")
+                status_saved = False
+                errors.append(f"Could not record outcome for {worker_id}: {exc}")
+                self._fail(errors[-1])
+        # Keep diagnostics when recording failed; they may be the only evidence.
+        if status_saved:
+            for path in (record.active_path, record.heartbeat_path, record.log_path):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    errors.append(f"Could not remove active worker file {path}: {exc}")
+                    self._fail(errors[-1])
         if self.cleanup_worker_cache and record.cache_path is not None:
             try:
                 shutil.rmtree(record.cache_path)
             except FileNotFoundError:
                 pass
             except Exception as exc:
-                self.logger.warning(f"Could not remove worker cache {record.cache_path}: {exc}")
-        with self.lock:
-            self._write_current_state_locked()
+                errors.append(f"Could not remove worker cache {record.cache_path}: {exc}")
+                self._fail(errors[-1])
+        try:
+            self._write_current_state()
+        except Exception as exc:
+            errors.append(f"Could not update final worker state: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))

@@ -29,6 +29,21 @@ def test_resolve_effective_loader_prefers_seq2seq_for_t5_configs():
     }) == 'seq2seq'
 
 
+@pytest.mark.parametrize("status,revision,expected", [
+    ("recorded", "a" * 40, "seq2seq"),
+    ("recorded", "b" * 40, "standard_causal"),
+    ("missing", "a" * 40, "standard_causal"),
+    ("invalid", "a" * 40, "standard_causal"),
+])
+def test_prepared_config_labels_take_precedence_only_at_their_pin(status, revision, expected):
+    assert resolve_effective_loader({
+        "model_id": "org/model", "revision_norm": "a" * 40,
+        "config_revision": revision, "config_metadata_status": status,
+        "config_model_type": "t5", "config_architectures": '["T5ForConditionalGeneration"]',
+        "Architecture": "WrongForSequenceClassification", "model_type": "t5",
+    }) == expected
+
+
 def test_resolve_effective_loader_prefers_multimodal_for_image_text_configs():
     assert resolve_effective_loader({
         'loader_scenario': 'standard_transformers',

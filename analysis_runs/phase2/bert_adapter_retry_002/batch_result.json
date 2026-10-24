@@ -1,0 +1,72 @@
+{
+  "manifest_sha256": "0b7d88108c9ad98d8e7753caac52740487fab0307bbda1c1b36decd06df36609",
+  "outcomes": {
+    "success": 2
+  },
+  "matrix_coverage": {
+    "complete": 2
+  },
+  "coverage_scope": "Adapted task model, not every tensor in pretraining base",
+  "measurements": 154,
+  "fitted_measurements": 154,
+  "missing_fits": 0,
+  "eigenvalues": 115462,
+  "wall_seconds": 66.03761342098005,
+  "artifact_bytes": 951316,
+  "worker_gpu_indices": [
+    0
+  ],
+  "other_gpu_pids_observed": [],
+  "peak_rss_bytes": 2021289984,
+  "peak_worker_gpu_bytes": 1679818752,
+  "peak_cache_bytes": 442396672,
+  "models": [
+    {
+      "model_id": "AK232003/outputs_500",
+      "transfer": {
+        "declared_base_class": "BertForMaskedLM",
+        "excluded_base_keys": [
+          "cls.predictions.bias",
+          "cls.predictions.decoder.bias",
+          "cls.predictions.decoder.weight",
+          "cls.predictions.transform.LayerNorm.bias",
+          "cls.predictions.transform.LayerNorm.weight",
+          "cls.predictions.transform.dense.bias",
+          "cls.predictions.transform.dense.weight",
+          "cls.seq_relationship.bias",
+          "cls.seq_relationship.weight"
+        ],
+        "policy_version": "1",
+        "required_adapter_head_keys": [
+          "base_model.model.classifier.weight",
+          "base_model.model.classifier.bias"
+        ],
+        "scope": "task-specific adapted model, not all tensors in the pretraining base",
+        "target_class": "BertForSequenceClassification",
+        "verified_base_class": "BertForPreTraining"
+      },
+      "legacy_key_rename_count": 52,
+      "adapter_tensor_count": 50
+    },
+    {
+      "model_id": "AfnanTS/Bert-base-uncased-finetuned-LoRA",
+      "transfer": {
+        "declared_base_class": "BertForMaskedLM",
+        "excluded_base_keys": [
+          "bert.pooler.dense.bias",
+          "bert.pooler.dense.weight",
+          "cls.seq_relationship.bias",
+          "cls.seq_relationship.weight"
+        ],
+        "policy_version": "1",
+        "required_adapter_head_keys": [],
+        "scope": "task-specific adapted model, not all tensors in the pretraining base",
+        "target_class": "BertForMaskedLM",
+        "verified_base_class": "BertForPreTraining"
+      },
+      "legacy_key_rename_count": 52,
+      "adapter_tensor_count": 149
+    }
+  ],
+  "initial_retry": "Rejected safely because legacy LayerNorm gamma/beta names were not yet recognized; controls now cover these aliases and collisions."
+}

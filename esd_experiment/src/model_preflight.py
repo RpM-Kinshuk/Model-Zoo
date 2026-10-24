@@ -135,6 +135,16 @@ def resolve_effective_loader(row: Mapping[str, Any]) -> str:
         row.get("Architecture"),
         row.get("Architecture_lb"),
     )
+    if _text(row.get("config_metadata_status")):
+        # Prepared config labels belong to one revision. Missing/invalid/stale
+        # evidence stays unknown; do not revive the imported, possibly truncated
+        # Architecture field as if it were a fresh checkpoint declaration.
+        current = (_text(row.get("config_metadata_status")) == "recorded"
+                   and bool(_text(row.get("config_revision")))
+                   and _text(row.get("config_revision")) == _text(row.get("revision_norm")))
+        model_type = ""
+        config_model_type = _text(row.get("config_model_type")) if current else ""
+        architectures = _text(row.get("config_architectures")) if current else ""
     pipeline_tag = _blob(row.get("pipeline_tag"), row.get("pipeline_tag_lb"))
     tags = _blob(
         row.get("tags"),
@@ -208,6 +218,16 @@ def classify_row_preflight(row: Mapping[str, Any]) -> PreflightDecision:
             reason="repo_inaccessible",
             effective_loader=effective_loader,
         )
+
+    if _text(row.get("analysis_source")) == "checkpoint":
+        if (base_model_relation in {"adapter", "lora", "peft"} or _has_adapter_artifact(row)
+                or _text(row.get("loader_scenario")) == "quantized_transformers_native"
+                or effective_loader in {"adapter_requires_base", "gguf", "gptq", "awq",
+                                        "compressed_tensors", "quantized_alt_format"}):
+            return PreflightDecision(False, "unsupported_checkpoint_representation", "checkpoint_tensors")
+        # Architecture/backend dispatch is irrelevant here. The worker checks
+        # pinned files, config markers and tensor headers before measuring.
+        return PreflightDecision(True, "eligible", "checkpoint_tensors")
 
     if (
         base_model_relation in {"adapter", "lora", "peft"}

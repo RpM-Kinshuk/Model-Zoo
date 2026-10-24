@@ -4,7 +4,7 @@ This repo now includes a local dashboard for experimenting with unsupervised clu
 
 ## What it does
 
-- Loads all `.h5` alpha metric files and keeps the per-layer structure for each model.
+- Loads complete depth-by-module `/alpha` views from `.h5` metric files.
 - Handles different model depths by resampling each module trace onto a normalized depth grid.
 - Supports mixed architectures through either:
   - the common 7-module LLM schema, or
@@ -48,4 +48,5 @@ Then open the local URL printed by Streamlit.
 
 - By default the dashboard treats `alpha <= 0` as missing because those values are not physically meaningful for the HT-SR interpretation.
 - The `DTW over normalized profiles` mode is intentionally more expensive. Keep the sampled model count modest for responsive experiments.
-- The main data source is the `.h5` alpha matrices because many top-level CSV files are empty or incomplete.
+- The dashboard needs a depth layout. Current files with partial, unavailable or malformed `/alpha` views are skipped with a warning. For arbitrary model structures, use canonical `/layers` records or the [per-model summary](../../docs/operations/analysis.md#reading-a-run).
+- Legacy root-only alpha matrices remain readable with a warning: their layer coverage and numerical conventions are unverified. A complete view does not establish comparability across measurement settings.

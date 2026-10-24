@@ -1,0 +1,20 @@
+{
+    "available_gpus": [
+        0,
+        1,
+        2,
+        3
+    ],
+    "max_checks": 2,
+    "memory_threshold_mb": 500,
+    "max_concurrent_jobs": 1,
+    "stale_process_action": "terminate",
+    "heartbeat_timeout_seconds": 180,
+    "stage_timeout_seconds": {
+        "load": 900,
+        "analyze": 900,
+        "save": 120,
+        "default": 900
+    },
+    "termination_grace_seconds": 15
+}
