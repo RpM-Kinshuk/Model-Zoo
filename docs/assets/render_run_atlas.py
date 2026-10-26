@@ -22,12 +22,12 @@ WIDTH = 1000
 FRAMES = 72
 SVG_WIDTH = 1200
 ROUTES = (
-    ("manifest-flow", 0.00, 0.24, "#c79832"),
-    ("worker-a-flow", 0.16, 0.46, "#006ce4"),
-    ("worker-b-flow", 0.29, 0.59, "#00693e"),
-    ("spectrum-a-flow", 0.43, 0.73, "#006ce4"),
-    ("spectrum-b-flow", 0.56, 0.86, "#00693e"),
-    ("release-flow", 0.73, 1.00, "#00693e"),
+    ("manifest-flow", 0.00, 0.24, "#ffe3a1"),
+    ("worker-a-flow", 0.16, 0.46, "#b8deff"),
+    ("worker-b-flow", 0.29, 0.59, "#a4f2d0"),
+    ("spectrum-a-flow", 0.43, 0.73, "#b8deff"),
+    ("spectrum-b-flow", 0.56, 0.86, "#a4f2d0"),
+    ("release-flow", 0.73, 1.00, "#a4f2d0"),
 )
 
 

@@ -2,15 +2,18 @@
   <title id="title">Worker execution and confirmed cleanup</title>
   <desc id="desc">A model worker loads, analyzes, and finalizes while its supervisor monitors heartbeat, stage age, RAM, and private cache. Cleanup confirms process-group exit before removing the private cache and releasing GPUs. Unconfirmed termination stops dispatch and retains evidence. Reload and drain control the queue; stop signals trigger termination and cleanup.</desc>
   <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff6d6"/><stop offset="0.45" stop-color="#f7f4e9"/><stop offset="1" stop-color="#e8f1e5"/></linearGradient>
     <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#53779e" stroke-width="1.3"/></marker>
   </defs>
-  <rect x="1" y="1" width="1198" height="328" rx="16" fill="#f5f3ec" stroke="#d9d6cc"/>
+  <rect x="1" y="1" width="1198" height="328" rx="16" fill="url(#paper)" stroke="#dbcfaa"/>
+  <g fill="none" stroke="#94b7a4" stroke-width="1" opacity="0.3"><path d="M915 22H962L981 41H1091L1120 70H1171"/><path d="M915 34H956L975 53H1085L1114 82H1171"/></g>
+  <g fill="#e9b538"><circle cx="915" cy="22" r="2.5"/><circle cx="915" cy="34" r="2.5"/></g>
   <g font-family="DejaVu Sans, Arial, sans-serif">
     <rect x="28" y="27" width="5" height="24" rx="2" fill="#fdb515"/>
     <text x="47" y="46" font-family="DejaVu Serif, Georgia, serif" font-size="28" fill="#003262">Worker execution and resource ownership</text>
     <text x="47" y="74" font-size="17" fill="#52647a">Ownership stays with the supervisor through execution, termination and cleanup.</text>
 
-    <rect x="28" y="98" width="536" height="50" rx="8" fill="#fff4d6" stroke="#dfbc61"/>
+    <rect x="28" y="98" width="536" height="50" rx="8" fill="#ffdc83" stroke="#cfa447"/>
     <text x="47" y="130" font-size="17" font-weight="700" fill="#694c12">MONITOR</text>
     <text x="157" y="130" font-size="17" fill="#694c12">heartbeat · stage · RAM · cache</text>
     <path d="M295 148V172M110 163H480M110 163V172M480 163V172" fill="none" stroke="#c18b12" stroke-width="1.5" stroke-dasharray="4 4"/>
@@ -25,7 +28,7 @@
     <path d="M380 211H393" fill="none" stroke="#53779e" stroke-width="2" marker-end="url(#arrow)"/>
     <path d="M570 211H607" fill="none" stroke="#53779e" stroke-width="2" marker-end="url(#arrow)"/>
 
-    <rect x="620" y="98" width="552" height="145" rx="10" fill="#e8f4ee" stroke="#a8d1bd"/>
+    <rect x="620" y="98" width="552" height="145" rx="10" fill="#deedd4" stroke="#a0c291"/>
     <text x="641" y="128" font-size="16" font-weight="700" letter-spacing="1.2" fill="#00693e">CONFIRMED CLEANUP</text>
     <text x="641" y="164" font-size="18" fill="#004b2d">1  Confirm process-group exit</text>
     <text x="641" y="193" font-size="18" fill="#004b2d">2  Remove private worker cache</text>
@@ -35,7 +38,7 @@
     <text x="995" y="191" font-size="16" font-weight="700" fill="#004b2d">Retain evidence.</text>
     <text x="995" y="217" font-size="16" font-weight="700" fill="#004b2d">Stop dispatch.</text>
 
-    <path d="M28 268H1172" stroke="#d7e1ec"/>
+    <path d="M28 268H158L165 259L174 278L183 261L191 268H1172" fill="none" stroke="#d3b05b" stroke-opacity="0.75"/>
     <text x="28" y="301" font-size="16" fill="#52647a">SIGHUP  reload</text>
     <text x="272" y="301" font-size="16" fill="#52647a">SIGUSR1  drain</text>
     <text x="531" y="301" font-size="16" fill="#52647a">SIGINT / SIGTERM  stop → terminate → confirm → clean up</text>

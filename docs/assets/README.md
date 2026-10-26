@@ -1,7 +1,7 @@
 # README visual system
 
-The README combines an animated system atlas, three static explanatory diagrams
-and two expandable Mermaid references. Graphics describe the implementation;
+The README combines an animated system atlas, a visible Mermaid architecture,
+three static explanatory diagrams and an expandable routing reference. Graphics describe the implementation;
 motion illustrates flow rather than live progress. All SVGs have descriptive
 titles and accessible descriptions, with no scripts or external dependencies.
 
@@ -20,11 +20,17 @@ titles and accessible descriptions, with no scripts or external dependencies.
 | `#003B95`, `#006CE4` | Execution, allocation and the first worker lane |
 | `#00693E` | The second worker lane and confirmed cleanup |
 | `#FDB515`, `#FFF4D6` | Controls, monitoring, pending work and small accents |
+| `#061B36`, `#063E34` | Midnight-blue and evergreen atlas background |
+| `#FFD16A`, `#FFF3C9` | Gold supervisory controls and pinned-manifest panels |
+| `#9272BE`, `#69B49A` | Additional matrix-component colors, retained across weights, singular values and eigenvalues |
 | `#F5F3EC`, `#FFFFFF` | Warm paper and explicit panel backgrounds for consistent light/dark rendering |
 | `#52647A` | Secondary labels |
 
-Serif figure titles, fine contour lines and warm paper give the diagrams an
-editorial character. Sans-serif labels and monospace identifiers distinguish
+Serif titles, spectral contours, GPU-grid textures and small circuit motifs
+give the figures an editorial character. The atlas uses a dark atmospheric
+field with restrained blue, green and gold light; the remaining figures use
+warm pale surfaces. Keep backgrounds low-contrast and behind opaque label panels.
+Sans-serif labels and monospace identifiers distinguish
 explanations from executable names. Use color together with labels and shapes;
 meaning must survive grayscale or a stopped animation.
 
@@ -55,7 +61,9 @@ the animation small. These are documentation tools, not worker dependencies.
 
 ## Maintenance
 
-Keep the root README's balanced Mermaid diagrams when updating runtime behavior.
+Keep the architecture visible in the root README, with the source map and
+detailed routing reference available on expansion. Preserve the balanced
+Mermaid layout when updating runtime behavior.
 Update these SVG labels if the corresponding behavior changes. Preview at both
 native width and approximately 830 pixels, and check arrowheads, wrapping and
 text contrast. Retain the README image descriptions when replacing an asset.

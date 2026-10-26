@@ -6,7 +6,7 @@ GPU orchestration and empirical spectral analysis for Hugging Face models.
 Prepare a pinned model list; the runner coordinates allocation, isolated
 workers, matrix analysis and cleanup.
 
-[Start a run](#start-a-run) · [GPU scheduling](#gpu-allocation-and-parallelism) ·
+[Start a run](#start-a-run) · [Architecture](#architecture) · [GPU scheduling](#gpu-allocation-and-parallelism) ·
 [Runtime controls](#runtime-controls-and-cache-lifecycle) · [ESD](#measurement-scope) ·
 [Reference](docs/operations/analysis.md)
 
@@ -22,44 +22,6 @@ workers, matrix analysis and cleanup.
 | Pin | Schedule | Measure | Release |
 | :--- | :--- | :--- | :--- |
 | Exact model and adapter-base revisions | Idle-GPU checks and bounded concurrency | Verified weights, explicit matrix coverage | Confirm exit, clean private cache, return GPUs |
-
-<details>
-<summary>Explore the architecture and source map</summary>
-
-```mermaid
-%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","edgeLabelBackground":"#FFFFFF"}}}%%
-flowchart TB
-    INPUT["Model list"] --> PREP["1 · PREPARE<br/>pin revisions · inspect config / files · budget weights"]
-    PREP --> REVIEW{"Review manifest"}
-    REVIEW -->|ready| RUN["2 · RUNNER<br/>validate pins · preflight · check resume compatibility"]
-    REVIEW -->|held| HOLD["Keep visible; do not dispatch"]
-    RUN --> GPU["3 · DISPATCHER<br/>wait for idle GPUs · reserve within this run"]
-    GPU --> WORKER["4 · MODEL WORKER<br/>strict loading · discover matrices · compute ESD"]
-    WORKER --> STOP["5 · CLEANUP<br/>confirm group exit · remove private cache · release GPUs"]
-    LIVE["Live config + signals"] -.-> GPU
-    WATCH["Supervisor<br/>heartbeat · stage · RAM · cache"] -.-> WORKER
-    classDef input fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
-    classDef done fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
-    classDef held fill:#F2F4F7,stroke:#98A2B3,color:#344054;
-    class INPUT,REVIEW,LIVE input;
-    class PREP,RUN,GPU,WATCH control;
-    class WORKER execute;
-    class STOP done;
-    class HOLD held;
-```
-
-| Code | Owns |
-| --- | --- |
-| `esd_experiment/src/run_experiment.py` | Preparation, metadata pins, preflight, resume and worker jobs |
-| `esd_experiment/gputracker/` | GPU allocation, live config, process groups, resource checks and cleanup |
-| `esd_experiment/src/worker.py` | One model's load → analyze → finalize lifecycle and heartbeat |
-| `esd_experiment/src/model_loader.py` | Architecture selection, checkpoint integrity and validated adapter merging |
-| `esd_experiment/src/checkpoint_tensors.py` | Stored-matrix analysis without constructing a model |
-| `net_esd/` | Matrix discovery, coverage, layer scheduling and spectral computation |
-
-</details>
 
 ## Start a run
 
@@ -153,6 +115,49 @@ python esd_experiment/run_experiment.py \
 
 Relaunch with the same pins and settings to resume completed work.
 `run_script.sh` is the site-specific HPC wrapper.
+
+## Architecture
+
+The runner plans; the dispatcher owns resources; each model worker loads and
+measures its assigned checkpoint. Supervision stays active through cleanup.
+
+```mermaid
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","edgeLabelBackground":"#FFFFFF"}}}%%
+flowchart TB
+    INPUT["Model list"] --> PREP["1 · PREPARE<br/>pin revisions · inspect config / files · budget weights"]
+    PREP --> REVIEW{"Review manifest"}
+    REVIEW -->|ready| RUN["2 · RUNNER<br/>run_experiment.py<br/>pins · preflight · compatible resume"]
+    REVIEW -->|held| HOLD["Keep visible; do not dispatch"]
+    RUN --> GPU["3 · DISPATCHER<br/>gputracker/<br/>idle GPUs · reservations"]
+    GPU --> WORKER["4 · MODEL WORKER<br/>worker.py → model_loader.py → net_esd<br/>strict loading · matrix ESD"]
+    WORKER --> STOP["5 · CLEANUP<br/>confirmed exit · private cache · GPU release"]
+    LIVE["Live config + signals"] -.-> GPU
+    WATCH["Supervisor<br/>heartbeat · stage · RAM · cache"] -.-> WORKER
+    classDef input fill:#FFE8A3,stroke:#E6AA10,color:#3B2A00,stroke-width:2px;
+    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
+    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
+    classDef done fill:#DFF1E4,stroke:#00693E,color:#00452A,stroke-width:2px;
+    classDef held fill:#FFF3DC,stroke:#C99B42,color:#684E1A;
+    class INPUT,REVIEW,LIVE input;
+    class PREP,RUN,GPU,WATCH control;
+    class WORKER execute;
+    class STOP done;
+    class HOLD held;
+```
+
+<details>
+<summary>Open the source map</summary>
+
+| Code | Owns |
+| --- | --- |
+| `esd_experiment/src/run_experiment.py` | Preparation, metadata pins, preflight, resume and worker jobs |
+| `esd_experiment/gputracker/` | GPU allocation, live config, process groups, resource checks and cleanup |
+| `esd_experiment/src/worker.py` | One model's load → analyze → finalize lifecycle and heartbeat |
+| `esd_experiment/src/model_loader.py` | Architecture selection, checkpoint integrity and validated adapter merging |
+| `esd_experiment/src/checkpoint_tensors.py` | Stored-matrix analysis without constructing a model |
+| `net_esd/` | Matrix discovery, coverage, layer scheduling and spectral computation |
+
+</details>
 
 ---
 
