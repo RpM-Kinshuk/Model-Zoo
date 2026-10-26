@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">Worker execution and confirmed cleanup</title>
+  <desc id="desc">A model worker loads, analyzes, and finalizes while its supervisor monitors heartbeat, stage age, RAM, and private cache. Cleanup confirms process-group exit before removing the private cache and releasing GPUs. Unconfirmed termination stops dispatch and retains evidence. Reload and drain control the queue; stop signals trigger termination and cleanup.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#53779e" stroke-width="1.3"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1198" height="328" rx="16" fill="#f5f3ec" stroke="#d9d6cc"/>
+  <g font-family="DejaVu Sans, Arial, sans-serif">
+    <rect x="28" y="27" width="5" height="24" rx="2" fill="#fdb515"/>
+    <text x="47" y="46" font-family="DejaVu Serif, Georgia, serif" font-size="28" fill="#003262">Worker execution and resource ownership</text>
+    <text x="47" y="74" font-size="17" fill="#52647a">Ownership stays with the supervisor through execution, termination and cleanup.</text>
+
+    <rect x="28" y="98" width="536" height="50" rx="8" fill="#fff4d6" stroke="#dfbc61"/>
+    <text x="47" y="130" font-size="17" font-weight="700" fill="#694c12">MONITOR</text>
+    <text x="157" y="130" font-size="17" fill="#694c12">heartbeat · stage · RAM · cache</text>
+    <path d="M295 148V172M110 163H480M110 163V172M480 163V172" fill="none" stroke="#c18b12" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+    <rect x="28" y="179" width="162" height="64" rx="8" fill="#003b95"/>
+    <rect x="214" y="179" width="162" height="64" rx="8" fill="#003b95"/>
+    <rect x="400" y="179" width="164" height="64" rx="8" fill="#003b95"/>
+    <text x="109" y="219" text-anchor="middle" font-size="19" font-weight="700" fill="#fff">Load</text>
+    <text x="295" y="219" text-anchor="middle" font-size="19" font-weight="700" fill="#fff">Analyze</text>
+    <text x="482" y="219" text-anchor="middle" font-size="19" font-weight="700" fill="#fff">Finalize</text>
+    <path d="M194 211H207" fill="none" stroke="#53779e" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M380 211H393" fill="none" stroke="#53779e" stroke-width="2" marker-end="url(#arrow)"/>
+    <path d="M570 211H607" fill="none" stroke="#53779e" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <rect x="620" y="98" width="552" height="145" rx="10" fill="#e8f4ee" stroke="#a8d1bd"/>
+    <text x="641" y="128" font-size="16" font-weight="700" letter-spacing="1.2" fill="#00693e">CONFIRMED CLEANUP</text>
+    <text x="641" y="164" font-size="18" fill="#004b2d">1  Confirm process-group exit</text>
+    <text x="641" y="193" font-size="18" fill="#004b2d">2  Remove private worker cache</text>
+    <text x="641" y="222" font-size="18" fill="#004b2d">3  Release GPU reservation</text>
+    <path d="M971 131V224" stroke="#b5d7c5"/>
+    <text x="995" y="165" font-size="16" fill="#004b2d">Unconfirmed exit?</text>
+    <text x="995" y="191" font-size="16" font-weight="700" fill="#004b2d">Retain evidence.</text>
+    <text x="995" y="217" font-size="16" font-weight="700" fill="#004b2d">Stop dispatch.</text>
+
+    <path d="M28 268H1172" stroke="#d7e1ec"/>
+    <text x="28" y="301" font-size="16" fill="#52647a">SIGHUP  reload</text>
+    <text x="272" y="301" font-size="16" fill="#52647a">SIGUSR1  drain</text>
+    <text x="531" y="301" font-size="16" fill="#52647a">SIGINT / SIGTERM  stop → terminate → confirm → clean up</text>
+  </g>
+</svg>

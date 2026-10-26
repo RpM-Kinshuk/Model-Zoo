@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="612" viewBox="0 0 1200 612" role="img" aria-labelledby="title desc">
+  <title id="title">The anatomy of a supervised spectral-analysis run</title>
+  <desc id="desc">A pinned manifest feeds the GPU dispatcher. In an illustrative concurrent run, the dispatcher assigns model workers A and B to separate GPU sets. Each worker loads a verified model and computes layer spectra. The supervisor monitors both workers, and resources are released only after process-group exit is confirmed. Curved paths show control and work flow, not live progress or benchmark data.</desc>
+  <defs>
+    <pattern id="paper" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.65" fill="#d9d6ce"/></pattern>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#003b95"/><stop offset="1" stop-color="#002847"/></linearGradient>
+    <linearGradient id="blue-path"><stop stop-color="#bfd5e7"/><stop offset="1" stop-color="#006ce4"/></linearGradient>
+    <linearGradient id="green-path"><stop stop-color="#b9d4c8"/><stop offset="1" stop-color="#00693e"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M1 1L6 4L1 7" fill="none" stroke="#7790a5" stroke-width="1.1"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1198" height="610" rx="18" fill="#f5f3ec" stroke="#d9d6cc"/>
+  <rect x="1" y="1" width="1198" height="610" rx="18" fill="url(#paper)" opacity="0.52"/>
+  <g fill="none" stroke="#e1e4dd" stroke-width="1">
+    <path d="M36 428C240 428 231 240 430 240S644 136 786 136S1005 216 1162 216"/>
+    <path d="M36 440C240 440 235 254 430 254S644 148 786 148S1005 228 1162 228"/>
+    <path d="M36 452C240 452 239 268 430 268S644 160 786 160S1005 240 1162 240"/>
+    <path d="M252 455C390 455 492 466 600 490S899 489 1162 475"/>
+    <path d="M252 467C390 467 492 478 600 502S899 501 1162 487"/>
+  </g>
+  <g font-family="DejaVu Sans, Arial, sans-serif">
+    <text x="40" y="39" fill="#6c776f" font-size="12" font-weight="700" letter-spacing="2.6">MODEL-ZOO / SYSTEM ATLAS</text>
+    <text x="40" y="86" fill="#003262" font-family="DejaVu Serif, Georgia, serif" font-size="35">Many moving parts.</text>
+    <text x="40" y="129" fill="#003262" font-family="DejaVu Serif, Georgia, serif" font-size="35">One coordinated run.</text>
+    <path d="M40 149H94" stroke="#dba32d" stroke-width="3"/>
+    <text x="817" y="40" fill="#6c776f" font-size="12" letter-spacing="1.5">PIN → ALLOCATE → MEASURE → RELEASE</text>
+
+    <g stroke="#d1a643" fill="none" stroke-width="1.4">
+      <path d="M520 204V112Q520 98 534 98H886Q900 98 900 112V146" stroke-dasharray="3 6"/>
+      <path d="M900 146V350" stroke-dasharray="3 6"/>
+    </g>
+    <rect x="575" y="81" width="260" height="36" rx="18" fill="#efe7d2"/>
+    <circle cx="594" cy="99" r="4" fill="#c49324"/>
+    <text x="608" y="104" font-size="13" font-weight="700" fill="#7a5b1b">SUPERVISION THROUGHOUT</text>
+    <text x="579" y="137" font-size="13" fill="#6c776f">heartbeat · stage · RAM · cache</text>
+
+    <g>
+      <rect x="42" y="213" width="179" height="205" rx="8" fill="#deded5"/>
+      <rect x="35" y="206" width="179" height="205" rx="8" fill="#fffdf7" stroke="#d4d5cd"/>
+      <path d="M35 247H214" stroke="#e2dfd3"/>
+      <text x="51" y="232" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="#003262">models.csv</text>
+      <path d="M53 272H111M53 281H172M53 314H104M53 323H172M53 356H121M53 365H172" fill="none" stroke="#a9bac5" stroke-width="3" stroke-linecap="round"/>
+      <g fill="#dba32d"><path d="M187 270l5 5-5 5-5-5z"/><path d="M187 312l5 5-5 5-5-5z"/><path d="M187 354l5 5-5 5-5-5z"/></g>
+      <text x="35" y="446" font-size="12" font-weight="700" letter-spacing="1.5" fill="#003262">01 / PINNED INPUTS</text>
+      <text x="35" y="468" font-size="14" fill="#596c79">model + base revisions</text>
+    </g>
+
+    <path id="manifest-flow" d="M214 308C274 308 273 308 333 308" fill="none" stroke="#829eb6" stroke-width="1.8"/>
+    <path d="M249 297l6 11-6 11M260 297l6 11-6 11" fill="none" stroke="#b3c2cc" stroke-width="1.3"/>
+
+    <circle cx="425" cy="308" r="108" fill="none" stroke="#d0dbe2"/>
+    <circle cx="425" cy="308" r="96" fill="none" stroke="#bccfdd" stroke-dasharray="2 8"/>
+    <circle cx="425" cy="308" r="83" fill="url(#ink)"/>
+    <g fill="none" stroke="#81b7ea" stroke-width="2"><path d="M389 265h72M389 274h50M389 283h61"/></g>
+    <text x="425" y="313" text-anchor="middle" font-size="19" font-weight="700" letter-spacing="1.1" fill="#fffdf7">DISPATCH</text>
+    <text x="425" y="335" text-anchor="middle" font-size="12" fill="#b8d3e9">idle checks</text>
+    <text x="425" y="352" text-anchor="middle" font-size="12" fill="#b8d3e9">GPU reservations</text>
+    <circle cx="425" cy="365" r="3" fill="#fdb515"/>
+    <text x="335" y="446" font-size="12" font-weight="700" letter-spacing="1.5" fill="#003262">02 / RESOURCE CONTROL</text>
+    <text x="335" y="468" font-size="14" fill="#596c79">admit work when capacity is free</text>
+
+    <path id="worker-a-flow" d="M508 308C589 308 578 226 659 226" fill="none" stroke="url(#blue-path)" stroke-width="2"/>
+    <path id="worker-b-flow" d="M508 308C589 308 578 407 659 407" fill="none" stroke="url(#green-path)" stroke-width="2"/>
+    <g>
+      <rect x="659" y="174" width="229" height="109" rx="11" fill="#edf3f6" stroke="#b9cad7"/>
+      <text x="675" y="196" font-size="12" font-weight="700" letter-spacing="1.5" fill="#003b95">WORKER A</text>
+      <rect x="675" y="209" width="48" height="48" rx="7" fill="#003b95"/>
+      <rect x="688" y="222" width="22" height="22" rx="3" fill="none" stroke="#b5d9f7"/>
+      <path d="M692 216v6M700 216v6M692 244v6M700 244v6M682 228h6M682 236h6M710 228h6M710 236h6" stroke="#b5d9f7"/>
+      <text x="737" y="229" font-size="16" font-weight="700" fill="#003262">load → analyze</text>
+      <text x="737" y="252" font-size="13" fill="#596c79">assigned GPUs only</text>
+      <rect x="659" y="355" width="229" height="109" rx="11" fill="#edf2ed" stroke="#b9cdbd"/>
+      <text x="675" y="377" font-size="12" font-weight="700" letter-spacing="1.5" fill="#00693e">WORKER B</text>
+      <rect x="675" y="390" width="48" height="48" rx="7" fill="#00693e"/>
+      <rect x="688" y="403" width="22" height="22" rx="3" fill="none" stroke="#c8e4d4"/>
+      <path d="M692 397v6M700 397v6M692 425v6M700 425v6M682 409h6M682 417h6M710 409h6M710 417h6" stroke="#c8e4d4"/>
+      <text x="737" y="410" font-size="16" font-weight="700" fill="#004b2d">load → analyze</text>
+      <text x="737" y="433" font-size="13" fill="#596c79">isolated process group</text>
+    </g>
+
+    <path id="spectrum-a-flow" d="M888 226C955 226 939 308 1006 308" fill="none" stroke="#7597b6" stroke-width="1.7"/>
+    <path id="spectrum-b-flow" d="M888 407C955 407 939 308 1006 308" fill="none" stroke="#81a291" stroke-width="1.7"/>
+    <g>
+      <text x="983" y="216" font-size="12" font-weight="700" letter-spacing="1.5" fill="#003262">03 / MATRIX ESD</text>
+      <path d="M1010 245V365H1164" stroke="#b0bec5" fill="none"/>
+      <path d="M1017 354C1028 354 1029 275 1044 275S1062 338 1075 338S1090 300 1106 300S1125 347 1159 350" fill="none" stroke="#006ce4" stroke-width="2.4"/>
+      <path d="M1017 355C1035 355 1035 322 1052 322S1072 268 1085 268S1104 332 1118 332S1144 352 1159 354" fill="none" stroke="#c69b3a" stroke-width="2"/>
+      <path d="M1017 357C1039 357 1046 344 1066 344S1095 305 1110 305S1134 350 1159 353" fill="none" stroke="#00693e" stroke-width="1.7"/>
+      <text x="993" y="394" font-size="14" fill="#596c79">spectra · rank · entropy</text>
+      <text x="993" y="416" font-size="14" fill="#596c79">tail fitting when valid</text>
+    </g>
+
+    <path id="release-flow" d="M774 464C774 521 603 525 532 525H249" fill="none" stroke="#9bb6a7" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="298" y="508" width="333" height="35" rx="17.5" fill="#e6eee4" stroke="#cfdbcb"/>
+    <text x="315" y="531" font-size="13" fill="#004b2d">confirm exit → clean cache → release GPUs</text>
+    <path d="M35 566H1165" stroke="#d8d9ce"/>
+    <text x="35" y="591" font-size="12" fill="#6c776f">ILLUSTRATIVE CONCURRENT RUN · MOTION SHOWS FLOW, NOT LIVE TELEMETRY</text>
+    <text x="1012" y="591" font-size="12" fill="#6c776f">MODEL MODE</text>
+  </g>
+</svg>

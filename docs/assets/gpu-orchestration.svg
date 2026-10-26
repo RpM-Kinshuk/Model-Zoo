@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="532" viewBox="0 0 1200 532" role="img" aria-labelledby="title desc">
+  <title id="title">Two levels of GPU parallelism</title>
+  <desc id="desc">Example configuration: two concurrent model workers, each assigned two physical GPUs. Each model has its own process group, visible devices, cache, and cost-sorted layer queue. Model C waits for a worker slot. Worker B sees physical GPUs 2 and 3 as local CUDA devices 0 and 1. Within each illustrated worker, two fixed-device threads take layers from its shared queue.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#006ce4" stroke-width="1.3"/></marker>
+    <marker id="arrow-green" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#00693e" stroke-width="1.3"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1198" height="530" rx="16" fill="#f5f3ec" stroke="#d9d6cc"/>
+  <g font-family="DejaVu Sans, Arial, sans-serif">
+    <rect x="28" y="27" width="5" height="24" rx="2" fill="#fdb515"/>
+    <text x="47" y="46" font-family="DejaVu Serif, Georgia, serif" font-size="28" fill="#003262">Two levels of parallelism</text>
+    <text x="47" y="73" font-size="17" fill="#52647a">Model processes share the GPU pool. Layer threads share each model's work.</text>
+
+    <rect x="28" y="100" width="222" height="369" rx="12" fill="#fff" stroke="#d7e1ec"/>
+    <text x="47" y="133" font-size="15" font-weight="700" letter-spacing="1.4" fill="#52647a">01 / MODEL QUEUE</text>
+    <rect x="47" y="153" width="184" height="56" rx="8" fill="#eaf3ff" stroke="#b7d4f4"/>
+    <circle cx="70" cy="181" r="5" fill="#006ce4"/>
+    <text x="87" y="187" font-size="19" font-weight="700" fill="#003262">Model A</text>
+    <rect x="47" y="225" width="184" height="56" rx="8" fill="#e8f4ee" stroke="#a8d1bd"/>
+    <circle cx="70" cy="253" r="5" fill="#00693e"/>
+    <text x="87" y="259" font-size="19" font-weight="700" fill="#004b2d">Model B</text>
+    <rect x="47" y="297" width="184" height="56" rx="8" fill="#fff8e7" stroke="#dfbc61" stroke-dasharray="5 4"/>
+    <circle cx="70" cy="325" r="5" fill="#c18b12"/>
+    <text x="87" y="331" font-size="19" font-weight="700" fill="#694c12">Model C</text>
+    <text x="47" y="384" font-size="17" fill="#52647a">C waits for a slot.</text>
+    <path d="M47 403H231" stroke="#e0e7ef"/>
+    <text x="47" y="431" font-size="16" fill="#52647a">Concurrent models: 2</text>
+
+    <path d="M231 181H286" fill="none" stroke="#006ce4" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <path d="M231 253H266V380H286" fill="none" stroke="#00693e" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+    <rect x="290" y="100" width="882" height="174" rx="12" fill="#fff" stroke="#a4c7ed"/>
+    <path d="M302 100H1160Q1172 100 1172 112V146H290V112Q290 100 302 100" fill="#003b95"/>
+    <text x="310" y="129" font-size="18" font-weight="700" fill="#fff">WORKER A</text>
+    <text x="487" y="129" font-size="16" fill="#dceaff">own process group · private cache</text>
+    <text x="310" y="178" font-size="16" fill="#52647a">02 / LAYER QUEUE</text>
+    <rect x="310" y="192" width="83" height="29" rx="4" fill="#006ce4"/>
+    <rect x="400" y="192" width="65" height="29" rx="4" fill="#3e8ee8"/>
+    <rect x="472" y="192" width="47" height="29" rx="4" fill="#88baf2"/>
+    <rect x="526" y="192" width="29" height="29" rx="4" fill="#c7def8"/>
+    <text x="310" y="248" font-size="16" fill="#52647a">Largest estimated cost first</text>
+    <path d="M570 206H602" fill="none" stroke="#006ce4" stroke-width="2"/>
+    <path d="M602 206V180H639" fill="none" stroke="#006ce4" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <path d="M602 206V232H639" fill="none" stroke="#006ce4" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <rect x="652" y="159" width="213" height="42" rx="7" fill="#eaf3ff" stroke="#b7d4f4"/>
+    <rect x="652" y="211" width="213" height="42" rx="7" fill="#eaf3ff" stroke="#b7d4f4"/>
+    <text x="668" y="186" font-size="17" font-weight="700" fill="#003262">GPU 0 → cuda:0</text>
+    <text x="668" y="238" font-size="17" font-weight="700" fill="#003262">GPU 1 → cuda:1</text>
+    <path d="M878 180H899V206M878 232H899V206" fill="none" stroke="#006ce4" stroke-width="2"/>
+    <path d="M899 206H919" fill="none" stroke="#006ce4" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <text x="937" y="201" font-size="18" font-weight="700" fill="#003262">Layer metrics</text>
+    <text x="937" y="226" font-size="15" fill="#52647a">original ordering</text>
+
+    <rect x="290" y="294" width="882" height="175" rx="12" fill="#fff" stroke="#a8d1bd"/>
+    <path d="M302 294H1160Q1172 294 1172 306V340H290V306Q290 294 302 294" fill="#00693e"/>
+    <text x="310" y="323" font-size="18" font-weight="700" fill="#fff">WORKER B</text>
+    <text x="487" y="323" font-size="16" fill="#e1f1e8">own process group · private cache</text>
+    <text x="310" y="372" font-size="16" fill="#52647a">02 / LAYER QUEUE</text>
+    <rect x="310" y="386" width="83" height="29" rx="4" fill="#00693e"/>
+    <rect x="400" y="386" width="65" height="29" rx="4" fill="#388c65"/>
+    <rect x="472" y="386" width="47" height="29" rx="4" fill="#83b79c"/>
+    <rect x="526" y="386" width="29" height="29" rx="4" fill="#c7e0d2"/>
+    <text x="310" y="442" font-size="16" fill="#52647a">Largest estimated cost first</text>
+    <path d="M570 400H602" fill="none" stroke="#00693e" stroke-width="2"/>
+    <path d="M602 400V374H639" fill="none" stroke="#00693e" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <path d="M602 400V426H639" fill="none" stroke="#00693e" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <rect x="652" y="353" width="213" height="42" rx="7" fill="#e8f4ee" stroke="#a8d1bd"/>
+    <rect x="652" y="405" width="213" height="42" rx="7" fill="#e8f4ee" stroke="#a8d1bd"/>
+    <text x="668" y="380" font-size="17" font-weight="700" fill="#004b2d">GPU 2 → cuda:0</text>
+    <text x="668" y="432" font-size="17" font-weight="700" fill="#004b2d">GPU 3 → cuda:1</text>
+    <path d="M878 374H899V400M878 426H899V400" fill="none" stroke="#00693e" stroke-width="2"/>
+    <path d="M899 400H919" fill="none" stroke="#00693e" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <text x="937" y="395" font-size="18" font-weight="700" fill="#004b2d">Layer metrics</text>
+    <text x="937" y="420" font-size="15" fill="#52647a">original ordering</text>
+
+    <text x="28" y="506" font-size="16" fill="#52647a">Example: --max_concurrent_jobs 2 · --num_gpus_per_job 2 · model-mode ESD using both assigned GPUs</text>
+  </g>
+</svg>
