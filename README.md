@@ -1,37 +1,45 @@
-# Model-Zoo
+<p align="center"><sub>PINNED WEIGHTS &nbsp; / &nbsp; COORDINATED COMPUTE &nbsp; / &nbsp; SPECTRAL STRUCTURE</sub></p>
 
-**From checkpoint weights to spectral structure.**
+<h1 align="center">Model-Zoo</h1>
 
-GPU orchestration and empirical spectral analysis for Hugging Face models.
-Prepare a pinned model list; the runner coordinates allocation, isolated
-workers, matrix analysis and cleanup.
-
-[Start a run](#start-a-run) · [Architecture](#architecture) · [GPU scheduling](#gpu-allocation-and-parallelism) ·
-[Runtime controls](#runtime-controls-and-cache-lifecycle) · [ESD](#measurement-scope) ·
-[Reference](docs/operations/analysis.md)
-
-## How the code fits together
+<p align="center"><strong>From checkpoint weights to spectral structure.</strong><br>
+GPU orchestration and empirical spectral analysis for Hugging Face models.</p>
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/run-atlas.svg">
   <img src="docs/assets/run-atlas.gif" width="100%" alt="A pinned model manifest feeds the GPU dispatcher, which allocates isolated workers. Workers compute matrix spectra under supervision; confirmed cleanup returns GPU capacity. Moving points illustrate work flow, not live telemetry.">
 </picture>
 
-<p align="center"><sub>Illustrative concurrent run. <a href="docs/assets/run-atlas.svg">Open the static atlas</a>.</sub></p>
+<p align="center"><sub>Pin the inputs. Allocate the GPUs. Measure the matrices. Return the capacity.<br>
+Illustrative concurrent run · <a href="docs/assets/run-atlas.svg">View without motion</a></sub></p>
 
-| Pin | Schedule | Measure | Release |
-| :--- | :--- | :--- | :--- |
-| Exact model and adapter-base revisions | Idle-GPU checks and bounded concurrency | Verified weights, explicit matrix coverage | Confirm exit, clean private cache, return GPUs |
+<table width="100%">
+<tr>
+<td width="33%" valign="top"><sub>01 &nbsp; / &nbsp; GET STARTED</sub><br><a href="#start-a-run"><strong>Start a run ↗</strong></a><br><sub>Prepare, review, launch and resume.</sub></td>
+<td width="33%" valign="top"><sub>02 &nbsp; / &nbsp; THE SYSTEM</sub><br><a href="#architecture"><strong>Architecture ↗</strong></a><br><sub>Who plans, who owns, who executes.</sub></td>
+<td width="33%" valign="top"><sub>03 &nbsp; / &nbsp; PARALLEL WORK</sub><br><a href="#gpu-allocation-and-parallelism"><strong>GPU parallelism ↗</strong></a><br><sub>GPU pools, model workers and threads.</sub></td>
+</tr>
+<tr>
+<td valign="top"><sub>04 &nbsp; / &nbsp; LIVE CONTROL</sub><br><a href="#runtime-controls-and-cache-lifecycle"><strong>Steer a run ↗</strong></a><br><sub>Signals, limits, caches and retries.</sub></td>
+<td valign="top"><sub>05 &nbsp; / &nbsp; THE SPECTRUM</sub><br><a href="#measurement-scope"><strong>Measurement ↗</strong></a><br><sub>Matrix coverage and numerical choices.</sub></td>
+<td valign="top"><sub>06 &nbsp; / &nbsp; GO DEEPER</sub><br><a href="#verification-and-maintenance"><strong>Verify &amp; explore ↗</strong></a><br><sub>Checks, source maps and reference.</sub></td>
+</tr>
+</table>
 
-## Start a run
+<p align="center"><sub>A short path through the system. Expand any section for the operational detail.</sub></p>
 
-**Prepare → review → run → resume.** Begin with a small list and the default
-single worker.
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+
+<a name="start-a-run"></a>
+
+## 01 · Start a run
+
+**Prepare → review → launch.** Begin with a small list and the default single worker.
 
 <details>
-<summary><strong>First run?</strong> Create the environment and input list</summary>
+<summary><strong>Set up once</strong> &nbsp; / &nbsp; Environment, model list and access token</summary>
 
-### 1 · Create the environment
+### Create the environment
 
 ```bash
 git clone https://github.com/RpM-Kinshuk/Model-Zoo.git
@@ -73,7 +81,7 @@ An importable backend does not guarantee a checkpoint can be measured.
 
 </details>
 
-### 2 · Prepare and review a small list
+### Prepare the list
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -81,11 +89,12 @@ python esd_experiment/run_experiment.py \
   --output_dir analysis_runs/phase2/my_run --limit 5 --prepare_only
 ```
 
-Review the generated `models.csv`: **pins · config labels · weight budget ·
-ready/held status**. Preparation reads metadata and small JSON files, not weights.
+> **Review before launch** · Check the generated `models.csv` for pins, config
+> labels, weight budget and ready/held status. Preparation reads metadata and
+> small JSON files, not weights.
 
 <details>
-<summary>Pinning, held rows and curated inputs</summary>
+<summary><strong>Preparation notes</strong> &nbsp; / &nbsp; Pins, held rows and curated inputs</summary>
 
 Launch requires full 40-character model and adapter-base commit SHAs.
 Ready rows can launch; held rows remain visible and are not dispatched.
@@ -103,7 +112,7 @@ prefer pinned config evidence over names.
 
 </details>
 
-### 3 · Run, stop and resume
+### Launch the run
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -113,40 +122,22 @@ python esd_experiment/run_experiment.py \
   --worker_cache_root /scratch/$USER/model_zoo_worker_cache
 ```
 
-Relaunch with the same pins and settings to resume completed work.
-`run_script.sh` is the site-specific HPC wrapper.
+> [!TIP]
+> **Continue where you left off.** Relaunch with the same pins and settings;
+> compatible completed work is skipped. Use `run_script.sh` for the site-specific HPC wrapper.
 
-## Architecture
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
 
-The runner plans; the dispatcher owns resources; each model worker loads and
-measures its assigned checkpoint. Supervision stays active through cleanup.
+<a name="architecture"></a>
 
-```mermaid
-%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","edgeLabelBackground":"#FFFFFF"}}}%%
-flowchart TB
-    INPUT["Model list"] --> PREP["1 · PREPARE<br/>pin revisions · inspect config / files · budget weights"]
-    PREP --> REVIEW{"Review manifest"}
-    REVIEW -->|ready| RUN["2 · RUNNER<br/>run_experiment.py<br/>pins · preflight · compatible resume"]
-    REVIEW -->|held| HOLD["Keep visible; do not dispatch"]
-    RUN --> GPU["3 · DISPATCHER<br/>gputracker/<br/>idle GPUs · reservations"]
-    GPU --> WORKER["4 · MODEL WORKER<br/>worker.py → model_loader.py → net_esd<br/>strict loading · matrix ESD"]
-    WORKER --> STOP["5 · CLEANUP<br/>confirmed exit · private cache · GPU release"]
-    LIVE["Live config + signals"] -.-> GPU
-    WATCH["Supervisor<br/>heartbeat · stage · RAM · cache"] -.-> WORKER
-    classDef input fill:#FFE8A3,stroke:#E6AA10,color:#3B2A00,stroke-width:2px;
-    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
-    classDef done fill:#DFF1E4,stroke:#00693E,color:#00452A,stroke-width:2px;
-    classDef held fill:#FFF3DC,stroke:#C99B42,color:#684E1A;
-    class INPUT,REVIEW,LIVE input;
-    class PREP,RUN,GPU,WATCH control;
-    class WORKER execute;
-    class STOP done;
-    class HOLD held;
-```
+## 02 · Architecture
+
+**Plan → own resources → execute.** Supervision stays active through cleanup.
+
+![The runner prepares pinned jobs; the dispatcher owns GPU reservations and supervision; isolated workers load and measure matrices. Live policy controls the dispatcher. Confirmed exit and private-cache cleanup precede GPU release; unconfirmed exit stops dispatch.](docs/assets/architecture.svg)
 
 <details>
-<summary>Open the source map</summary>
+<summary><strong>Explore the implementation</strong> &nbsp; / &nbsp; Source files and responsibilities</summary>
 
 | Code | Owns |
 | --- | --- |
@@ -159,22 +150,26 @@ flowchart TB
 
 </details>
 
----
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
 
-## GPU allocation and parallelism
+<a name="gpu-allocation-and-parallelism"></a>
+
+## 03 · GPU allocation and parallelism
+
+**Across models. Within a model.** Separate processes own devices; layer threads share the work.
 
 ![Two isolated model workers each reserve a GPU pair. Cost-sorted layer queues feed GPU-bound threads. Physical GPUs 2 and 3 become local cuda:0 and cuda:1 inside worker B; a third model waits.](docs/assets/gpu-orchestration.svg)
 
-| Choose the pool | Divide each model | Bound simultaneous models |
+| Pool → | Devices per model → | Models at once |
 | --- | --- | --- |
 | `--gpus 0 1 2 3` | `--num_gpus_per_job 2` | `--max_concurrent_jobs 2` |
 
-The diagram illustrates two workers; the launch default is **one worker,
-one GPU per model**. Allocation requires two consecutive idle checks, five
-seconds apart, with no GPU processes and memory below 500 MB.
+> **Start small** · The launch default is **one worker, one GPU per model**.
+> The figure shows a larger configuration. Admission requires two idle checks,
+> five seconds apart: no GPU processes and memory below 500 MB.
 
 <details>
-<summary>Allocation rules, thread management and a multi-GPU launch</summary>
+<summary><strong>Tune the parallelism</strong> &nbsp; / &nbsp; Allocation, threads and a multi-GPU launch</summary>
 
 Physical GPU IDs become local CUDA IDs through `CUDA_VISIBLE_DEVICES`.
 The dispatcher reserves devices within this run. Idle checks are cooperative;
@@ -204,20 +199,32 @@ on one selected device. Explicit `--analysis_source checkpoint` requires
 
 </details>
 
-## Runtime controls and cache lifecycle
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+
+<a name="runtime-controls-and-cache-lifecycle"></a>
+
+## 04 · Runtime controls and cache lifecycle
+
+**A live run stays steerable.** Change policy, drain the queue or stop with supervised cleanup.
 
 ![Load, analyze and finalize run under heartbeat, stage, RAM and cache monitoring. Confirmed process-group exit precedes private-cache removal and GPU release.](docs/assets/worker-lifecycle.svg)
 
-| Reload policy | Finish active work | Stop and clean up |
+| Reload policy ↻ | Finish active work → | Stop and clean up ■ |
 | --- | --- | --- |
 | `SIGHUP` | `SIGUSR1` | `SIGINT` / `SIGTERM` |
 
-**Default bounds:** 6 GiB selected weights · 16 GiB sampled worker RAM ·
-12 GiB sampled private cache. The supervisor releases resources after confirming
-process-group exit.
+<table width="100%">
+<tr>
+<td width="33%" align="center"><sub>SELECTED WEIGHTS</sub><br><strong>6 GiB</strong><br><sub>Includes adapter-base weights</sub></td>
+<td width="33%" align="center"><sub>WORKER RAM</sub><br><strong>16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
+<td width="33%" align="center"><sub>PRIVATE CACHE</sub><br><strong>12 GiB</strong><br><sub>Sampled allocated disk usage</sub></td>
+</tr>
+</table>
+
+<p align="center"><sub>Default bounds · Configurable per run · RAM and cache may overshoot between samples</sub></p>
 
 <details>
-<summary>Live state, resource limits, timeouts and cache ownership</summary>
+<summary><strong>Operate the run</strong> &nbsp; / &nbsp; Live state, limits, timeouts and cache ownership</summary>
 
 ```bash
 watch -n 5 'python -m json.tool analysis_runs/phase2/my_run/logs/current_state.json'
@@ -265,7 +272,7 @@ RAM and other supervision remain active.
 </details>
 
 <details>
-<summary>Resume, failures and retries</summary>
+<summary><strong>Recover and resume</strong> &nbsp; / &nbsp; Failure boundaries and retry behavior</summary>
 
 Compatible completed pairs are skipped. Interrupted models restart from the
 model boundary, not an individual layer. Resume requires the same manifest,
@@ -285,16 +292,25 @@ Allow signal-triggered cleanup to finish; avoid killing the runner with SIGKILL.
 
 </details>
 
-## Measurement scope
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+
+<a name="measurement-scope"></a>
+
+## 05 · Measurement scope
+
+**Weights → singular values → spectrum.** Explicit matrix coverage gives the numbers context.
 
 ![An illustrative diagonal matrix with weights 4, 3, 2 and 1 becomes singular values 4, 3, 2 and 1, then the sorted squared spectrum 1, 4, 9 and 16.](docs/assets/weight-to-spectrum.svg)
 
-The default is **SVD · float32 computation · midpoint tail cutoff**.
-Declared module weights and ordinary dense 2D parameters are measured;
-unsupported representations retain explicit reasons.
+| Decompose | Compute | Fit the tail |
+| --- | --- | --- |
+| **SVD** by default | **float32** arithmetic | **Midpoint** cutoff |
+
+Declared module weights and ordinary dense 2D parameters are measured.
+Unsupported representations retain explicit reasons.
 
 <details>
-<summary>Which matrices are included?</summary>
+<summary><strong>Know the coverage</strong> &nbsp; / &nbsp; Included matrices and explicit exclusions</summary>
 
 | Matrix family | Interpretation |
 | --- | --- |
@@ -323,7 +339,7 @@ not a verified linear operator.
 </details>
 
 <details>
-<summary>Loading, fallback and retries: the routing diagram</summary>
+<summary><strong>Follow the loading path</strong> &nbsp; / &nbsp; Strict loading, fallback and routing diagram</summary>
 
 ```mermaid
 %%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","edgeLabelBackground":"#FFFFFF"}}}%%
@@ -374,7 +390,7 @@ rejected.
 </details>
 
 <details>
-<summary>Numerical settings, interpretation and compatibility</summary>
+<summary><strong>Choose the numerics</strong> &nbsp; / &nbsp; Settings, interpretation and compatibility</summary>
 
 | Option | Default |
 | --- | --- |
@@ -400,16 +416,20 @@ coverage in a fresh directory.
 
 </details>
 
----
+<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
 
-## Verification and maintenance
+<a name="verification-and-maintenance"></a>
+
+## 06 · Verification and maintenance
+
+**Check the installation. Explore the implementation.**
 
 ```bash
 python -m pytest esd_experiment/tests -q
 ```
 
 <details>
-<summary>Installation checks, focused regressions and maintenance notes</summary>
+<summary><strong>Validate a change</strong> &nbsp; / &nbsp; Installation checks, regressions and maintenance</summary>
 
 Pytest is a development dependency, not a worker requirement:
 
@@ -439,10 +459,16 @@ The diagrams are editable, self-contained assets. Their
 
 </details>
 
-Collection supports bounded research runs; 50,000-model operation is not yet
-proven. Matrix support is not universal architecture support, and spectral
-descriptors require separate research validation for model-quality claims.
+> **Research scope** · Collection supports bounded research runs; 50,000-model
+> operation is not yet proven. Matrix support is not universal architecture
+> support, and spectral descriptors require separate validation for model-quality claims.
 
-[Analysis reference](docs/operations/analysis.md) ·
-[Runner code map](esd_experiment/README.md#code-map) ·
-[Operations](docs/operations/README.md) · [License](LICENSE)
+<table width="100%">
+<tr>
+<td width="33%" valign="top"><sub>UNDERSTAND THE NUMBERS</sub><br><a href="docs/operations/analysis.md"><strong>Analysis reference ↗</strong></a><br><sub>Coverage, conventions and interpretation</sub></td>
+<td width="33%" valign="top"><sub>FOLLOW THE CODE</sub><br><a href="esd_experiment/README.md#code-map"><strong>Runner source map ↗</strong></a><br><sub>Entrypoints and implementation boundaries</sub></td>
+<td width="33%" valign="top"><sub>MANAGE A COLLECTION</sub><br><a href="docs/operations/README.md"><strong>Operations guide ↗</strong></a><br><sub>Preparation and practical run management</sub></td>
+</tr>
+</table>
+
+<p align="center"><sub><a href="#">Back to top ↑</a> &nbsp; · &nbsp; <a href="LICENSE">License</a> &nbsp; · &nbsp; <a href="docs/assets/README.md">Visual system</a></sub></p>

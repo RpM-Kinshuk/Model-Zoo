@@ -1,16 +1,38 @@
 # README visual system
 
-The README combines an animated system atlas, a visible Mermaid architecture,
-three static explanatory diagrams and an expandable routing reference. Graphics describe the implementation;
-motion illustrates flow rather than live progress. All SVGs have descriptive
-titles and accessible descriptions, with no scripts or external dependencies.
+The README combines an animated system atlas, a compact SVG architecture,
+three explanatory diagrams and an expandable Mermaid routing reference. Graphics describe the implementation;
+motion illustrates flow rather than live progress. Informative SVGs have descriptive
+titles and accessible descriptions. All assets are free of scripts and external dependencies.
 
 | Asset | What it explains |
 | --- | --- |
 | [Run atlas](run-atlas.svg) / [animation](run-atlas.gif) | The manifest, dispatcher, isolated workers, spectra, supervision and confirmed resource release |
+| [Architecture](architecture.svg) | Runner, dispatcher and worker ownership; live supervision and the confirmed-cleanup loop |
 | [GPU orchestration](gpu-orchestration.svg) | Two model processes, each with its own GPU pair and layer queue; physical-to-local CUDA mapping |
 | [Worker lifecycle](worker-lifecycle.svg) | Monitoring and the order of confirmed termination, cache cleanup and GPU release |
 | [Weight to spectrum](weight-to-spectrum.svg) | A concrete diagonal matrix, its singular values and its squared, sorted spectrum |
+| [Chapter thread](chapter-thread.svg) | A decorative, transparent transition between numbered chapters; no runtime meaning |
+
+## Page composition
+
+The surrounding README uses a centered masthead, a six-part navigation grid,
+numbered chapters, concise lead sentences and consistent expandable references.
+Native HTML tables present navigation and resource bounds; Markdown keeps
+commands copyable, source links usable and detailed reference text searchable.
+The chapter thread echoes the figures' contours between sections. It has empty
+alt text in the README because it is decorative.
+
+Keep the main reading path short: an overview, two launch commands, the source
+architecture, GPU scheduling, runtime control and the measurement itself.
+Details summaries pair an action with a short description of what expands.
+Retain the explicit named anchors when changing chapter titles so existing
+section links continue to work.
+
+Use GitHub-compatible HTML rather than page-level CSS, scripts or background
+attributes. The host controls the page canvas and typography; atmosphere belongs
+in self-contained artwork, with native content connecting the figures. Tables
+and summaries should remain readable in both light and dark themes.
 
 ## Visual language
 
@@ -62,8 +84,11 @@ the animation small. These are documentation tools, not worker dependencies.
 ## Maintenance
 
 Keep the architecture visible in the root README, with the source map and
-detailed routing reference available on expansion. Preserve the balanced
-Mermaid layout when updating runtime behavior.
+detailed routing reference available on expansion. Its 1200 × 490 layout keeps
+planning, resource ownership and execution side by side at the same scale as
+the other figures. Preserve the supervision rail, ready/held distinction and
+cleanup return path when updating behavior. The lower-level loading diagram
+remains editable Mermaid inside its expandable reference.
 Update these SVG labels if the corresponding behavior changes. Preview at both
 native width and approximately 830 pixels, and check arrowheads, wrapping and
 text contrast. Retain the README image descriptions when replacing an asset.

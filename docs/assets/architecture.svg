@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490" role="img" aria-labelledby="title desc">
+  <title id="title">Architecture: planning, resource ownership and isolated execution</title>
+  <desc id="desc">The runner prepares pinned inputs, checks readiness and resumes compatible work. Ready jobs go to the GPU dispatcher; held rows remain for inspection. The dispatcher owns GPU reservations, worker process groups and supervision. Each isolated worker loads through model_loader.py and analyzes matrices with net_esd, or uses the checkpoint-tensor route. Live configuration and signals control the dispatcher. After confirmed process-group exit, private-cache cleanup precedes GPU release back to the dispatcher. Unconfirmed exit retains resources and stops dispatch.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff5d5"/><stop offset="0.5" stop-color="#f5f3ec"/><stop offset="1" stop-color="#e4efe6"/></linearGradient>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#073b63"/><stop offset="1" stop-color="#092a42"/></linearGradient>
+    <linearGradient id="gold"><stop stop-color="#ffdc83"/><stop offset="1" stop-color="#f8e9b9"/></linearGradient>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#8aa58e" stroke-width="0.6" opacity="0.13"/></pattern>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M1 1L6 3.5L1 6" fill="none" stroke="#597b7b" stroke-width="1.4"/></marker>
+    <marker id="gold-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M1 1L6 3.5L1 6" fill="none" stroke="#b38626" stroke-width="1.4"/></marker>
+  </defs>
+  <rect x="1" y="1" width="1198" height="488" rx="16" fill="url(#paper)" stroke="#d7d4b9"/>
+  <rect x="1" y="1" width="1198" height="488" rx="16" fill="url(#grid)"/>
+  <g fill="none" stroke-width="1" opacity="0.28">
+    <path d="M909 26C980 26 1000 74 1059 74S1125 23 1172 23" stroke="#c99b30"/>
+    <path d="M909 36C980 36 1000 84 1059 84S1125 33 1172 33" stroke="#c99b30"/>
+    <path d="M909 46C980 46 1000 94 1059 94S1125 43 1172 43" stroke="#699c88"/>
+  </g>
+  <g font-family="DejaVu Sans, Arial, sans-serif">
+    <text x="28" y="35" font-size="12" font-weight="700" letter-spacing="2.1" fill="#79601e">ARCHITECTURE / SOURCE TO EXECUTION</text>
+    <text x="28" y="78" font-family="DejaVu Serif, Georgia, serif" font-size="30" fill="#003262">Three owners. One continuous lifecycle.</text>
+
+    <rect x="28" y="105" width="1144" height="46" rx="9" fill="url(#gold)" stroke="#d8b65d"/>
+    <circle cx="49" cy="128" r="4" fill="#9d711b"/>
+    <text x="64" y="134" font-size="15" font-weight="700" letter-spacing="0.6" fill="#63480e">LIVE POLICY + SIGNALS</text>
+    <text x="302" y="134" font-size="16" fill="#63480e">reload · drain · stop</text>
+    <path d="M502 117V139" stroke="#caa748"/>
+    <text x="527" y="134" font-size="16" fill="#63480e">Supervisor watches heartbeat · stage · RAM · cache</text>
+    <path d="M546 151V178" stroke="#b38626" stroke-width="1.6" stroke-dasharray="3 4" marker-end="url(#gold-arrow)"/>
+
+    <rect x="28" y="184" width="320" height="170" rx="11" fill="#fffdf5" stroke="#d7c897"/>
+    <text x="48" y="211" font-size="12" font-weight="700" letter-spacing="1.8" fill="#8c6b1b">01 / PLAN</text>
+    <text x="48" y="246" font-family="DejaVu Serif, Georgia, serif" font-size="27" fill="#003262">Runner</text>
+    <text x="48" y="275" font-family="DejaVu Sans Mono, monospace" font-size="17" fill="#30516b">run_experiment.py</text>
+    <text x="48" y="302" font-size="17" fill="#52647a">pins · preflight · resume</text>
+    <path d="M48 316H328" stroke="#e8dec1"/>
+    <text x="48" y="339" font-size="15" fill="#765b1b">ready → dispatch · held → inspect</text>
+
+    <rect x="386" y="184" width="320" height="170" rx="11" fill="url(#navy)" stroke="#416b88"/>
+    <text x="406" y="211" font-size="12" font-weight="700" letter-spacing="1.8" fill="#ffd473">02 / OWN RESOURCES</text>
+    <text x="406" y="246" font-family="DejaVu Serif, Georgia, serif" font-size="27" fill="#fff6dd">Dispatcher</text>
+    <text x="406" y="275" font-family="DejaVu Sans Mono, monospace" font-size="17" fill="#b8deff">gputracker/</text>
+    <text x="406" y="302" font-size="17" fill="#d2e2e4">idle checks · GPU reservations</text>
+    <path d="M406 316H686" stroke="#426377"/>
+    <text x="406" y="339" font-size="15" fill="#d2e2e4">process groups · supervision</text>
+
+    <rect x="744" y="184" width="428" height="170" rx="11" fill="#f2f8ee" stroke="#aac5b0"/>
+    <text x="764" y="211" font-size="12" font-weight="700" letter-spacing="1.8" fill="#00693e">03 / EXECUTE IN ISOLATION</text>
+    <text x="764" y="246" font-family="DejaVu Serif, Georgia, serif" font-size="27" fill="#004b2d">Model worker</text>
+    <text x="764" y="275" font-family="DejaVu Sans Mono, monospace" font-size="16" fill="#305c4e">worker.py → model_loader.py</text>
+    <text x="764" y="302" font-size="17" fill="#305c4e">net_esd/ · discover → schedule → SVD</text>
+    <path d="M764 316H1152" stroke="#cdddce"/>
+    <text x="764" y="339" font-size="15" fill="#526b60">Alternative source: checkpoint_tensors.py</text>
+
+    <path d="M350 254H381" fill="none" stroke="#597b7b" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M708 254H739" fill="none" stroke="#597b7b" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <path d="M958 354V383" fill="none" stroke="#597b7b" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <rect x="386" y="389" width="786" height="49" rx="9" fill="#dcebd8" stroke="#abc5a4"/>
+    <text x="408" y="419" font-size="17" fill="#24533d">Confirm exit</text>
+    <text x="535" y="419" font-size="17" fill="#557564">→</text>
+    <text x="566" y="419" font-size="17" fill="#24533d">Clean private cache</text>
+    <text x="753" y="419" font-size="17" fill="#557564">→</text>
+    <text x="785" y="419" font-size="17" font-weight="700" fill="#24533d">Release GPU reservation</text>
+    <path d="M386 414H376Q368 414 368 406V300Q368 292 376 292H382" fill="none" stroke="#597b7b" stroke-width="1.8" marker-end="url(#arrow)"/>
+    <text x="48" y="406" font-size="12" font-weight="700" letter-spacing="1.5" fill="#00693e">CAPACITY RETURNS</text>
+    <text x="48" y="431" font-size="16" fill="#52647a">Only after confirmed cleanup.</text>
+    <text x="386" y="468" font-size="15" fill="#52647a">Exit unconfirmed? Retain cache and reservation; stop new dispatch.</text>
+  </g>
+</svg>

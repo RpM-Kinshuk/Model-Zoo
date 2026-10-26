@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="38" viewBox="0 0 1200 38" role="img" aria-labelledby="title">
+  <title id="title">Decorative interwoven gold, blue and green chapter divider</title>
+  <defs>
+    <linearGradient id="thread"><stop stop-color="#d5ab49" stop-opacity="0"/><stop offset="0.24" stop-color="#d5ab49"/><stop offset="0.5" stop-color="#dfb24c"/><stop offset="0.76" stop-color="#709b85"/><stop offset="1" stop-color="#709b85" stop-opacity="0"/></linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#thread)">
+    <path d="M0 19H460C516 19 550 5 600 5S684 19 740 19H1200"/>
+    <path d="M0 19H460C516 19 550 33 600 33S684 19 740 19H1200"/>
+    <path d="M0 19H1200" opacity="0.4"/>
+  </g>
+  <path d="M600 12L607 19L600 26L593 19Z" fill="#edbe54"/>
+  <circle cx="571" cy="19" r="2" fill="#688ca9"/>
+  <circle cx="629" cy="19" r="2" fill="#709b85"/>
+</svg>
