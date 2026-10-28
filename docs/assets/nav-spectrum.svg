@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Matrix spectrum navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 46C23 46 24 9 34 9S44 46 56 46" stroke="#b78a2f"/><path d="M31 48C45 48 48 21 58 21S70 48 83 48" stroke="#4588ae"/><path d="M47 50C65 50 65 34 74 34S82 50 90 50" stroke="#419779"/><circle cx="34" cy="9" r="3" fill="#d6ad47"/></g>
+</svg>

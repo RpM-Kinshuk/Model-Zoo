@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="48" viewBox="0 0 1200 48" role="img" aria-labelledby="title desc">
+  <title id="title">Spectral chapter ornament</title>
+  <desc id="desc">Decorative flowing curves and a small spectral motif link the surrounding chapters. No operational meaning.</desc>
+  <defs><linearGradient id="thread"><stop stop-color="#d5ab49" stop-opacity="0"/><stop offset=".28" stop-color="#d5ab49"/><stop offset=".72" stop-color="#709b85"/><stop offset="1" stop-color="#709b85" stop-opacity="0"/></linearGradient></defs>
+  <g fill="none" stroke="url(#thread)" stroke-width="1">
+    <path d="M0 24H430C490 24 520 5 568 5M632 5C680 5 710 24 770 24H1200"/>
+    <path d="M0 24H430C490 24 520 43 568 43M632 43C680 43 710 24 770 24H1200"/>
+    <path d="M0 24H570M630 24H1200" opacity=".5"/>
+  </g>
+  <path d="M578 34C584 34 585 11 591 11S599 34 605 34S612 20 619 20" fill="none" stroke="#d4a93e" stroke-width="1.5"/>
+  <path d="M579 37C591 37 595 22 602 22S610 37 620 37" fill="none" stroke="#709b85"/>
+  <circle cx="591" cy="11" r="2.2" fill="#d4a93e"/>
+  <circle cx="559" cy="24" r="1.6" fill="#789bb5"/><circle cx="641" cy="24" r="1.6" fill="#8ca98b"/>
+</svg>

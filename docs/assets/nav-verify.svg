@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Verification checks navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M33 14H76M33 29H68M33 44H72" stroke="#79a396"/><path d="M15 13L20 18L28 8M15 28L20 33L28 23M15 43L20 48L28 38" stroke="#b78a2f"/><circle cx="82" cy="14" r="2" fill="#4588ae"/></g>
+</svg>

@@ -1,4 +1,6 @@
-<p align="center"><sub>PINNED WEIGHTS &nbsp; / &nbsp; COORDINATED COMPUTE &nbsp; / &nbsp; SPECTRAL STRUCTURE</sub></p>
+<a name="top"></a>
+
+<img src="docs/assets/page-opening.svg" width="100%" alt="">
 
 <h1 align="center">Model-Zoo</h1>
 
@@ -15,14 +17,14 @@ Illustrative concurrent run · <a href="docs/assets/run-atlas.svg">View without 
 
 <table width="100%">
 <tr>
-<td width="33%" valign="top"><sub>01 &nbsp; / &nbsp; GET STARTED</sub><br><a href="#start-a-run"><strong>Start a run ↗</strong></a><br><sub>Prepare, review, launch and resume.</sub></td>
-<td width="33%" valign="top"><sub>02 &nbsp; / &nbsp; THE SYSTEM</sub><br><a href="#architecture"><strong>Architecture ↗</strong></a><br><sub>Who plans, who owns, who executes.</sub></td>
-<td width="33%" valign="top"><sub>03 &nbsp; / &nbsp; PARALLEL WORK</sub><br><a href="#gpu-allocation-and-parallelism"><strong>GPU parallelism ↗</strong></a><br><sub>GPU pools, model workers and threads.</sub></td>
+<td width="33%" valign="top"><img src="docs/assets/nav-prepare.svg" width="72" alt=""><br><sub>01 &nbsp; / &nbsp; GET STARTED</sub><br><a href="#start-a-run"><strong>Start a run ↗</strong></a><br><sub>Prepare, review, launch and resume.</sub></td>
+<td width="33%" valign="top"><img src="docs/assets/nav-architecture.svg" width="72" alt=""><br><sub>02 &nbsp; / &nbsp; THE SYSTEM</sub><br><a href="#architecture"><strong>Architecture ↗</strong></a><br><sub>Who plans, who owns, who executes.</sub></td>
+<td width="33%" valign="top"><img src="docs/assets/nav-parallel.svg" width="72" alt=""><br><sub>03 &nbsp; / &nbsp; PARALLEL WORK</sub><br><a href="#gpu-allocation-and-parallelism"><strong>GPU parallelism ↗</strong></a><br><sub>GPU pools, model workers and threads.</sub></td>
 </tr>
 <tr>
-<td valign="top"><sub>04 &nbsp; / &nbsp; LIVE CONTROL</sub><br><a href="#runtime-controls-and-cache-lifecycle"><strong>Steer a run ↗</strong></a><br><sub>Signals, limits, caches and retries.</sub></td>
-<td valign="top"><sub>05 &nbsp; / &nbsp; THE SPECTRUM</sub><br><a href="#measurement-scope"><strong>Measurement ↗</strong></a><br><sub>Matrix coverage and numerical choices.</sub></td>
-<td valign="top"><sub>06 &nbsp; / &nbsp; GO DEEPER</sub><br><a href="#verification-and-maintenance"><strong>Verify &amp; explore ↗</strong></a><br><sub>Checks, source maps and reference.</sub></td>
+<td valign="top"><img src="docs/assets/nav-control.svg" width="72" alt=""><br><sub>04 &nbsp; / &nbsp; LIVE CONTROL</sub><br><a href="#runtime-controls-and-cache-lifecycle"><strong>Steer a run ↗</strong></a><br><sub>Signals, limits, caches and retries.</sub></td>
+<td valign="top"><img src="docs/assets/nav-spectrum.svg" width="72" alt=""><br><sub>05 &nbsp; / &nbsp; THE SPECTRUM</sub><br><a href="#measurement-scope"><strong>Measurement ↗</strong></a><br><sub>Matrix coverage and numerical choices.</sub></td>
+<td valign="top"><img src="docs/assets/nav-verify.svg" width="72" alt=""><br><sub>06 &nbsp; / &nbsp; GO DEEPER</sub><br><a href="#verification-and-maintenance"><strong>Verify &amp; explore ↗</strong></a><br><sub>Checks, source maps and reference.</sub></td>
 </tr>
 </table>
 
@@ -126,7 +128,7 @@ python esd_experiment/run_experiment.py \
 > **Continue where you left off.** Relaunch with the same pins and settings;
 > compatible completed work is skipped. Use `run_script.sh` for the site-specific HPC wrapper.
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+<img src="docs/assets/chapter-compute.svg" width="100%" alt="">
 
 <a name="architecture"></a>
 
@@ -150,7 +152,7 @@ python esd_experiment/run_experiment.py \
 
 </details>
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+<img src="docs/assets/chapter-compute.svg" width="100%" alt="">
 
 <a name="gpu-allocation-and-parallelism"></a>
 
@@ -292,7 +294,7 @@ Allow signal-triggered cleanup to finish; avoid killing the runner with SIGKILL.
 
 </details>
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+<img src="docs/assets/chapter-spectrum.svg" width="100%" alt="">
 
 <a name="measurement-scope"></a>
 
@@ -416,7 +418,7 @@ coverage in a fresh directory.
 
 </details>
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+<img src="docs/assets/chapter-spectrum.svg" width="100%" alt="">
 
 <a name="verification-and-maintenance"></a>
 
@@ -471,4 +473,6 @@ The diagrams are editable, self-contained assets. Their
 </tr>
 </table>
 
-<p align="center"><sub><a href="#">Back to top ↑</a> &nbsp; · &nbsp; <a href="LICENSE">License</a> &nbsp; · &nbsp; <a href="docs/assets/README.md">Visual system</a></sub></p>
+<p align="center"><sub><a href="#top">Back to top ↑</a> &nbsp; · &nbsp; <a href="LICENSE">License</a> &nbsp; · &nbsp; <a href="docs/assets/README.md">Visual system</a></sub></p>
+
+<img src="docs/assets/page-closing.svg" width="100%" alt="">

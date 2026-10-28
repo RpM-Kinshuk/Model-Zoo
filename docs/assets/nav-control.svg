@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Runtime controls navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15H76M21 29H76M21 43H76" stroke="#79a396"/><circle cx="39" cy="15" r="5" fill="#d6ad47" fill-opacity=".2" stroke="#b78a2f"/><circle cx="61" cy="29" r="5" fill="#4588ae" fill-opacity=".15" stroke="#4588ae"/><circle cx="45" cy="43" r="5" fill="#419779" fill-opacity=".15" stroke="#419779"/></g>
+</svg>

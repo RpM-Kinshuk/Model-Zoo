@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="164" viewBox="0 0 1200 164" role="img" aria-labelledby="title desc">
+  <title id="title">Open matrix and spectral composition</title>
+  <desc id="desc">Floating matrix tiles dissolve into fine gold, blue, green and lavender ribbons across a transparent canvas. Soft color washes fade into the page, with no enclosing panel or border. Decorative artwork, not measured data.</desc>
+  <style>@media (prefers-color-scheme: dark) { [mask] path { opacity: .78; } }</style>
+  <defs>
+    <radialGradient id="gold"><stop stop-color="#edbd55" stop-opacity=".16"/><stop offset="1" stop-color="#edbd55" stop-opacity="0"/></radialGradient>
+    <radialGradient id="mint"><stop stop-color="#58ac90" stop-opacity=".12"/><stop offset="1" stop-color="#58ac90" stop-opacity="0"/></radialGradient>
+    <linearGradient id="fade"><stop stop-color="white" stop-opacity="0"/><stop offset=".13" stop-color="white"/><stop offset=".84" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+    <mask id="edges"><rect width="1200" height="164" fill="url(#fade)"/></mask>
+  </defs>
+  <ellipse cx="265" cy="76" rx="220" ry="74" fill="url(#gold)"/>
+  <ellipse cx="929" cy="83" rx="218" ry="79" fill="url(#mint)"/>
+  <g mask="url(#edges)" fill="none" stroke-width="1.15">
+    <path d="M24 40C196 12 298 150 454 104S699 24 839 69S1007 116 1176 24" stroke="#bd8d27" opacity="0.28"/>
+    <path d="M24 46C196 21 298 147 454 102S699 28 839 72S1007 111 1176 34" stroke="#4588ae" opacity="0.41"/>
+    <path d="M24 52C196 30 298 144 454 100S699 32 839 75S1007 106 1176 44" stroke="#419779" opacity="0.54"/>
+    <path d="M24 58C196 39 298 141 454 98S699 36 839 78S1007 101 1176 54" stroke="#9b80b3" opacity="0.28"/>
+    <path d="M24 64C196 48 298 138 454 96S699 40 839 81S1007 96 1176 64" stroke="#bd8d27" opacity="0.41"/>
+    <path d="M24 70C196 57 298 135 454 94S699 44 839 84S1007 91 1176 74" stroke="#4588ae" opacity="0.54"/>
+    <path d="M24 76C196 66 298 132 454 92S699 48 839 87S1007 86 1176 84" stroke="#419779" opacity="0.28"/>
+    <path d="M24 82C196 75 298 129 454 90S699 52 839 90S1007 81 1176 94" stroke="#9b80b3" opacity="0.41"/>
+    <path d="M24 88C196 84 298 126 454 88S699 56 839 93S1007 76 1176 104" stroke="#bd8d27" opacity="0.54"/>
+    <path d="M24 94C196 93 298 123 454 86S699 60 839 96S1007 71 1176 114" stroke="#4588ae" opacity="0.28"/>
+    <path d="M24 100C196 102 298 120 454 84S699 64 839 99S1007 66 1176 124" stroke="#419779" opacity="0.41"/>
+    <path d="M24 106C196 111 298 117 454 82S699 68 839 102S1007 61 1176 134" stroke="#9b80b3" opacity="0.54"/>
+  </g>
+  <!-- Discrete matrix entries become less regular as they meet the ribbons. -->
+  <g transform="translate(149 34) rotate(-9 50 40)">
+    <rect x="0" y="0" width="9" height="9" rx="1.4" fill="#bd8d27" opacity="0.75"/>
+    <rect x="19" y="0" width="9" height="9" rx="1.4" fill="#4588ae" opacity="0.67"/>
+    <rect x="38" y="0" width="9" height="9" rx="1.4" fill="#419779" opacity="0.59"/>
+    <rect x="57" y="0" width="6" height="6" rx="1.4" fill="#9b80b3" opacity="0.51"/>
+    <rect x="76" y="0" width="6" height="6" rx="1.4" fill="#bd8d27" opacity="0.43"/>
+    <rect x="95" y="0" width="6" height="6" rx="1.4" fill="#4588ae" opacity="0.35"/>
+    <rect x="0" y="19" width="9" height="9" rx="1.4" fill="#4588ae" opacity="0.75"/>
+    <rect x="19" y="19" width="9" height="9" rx="1.4" fill="#419779" opacity="0.67"/>
+    <rect x="38" y="19" width="9" height="9" rx="1.4" fill="#9b80b3" opacity="0.59"/>
+    <rect x="57" y="19" width="6" height="6" rx="1.4" fill="#bd8d27" opacity="0.51"/>
+    <rect x="76" y="19" width="6" height="6" rx="1.4" fill="#4588ae" opacity="0.43"/>
+    <rect x="95" y="19" width="6" height="6" rx="1.4" fill="#419779" opacity="0.35"/>
+    <rect x="0" y="38" width="9" height="9" rx="1.4" fill="#419779" opacity="0.75"/>
+    <rect x="19" y="38" width="9" height="9" rx="1.4" fill="#9b80b3" opacity="0.67"/>
+    <rect x="38" y="38" width="9" height="9" rx="1.4" fill="#bd8d27" opacity="0.59"/>
+    <rect x="57" y="38" width="6" height="6" rx="1.4" fill="#4588ae" opacity="0.51"/>
+    <rect x="76" y="38" width="6" height="6" rx="1.4" fill="#419779" opacity="0.43"/>
+    <rect x="95" y="38" width="6" height="6" rx="1.4" fill="#9b80b3" opacity="0.35"/>
+    <rect x="0" y="57" width="9" height="9" rx="1.4" fill="#9b80b3" opacity="0.75"/>
+    <rect x="19" y="57" width="9" height="9" rx="1.4" fill="#bd8d27" opacity="0.67"/>
+    <rect x="38" y="57" width="9" height="9" rx="1.4" fill="#4588ae" opacity="0.59"/>
+    <rect x="57" y="57" width="6" height="6" rx="1.4" fill="#419779" opacity="0.51"/>
+    <rect x="76" y="57" width="6" height="6" rx="1.4" fill="#9b80b3" opacity="0.43"/>
+    <rect x="95" y="57" width="6" height="6" rx="1.4" fill="#bd8d27" opacity="0.35"/>
+  </g>
+  <g fill="none" stroke="#bd8d27" stroke-width="1.2" opacity=".65">
+    <path d="M127 34L119 35L131 111L139 110M268 13L276 12L288 88L280 89"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M912 116C930 116 934 28 953 28S975 116 1005 116" stroke="#bd8d27" stroke-width="1.7" opacity=".75"/>
+    <path d="M922 124C955 124 966 53 985 53S1009 124 1037 124" stroke="#4588ae" stroke-width="1.3" opacity=".65"/>
+    <path d="M959 132C996 132 1001 78 1020 78S1042 132 1073 132" stroke="#419779" stroke-width="1.3" opacity=".65"/>
+  </g>
+  <g fill="#bd8d27"><circle cx="953" cy="28" r="3"/><circle cx="838" cy="34" r="2"/><circle cx="809" cy="42" r="1.4"/><circle cx="788" cy="51" r="1"/></g>
+  <g fill="#4588ae" opacity=".6"><circle cx="347" cy="36" r="2"/><circle cx="369" cy="30" r="1.3"/></g>
+  <path d="M580 128Q600 138 620 128" fill="none" stroke="#bd8d27" stroke-opacity=".6"/>
+  <circle cx="600" cy="145" r="2" fill="#c9a044"/>
+</svg>

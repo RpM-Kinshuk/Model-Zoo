@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="134" viewBox="0 0 1200 134" role="img" aria-labelledby="title desc">
+  <title id="title">Open spectral closing composition</title>
+  <desc id="desc">Airy gold, blue, green and lavender curves settle into a quiet center, with scattered matrix tiles and translucent color washes. The background is transparent and unframed. Decorative only.</desc>
+  <style>@media (prefers-color-scheme: dark) { [mask] path { opacity: .72; } }</style>
+  <defs>
+    <radialGradient id="gold"><stop stop-color="#edbd55" stop-opacity=".12"/><stop offset="1" stop-color="#edbd55" stop-opacity="0"/></radialGradient>
+    <radialGradient id="mint"><stop stop-color="#58ac90" stop-opacity=".10"/><stop offset="1" stop-color="#58ac90" stop-opacity="0"/></radialGradient>
+    <linearGradient id="fade"><stop stop-color="white" stop-opacity="0"/><stop offset=".18" stop-color="white"/><stop offset=".82" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+    <mask id="edges"><rect width="1200" height="134" fill="url(#fade)"/></mask>
+  </defs>
+  <ellipse cx="307" cy="69" rx="215" ry="63" fill="url(#gold)"/>
+  <ellipse cx="892" cy="65" rx="216" ry="61" fill="url(#mint)"/>
+  <g mask="url(#edges)" fill="none" stroke-width="1">
+    <path d="M35 19C211 118 345 109 510 72S779 28 1165 11" stroke="#bd8d27" opacity="0.30"/>
+    <path d="M35 27C211 111 345 104 510 70.8S779 32 1165 21" stroke="#4588ae" opacity="0.39"/>
+    <path d="M35 35C211 104 345 99 510 69.6S779 36 1165 31" stroke="#419779" opacity="0.48"/>
+    <path d="M35 43C211 97 345 94 510 68.4S779 40 1165 41" stroke="#9b80b3" opacity="0.30"/>
+    <path d="M35 51C211 90 345 89 510 67.2S779 44 1165 51" stroke="#bd8d27" opacity="0.39"/>
+    <path d="M35 59C211 83 345 84 510 66S779 48 1165 61" stroke="#4588ae" opacity="0.48"/>
+    <path d="M35 67C211 76 345 79 510 64.8S779 52 1165 71" stroke="#419779" opacity="0.30"/>
+    <path d="M35 75C211 69 345 74 510 63.6S779 56 1165 81" stroke="#9b80b3" opacity="0.39"/>
+    <path d="M35 83C211 62 345 69 510 62.4S779 60 1165 91" stroke="#bd8d27" opacity="0.48"/>
+    <path d="M35 91C211 55 345 64 510 61.2S779 64 1165 101" stroke="#4588ae" opacity="0.30"/>
+  </g>
+  <g fill="#bd8d27" opacity=".65"><circle cx="573" cy="101" r="1.5"/><circle cx="600" cy="105" r="3"/><circle cx="627" cy="101" r="1.5"/></g>
+  <g transform="translate(186 35) rotate(12)" fill="#bd8d27" opacity=".55">
+    <rect width="6" height="6" rx="1"/><rect x="15" width="6" height="6" rx="1"/><rect y="15" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/>
+  </g>
+  <g transform="translate(987 75) rotate(-12)" fill="#419779" opacity=".55">
+    <rect width="6" height="6" rx="1"/><rect x="15" width="6" height="6" rx="1"/><rect y="15" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/>
+  </g>
+</svg>

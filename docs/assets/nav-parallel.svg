@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Parallel GPU lanes navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 29H26M26 29V16H37M26 29V43H37" stroke="#b78a2f"/><rect x="38" y="7" width="33" height="18" rx="4" fill="#4588ae" fill-opacity=".1" stroke="#4588ae"/><rect x="38" y="34" width="33" height="18" rx="4" fill="#419779" fill-opacity=".1" stroke="#419779"/><path d="M46 12H62V20H46ZM46 39H62V47H46ZM71 16H83M71 43H83" stroke="#b78a2f"/><circle cx="12" cy="29" r="3" fill="#d6ad47"/></g>
+</svg>

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Connected components navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M30 29H66M48 14V44" stroke="#b78a2f"/><rect x="39" y="6" width="18" height="15" rx="3" fill="#d6ad47" fill-opacity=".15" stroke="#b78a2f"/><rect x="15" y="23" width="22" height="17" rx="3" fill="#4588ae" fill-opacity=".1" stroke="#4588ae"/><rect x="59" y="23" width="22" height="17" rx="3" fill="#419779" fill-opacity=".1" stroke="#419779"/><rect x="39" y="40" width="18" height="12" rx="3" fill="#9b80b3" fill-opacity=".12" stroke="#9b80b3"/></g>
+</svg>

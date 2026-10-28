@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="58" viewBox="0 0 96 58" role="img" aria-labelledby="title">
+  <title id="title">Pinned manifest navigation illustration</title>
+  <ellipse cx="48" cy="29" rx="35" ry="23" fill="#d6ad47" fill-opacity=".045"/>
+  <g fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M28 9H53L64 20V51H28Z" fill="#d6ad47" fill-opacity=".09" stroke="#b78a2f"/><path d="M53 9V20H64M35 27H53M35 34H49M35 41H54" stroke="#488ba6"/><path d="M67 10L73 16L67 22L61 16Z" fill="#d6ad47"/><path d="M67 22V29" stroke="#b78a2f"/></g>
+</svg>
