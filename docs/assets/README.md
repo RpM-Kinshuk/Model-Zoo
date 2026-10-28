@@ -1,7 +1,8 @@
 # README visual system
 
 The README combines an animated system atlas, a compact SVG architecture,
-three explanatory diagrams and an expandable Mermaid routing reference. Graphics describe the implementation;
+two animated detail diagrams, a static lifecycle diagram and an expandable
+Mermaid routing reference. Graphics describe the implementation;
 motion illustrates flow rather than live progress. Informative SVGs have descriptive
 titles and accessible descriptions. All assets are free of scripts and external dependencies.
 
@@ -11,9 +12,12 @@ titles and accessible descriptions. All assets are free of scripts and external 
 | Navigation illustrations: [prepare](nav-prepare.svg), [architecture](nav-architecture.svg), [parallelism](nav-parallel.svg), [controls](nav-control.svg), [spectrum](nav-spectrum.svg), [verification](nav-verify.svg) | Small visual cues for the six chapter links, with all navigation labels kept in native text |
 | [Run atlas](run-atlas.svg) / [animation](run-atlas.gif) | The manifest, dispatcher, isolated workers, spectra, supervision and confirmed resource release |
 | [Architecture](architecture.svg) | Runner, dispatcher and worker ownership; live supervision and the confirmed-cleanup loop |
-| [GPU orchestration](gpu-orchestration.svg) | Two model processes, each with its own GPU pair and layer queue; physical-to-local CUDA mapping |
+| [GPU orchestration](gpu-orchestration.svg) / [animation](gpu-orchestration.gif) | Two model processes, each with its own GPU pair and layer queue; pulses follow dispatch and return paths |
 | [Worker lifecycle](worker-lifecycle.svg) | Monitoring and the order of confirmed termination, cache cleanup and GPU release |
-| [Weight to spectrum](weight-to-spectrum.svg) | A concrete diagonal matrix, its singular values and its squared, sorted spectrum |
+| [Weight to spectrum](weight-to-spectrum.svg) / [animation](weight-to-spectrum.gif) | A concrete diagonal matrix, its singular values and its squared, sorted spectrum; matching outlines trace one component at a time |
+| Chapter markers (`chapter-01.svg` through `chapter-06.svg`) | Gold, blue, green and lavender numerals beside native section titles |
+| Signal cues: [reload](cue-reload.svg), [drain](cue-drain.svg), [stop](cue-stop.svg) | Illustrated controls; signal names remain selectable text |
+| Resource cues: [weights](cue-weights.svg), [RAM](cue-ram.svg), [cache](cue-cache.svg) | Visual distinctions between the three configurable resource bounds |
 | [Chapter thread](chapter-thread.svg) | A decorative, transparent transition between numbered chapters; no runtime meaning |
 | [Compute ornament](chapter-compute.svg) / [spectrum ornament](chapter-spectrum.svg) | Small circuit and spectral motifs distinguish the implementation and measurement chapters |
 
@@ -51,6 +55,13 @@ architecture, GPU scheduling, runtime control and the measurement itself.
 Details summaries pair an action with a short description of what expands.
 Retain the explicit named anchors when changing chapter titles so existing
 section links continue to work.
+
+Colored chapter markers carry the palette through the body without replacing
+the native heading text. Setup steps reuse the navigation illustrations.
+GitHub's native note/tip callouts distinguish preparation, launch defaults and
+research scope. Signal and resource cards keep their labels, values and code
+as native text; small illustrations provide a second visual cue. These cues
+are not buttons or live controls.
 
 Use GitHub-compatible HTML rather than page-level CSS, scripts or background
 attributes. The host controls the page canvas and typography; atmosphere belongs
@@ -103,6 +114,28 @@ python docs/assets/render_run_atlas.py
 The script reads route geometry from the SVG, renders in a temporary directory
 and keeps only `run-atlas.gif`. A fixed palette and incremental frames keep
 the animation small. These are documentation tools, not worker dependencies.
+
+Two detail loops use the same tools and eight-second timing:
+
+```bash
+python docs/assets/render_detail_motion.py
+```
+
+The renderer imports the path-sampling helpers from `render_run_atlas.py`.
+GPU pulse routes are invisible, named paths inside `gpu-orchestration.svg`.
+Pulses illustrate thread dispatch and collection, not a benchmark, an exact
+execution order or available capacity. Model C stays pending throughout.
+Spectrum highlights follow named matrix-entry rectangles, singular-value bars
+and eigenvalue points in `weight-to-spectrum.svg`. The correspondence applies
+to this diagonal example; it is not a general entrywise decomposition rule.
+Numbers and labels never change or disappear. Gentle outlines and small pulses
+carry the motion; entire panels do not flash.
+
+Every animated figure has a reduced-motion `picture` source and an adjacent
+static-view link. A compact index below the navigation links to all three static
+views. Preserve these alternatives even if the renderer or animation changes.
+The new GIFs use fixed palettes and incremental frames; their combined size is
+approximately 310 KB. Only final GIFs are retained after generation.
 
 ## Maintenance
 

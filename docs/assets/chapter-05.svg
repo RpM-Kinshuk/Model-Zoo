@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44" role="img" aria-labelledby="title desc">
+  <title id="title">Chapter 05</title><desc id="desc">Colored chapter marker 05.</desc>
+  <circle cx="22" cy="22" r="19.5" fill="#eee5f8" stroke="#8766ad" stroke-opacity=".35"/>
+  <path d="M7 16A16 16 0 0 1 27 7" fill="none" stroke="#8766ad" stroke-width="1.6"/>
+  <circle cx="35" cy="33" r="2.5" fill="#8766ad"/>
+  <text x="22" y="28" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="700" fill="#8766ad">05</text>
+</svg>

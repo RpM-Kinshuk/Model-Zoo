@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Selected weight budget illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #e7bb5c; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#fff1bf" fill-opacity=".38"/>
+  <g fill="none" stroke="#b48519" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M25 13L53 7L79 18L51 26ZM25 23L51 36L79 28M25 33L51 46L79 38"/><path d="M51 26V46" opacity=".5"/></g>
+</svg>

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Stop with cleanup illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #bb9add; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#eee5f8" fill-opacity=".38"/>
+  <g fill="none" stroke="#8766ad" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="25" y="16" width="24" height="24" rx="5"/><path d="M34 24H40V31H34Z" fill="#8766ad"/><path d="M54 29H65M69 29L74 34L85 21"/></g>
+</svg>

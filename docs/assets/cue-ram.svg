@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Worker memory budget illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #70b5e3; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#dfedfa" fill-opacity=".38"/>
+  <g fill="none" stroke="#3476aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="20" y="15" width="68" height="29" rx="4"/><path d="M29 22H39V34H29ZM45 22H55V34H45ZM61 22H71V34H61ZM30 44V49M42 44V49M54 44V49M66 44V49M78 44V49"/></g>
+</svg>

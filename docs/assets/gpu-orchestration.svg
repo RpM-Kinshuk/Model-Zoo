@@ -7,6 +7,17 @@
     <marker id="arrow-blue" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#006ce4" stroke-width="1.3"/></marker>
     <marker id="arrow-green" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#00693e" stroke-width="1.3"/></marker>
   </defs>
+  <!-- Invisible centerlines used by render_detail_motion.py; labels stay static. -->
+  <g id="motion-routes" fill="none" stroke="none">
+    <path id="a-to-0" d="M570 206H602C602 206 602 180 602 180H639"/>
+    <path id="a-to-1" d="M570 206H602C602 206 602 232 602 232H639"/>
+    <path id="b-to-0" d="M570 400H602C602 400 602 374 602 374H639"/>
+    <path id="b-to-1" d="M570 400H602C602 400 602 426 602 426H639"/>
+    <path id="a-from-0" d="M878 180H899C899 180 899 206 899 206H919"/>
+    <path id="a-from-1" d="M878 232H899C899 232 899 206 899 206H919"/>
+    <path id="b-from-0" d="M878 374H899C899 374 899 400 899 400H919"/>
+    <path id="b-from-1" d="M878 426H899C899 426 899 400 899 400H919"/>
+  </g>
   <rect x="1" y="1" width="1198" height="530" rx="16" fill="url(#paper)" stroke="#dbcfaa"/>
   <rect x="1" y="1" width="1198" height="530" rx="16" fill="url(#grid)"/>
   <g fill="none" stroke="#d3ac4d" stroke-width="1" opacity="0.35"><path d="M858 20C972 20 971 83 1136 83"/><path d="M873 20C987 20 986 71 1151 71"/><path d="M888 20C1002 20 1001 59 1166 59"/></g>

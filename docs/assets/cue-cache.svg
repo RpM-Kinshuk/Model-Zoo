@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Private cache budget illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #78c8af; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#dff1e9" fill-opacity=".38"/>
+  <g fill="none" stroke="#087b65" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 20H45L51 14H79V44H23Z"/><path d="M29 20V12H45L51 18M36 29H67M36 35H59"/><circle cx="77" cy="42" r="8" fill="#dff1e9"/><path d="M73 42L76 45L81 38"/></g>
+</svg>

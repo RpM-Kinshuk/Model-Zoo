@@ -28,13 +28,14 @@ Illustrative concurrent run · <a href="docs/assets/run-atlas.svg">View without 
 </tr>
 </table>
 
-<p align="center"><sub>A short path through the system. Expand any section for the operational detail.</sub></p>
+<p align="center"><sub>A short path through the system. Expand any section for the operational detail.<br>
+Static views: <a href="docs/assets/run-atlas.svg">system atlas</a> · <a href="docs/assets/gpu-orchestration.svg">GPU flow</a> · <a href="docs/assets/weight-to-spectrum.svg">matrix spectrum</a></sub></p>
 
 <img src="docs/assets/chapter-thread.svg" width="100%" alt="">
 
 <a name="start-a-run"></a>
 
-## 01 · Start a run
+## <img src="docs/assets/chapter-01.svg" width="34" height="34" alt="01"> Start a run
 
 **Prepare → review → launch.** Begin with a small list and the default single worker.
 
@@ -83,7 +84,7 @@ An importable backend does not guarantee a checkpoint can be measured.
 
 </details>
 
-### Prepare the list
+### <img src="docs/assets/nav-prepare.svg" width="38" alt=""> Prepare the list
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -91,6 +92,7 @@ python esd_experiment/run_experiment.py \
   --output_dir analysis_runs/phase2/my_run --limit 5 --prepare_only
 ```
 
+> [!NOTE]
 > **Review before launch** · Check the generated `models.csv` for pins, config
 > labels, weight budget and ready/held status. Preparation reads metadata and
 > small JSON files, not weights.
@@ -114,7 +116,7 @@ prefer pinned config evidence over names.
 
 </details>
 
-### Launch the run
+### <img src="docs/assets/nav-parallel.svg" width="38" alt=""> Launch the run
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -132,7 +134,7 @@ python esd_experiment/run_experiment.py \
 
 <a name="architecture"></a>
 
-## 02 · Architecture
+## <img src="docs/assets/chapter-02.svg" width="34" height="34" alt="02"> Architecture
 
 **Plan → own resources → execute.** Supervision stays active through cleanup.
 
@@ -156,16 +158,22 @@ python esd_experiment/run_experiment.py \
 
 <a name="gpu-allocation-and-parallelism"></a>
 
-## 03 · GPU allocation and parallelism
+## <img src="docs/assets/chapter-03.svg" width="34" height="34" alt="03"> GPU allocation and parallelism
 
 **Across models. Within a model.** Separate processes own devices; layer threads share the work.
 
-![Two isolated model workers each reserve a GPU pair. Cost-sorted layer queues feed GPU-bound threads. Physical GPUs 2 and 3 become local cuda:0 and cuda:1 inside worker B; a third model waits.](docs/assets/gpu-orchestration.svg)
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/gpu-orchestration.svg">
+  <img src="docs/assets/gpu-orchestration.gif" width="100%" alt="Two isolated workers each reserve a GPU pair. Moving pulses follow layer dispatch to fixed-device GPU threads and return paths to ordered metrics. Model C waits for capacity. This illustrates flow, not measured speed.">
+</picture>
+
+<p align="center"><sub>Pulses follow layer dispatch and return paths; timing is illustrative.<br><a href="docs/assets/gpu-orchestration.svg">View without motion</a></sub></p>
 
 | Pool → | Devices per model → | Models at once |
 | --- | --- | --- |
 | `--gpus 0 1 2 3` | `--num_gpus_per_job 2` | `--max_concurrent_jobs 2` |
 
+> [!TIP]
 > **Start small** · The launch default is **one worker, one GPU per model**.
 > The figure shows a larger configuration. Admission requires two idle checks,
 > five seconds apart: no GPU processes and memory below 500 MB.
@@ -205,21 +213,25 @@ on one selected device. Explicit `--analysis_source checkpoint` requires
 
 <a name="runtime-controls-and-cache-lifecycle"></a>
 
-## 04 · Runtime controls and cache lifecycle
+## <img src="docs/assets/chapter-04.svg" width="34" height="34" alt="04"> Runtime controls and cache lifecycle
 
 **A live run stays steerable.** Change policy, drain the queue or stop with supervised cleanup.
 
 ![Load, analyze and finalize run under heartbeat, stage, RAM and cache monitoring. Confirmed process-group exit precedes private-cache removal and GPU release.](docs/assets/worker-lifecycle.svg)
 
-| Reload policy ↻ | Finish active work → | Stop and clean up ■ |
-| --- | --- | --- |
-| `SIGHUP` | `SIGUSR1` | `SIGINT` / `SIGTERM` |
+<table width="100%">
+<tr>
+<td width="33%" align="center"><img src="docs/assets/cue-reload.svg" width="80" alt=""><br><strong>Reload policy</strong><br><code>SIGHUP</code></td>
+<td width="33%" align="center"><img src="docs/assets/cue-drain.svg" width="80" alt=""><br><strong>Finish active work</strong><br><code>SIGUSR1</code></td>
+<td width="33%" align="center"><img src="docs/assets/cue-stop.svg" width="80" alt=""><br><strong>Stop and clean up</strong><br><code>SIGINT</code> / <code>SIGTERM</code></td>
+</tr>
+</table>
 
 <table width="100%">
 <tr>
-<td width="33%" align="center"><sub>SELECTED WEIGHTS</sub><br><strong>6 GiB</strong><br><sub>Includes adapter-base weights</sub></td>
-<td width="33%" align="center"><sub>WORKER RAM</sub><br><strong>16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
-<td width="33%" align="center"><sub>PRIVATE CACHE</sub><br><strong>12 GiB</strong><br><sub>Sampled allocated disk usage</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-weights.svg" width="80" alt=""><br><sub>SELECTED WEIGHTS</sub><br><strong>6 GiB</strong><br><sub>Includes adapter-base weights</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-ram.svg" width="80" alt=""><br><sub>WORKER RAM</sub><br><strong>16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-cache.svg" width="80" alt=""><br><sub>PRIVATE CACHE</sub><br><strong>12 GiB</strong><br><sub>Sampled allocated disk usage</sub></td>
 </tr>
 </table>
 
@@ -298,11 +310,16 @@ Allow signal-triggered cleanup to finish; avoid killing the runner with SIGKILL.
 
 <a name="measurement-scope"></a>
 
-## 05 · Measurement scope
+## <img src="docs/assets/chapter-05.svg" width="34" height="34" alt="05"> Measurement scope
 
 **Weights → singular values → spectrum.** Explicit matrix coverage gives the numbers context.
 
-![An illustrative diagonal matrix with weights 4, 3, 2 and 1 becomes singular values 4, 3, 2 and 1, then the sorted squared spectrum 1, 4, 9 and 16.](docs/assets/weight-to-spectrum.svg)
+<picture>
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/weight-to-spectrum.svg">
+  <img src="docs/assets/weight-to-spectrum.gif" width="100%" alt="For the diagonal matrix with entries 4, 3, 2 and 1, matching highlights connect each entry to its singular value and squared spectral value. The sorted spectrum stays 1, 4, 9 and 16 throughout.">
+</picture>
+
+<p align="center"><sub>Matching highlights trace one component of this diagonal example; the values stay fixed.<br><a href="docs/assets/weight-to-spectrum.svg">View without motion</a></sub></p>
 
 | Decompose | Compute | Fit the tail |
 | --- | --- | --- |
@@ -422,7 +439,7 @@ coverage in a fresh directory.
 
 <a name="verification-and-maintenance"></a>
 
-## 06 · Verification and maintenance
+## <img src="docs/assets/chapter-06.svg" width="34" height="34" alt="06"> Verification and maintenance
 
 **Check the installation. Explore the implementation.**
 
@@ -461,6 +478,7 @@ The diagrams are editable, self-contained assets. Their
 
 </details>
 
+> [!NOTE]
 > **Research scope** · Collection supports bounded research runs; 50,000-model
 > operation is not yet proven. Matrix support is not universal architecture
 > support, and spectral descriptors require separate validation for model-quality claims.

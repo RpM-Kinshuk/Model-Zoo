@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Reload policy illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #e7bb5c; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#fff1bf" fill-opacity=".38"/>
+  <g fill="none" stroke="#b48519" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M33 34A14 14 0 1 1 57 19M57 10V21H46"/><path d="M33 34L37 39M62 35H82M68 29V41"/><circle cx="74" cy="35" r="3" fill="#b48519"/></g>
+</svg>

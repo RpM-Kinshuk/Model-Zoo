@@ -16,10 +16,10 @@
     <text x="49" y="134" font-size="16" font-weight="700" letter-spacing="1" fill="#003262">01 / WEIGHTS</text>
     <text x="288" y="135" font-size="18" font-style="italic" fill="#52647a">W</text>
     <path d="M95 156H85V295H95M305 156H315V295H305" fill="none" stroke="#7f95ad" stroke-width="2"/>
-    <rect x="105" y="160" width="41" height="28" rx="4" fill="#f2bd3d"/>
-    <rect x="155" y="194" width="41" height="28" rx="4" fill="#006ce4"/>
-    <rect x="205" y="228" width="41" height="28" rx="4" fill="#69b49a"/>
-    <rect x="255" y="262" width="41" height="28" rx="4" fill="#e3daf6"/>
+    <rect id="weight-4" x="105" y="160" width="41" height="28" rx="4" fill="#f2bd3d"/>
+    <rect id="weight-3" x="155" y="194" width="41" height="28" rx="4" fill="#006ce4"/>
+    <rect id="weight-2" x="205" y="228" width="41" height="28" rx="4" fill="#69b49a"/>
+    <rect id="weight-1" x="255" y="262" width="41" height="28" rx="4" fill="#e3daf6"/>
     <g font-size="18" text-anchor="middle">
       <text x="125" y="181" fill="#533d09">4</text><text x="175" y="181" fill="#92a2b5">0</text><text x="225" y="181" fill="#92a2b5">0</text><text x="275" y="181" fill="#92a2b5">0</text>
       <text x="125" y="215" fill="#92a2b5">0</text><text x="175" y="215" fill="#fff">3</text><text x="225" y="215" fill="#92a2b5">0</text><text x="275" y="215" fill="#92a2b5">0</text>
@@ -33,10 +33,10 @@
     <g font-size="17" fill="#52647a">
       <text x="455" y="178">s₁</text><text x="455" y="213">s₂</text><text x="455" y="248">s₃</text><text x="455" y="283">s₄</text>
     </g>
-    <rect x="489" y="159" width="207" height="24" rx="4" fill="#f2bd3d"/>
-    <rect x="489" y="194" width="155" height="24" rx="4" fill="#006ce4"/>
-    <rect x="489" y="229" width="104" height="24" rx="4" fill="#69b49a"/>
-    <rect x="489" y="264" width="52" height="24" rx="4" fill="#e3daf6"/>
+    <rect id="singular-4" x="489" y="159" width="207" height="24" rx="4" fill="#f2bd3d"/>
+    <rect id="singular-3" x="489" y="194" width="155" height="24" rx="4" fill="#006ce4"/>
+    <rect id="singular-2" x="489" y="229" width="104" height="24" rx="4" fill="#69b49a"/>
+    <rect id="singular-1" x="489" y="264" width="52" height="24" rx="4" fill="#e3daf6"/>
     <g font-size="18" font-weight="700" fill="#003262">
       <text x="710" y="178">4</text><text x="657" y="213">3</text><text x="606" y="248">2</text><text x="555" y="283">1</text>
     </g>
@@ -50,7 +50,7 @@
     <path d="M969 288V263" stroke="#39967b" stroke-width="3"/>
     <path d="M1036 288V232" stroke="#006ce4" stroke-width="3"/>
     <path d="M1103 288V189" stroke="#e2aa28" stroke-width="3"/>
-    <circle cx="902" cy="281" r="5" fill="#9272be"/><circle cx="969" cy="263" r="5" fill="#39967b"/><circle cx="1036" cy="232" r="5" fill="#006ce4"/><circle cx="1103" cy="189" r="5" fill="#e2aa28"/>
+    <circle id="eigen-1" cx="902" cy="281" r="5" fill="#9272be"/><circle id="eigen-2" cx="969" cy="263" r="5" fill="#39967b"/><circle id="eigen-3" cx="1036" cy="232" r="5" fill="#006ce4"/><circle id="eigen-4" cx="1103" cy="189" r="5" fill="#e2aa28"/>
     <g font-size="18" text-anchor="middle" font-weight="700" fill="#004b2d">
       <text x="902" y="266">1</text><text x="969" y="248">4</text><text x="1036" y="217">9</text><text x="1103" y="174">16</text>
     </g>

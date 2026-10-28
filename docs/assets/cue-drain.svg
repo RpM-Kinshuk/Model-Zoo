@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="58" viewBox="0 0 108 58" role="img" aria-labelledby="title">
+  <title id="title">Drain the queue illustration</title>
+  <style>@media (prefers-color-scheme: dark) { ellipse { fill-opacity: .08; } g { stroke: #78c8af; } }</style>
+  <ellipse cx="54" cy="29" rx="48" ry="27" fill="#dff1e9" fill-opacity=".38"/>
+  <g fill="none" stroke="#087b65" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="22" y="21" width="9" height="16" rx="2"/><rect x="36" y="21" width="9" height="16" rx="2"/><rect x="50" y="21" width="9" height="16" rx="2"/><path d="M64 29H85M78 22L85 29L78 36"/></g>
+</svg>
