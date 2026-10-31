@@ -1,6 +1,14 @@
 #!/bin/bash
 set -uo pipefail
 
+# Load private credentials relative to this script, regardless of working directory.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    source "$SCRIPT_DIR/.env"
+fi
+: "${HF_TOKEN:?Set HF_TOKEN in Model-Zoo/.env or export it before running}"
+export HF_TOKEN
+
 # ------------------ Signal-safe background cleaner management -----------------
 cleanup() {
     echo "Caught signal or exit. Cleaning up process group..."
@@ -27,20 +35,18 @@ trap cleanup EXIT INT TERM
 CACHE_DIR="/scratch/kinshuk/.cache"
 export OMP_NUM_THREADS=1
 export MKL_THREADING_LAYER=GNU
-: "${HF_TOKEN:?Please export HF_TOKEN in your shell before running (do not hardcode it in run_script.sh)}"; export HF_TOKEN
 export HF_HOME="$CACHE_DIR/huggingface"
 export TRANSFORMERS_CACHE="$CACHE_DIR/huggingface"
 export WORKER_CACHE_ROOT="$CACHE_DIR/hf_worker_cache"
 
 # ------------------------------------ Paths -----------------------------------
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 echo "Project Directory: $PROJECT_ROOT"
 
-OUTPUT_DIR="$PROJECT_ROOT/results"
+OUTPUT_DIR="$PROJECT_ROOT/ablation"
 mkdir -p "$OUTPUT_DIR" || true
 MODEL_LIST="$SCRIPT_DIR/data/curated/model_zoo_phase2.csv"
-# MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
+MODEL_LIST="$SCRIPT_DIR/data/ablation/ablation_selected.csv"
 GPUS=(0 1 2 3 4 5 6 7)
 
 
@@ -58,13 +64,13 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --save_eigs \
   --gpu_memory_threshold 500 \
   --max_check 1 \
-  --max_concurrent_jobs 1 \
+  --max_concurrent_jobs 3 \
   --worker_cache_root "$WORKER_CACHE_ROOT" \
   --stale_process_action terminate \
   --heartbeat_timeout_seconds 7200 \
   --stage_timeout_seconds load=1800,analyze=28800,save=1800,default=14400 \
-  --termination_grace_seconds 30 \
-  --skip_failed
+  --termination_grace_seconds 30
+  # --skip_failed
 PY_EXIT_CODE=$?
 # set -e
 
