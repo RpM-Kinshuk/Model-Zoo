@@ -9,4 +9,4 @@ requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 include = ["evidence", "evidence.*", "zoo", "zoo.*"]
-exclude = ["evidence.tests", "evidence.tests.*"]
+exclude = ["evidence.tests", "evidence.tests.*", "zoo.tests", "zoo.tests.*"]

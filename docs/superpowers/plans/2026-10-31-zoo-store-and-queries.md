@@ -73,13 +73,21 @@ input. File names follow the extractor's "Artifact names" rule.
   <zoo>/zoo.json               # ZOO_VERSION, build time, inputs with sha256, row counts
   <zoo>/models.parquet  views.parquet  coverage.parquet
   <zoo>/lineage.parquet scores.parquet predictions.parquet
-  <zoo>/retrieval/<arch_signature>.npy    # float16 [n_models, RETRIEVAL_VIEWS * 1024]
-  <zoo>/retrieval/<arch_signature>.json   # {"models": [...keys in row order], "views": [...names]}
+  <zoo>/retrieval/<arch_signature>.npy    # float16 [n_models, n_selected_views * 1024], at most 32 views
+  <zoo>/retrieval/<arch_signature>.json   # model/view order, presence, coordinates, missing counts and settings
   ```
 
-- **Atomic build.** The build writes `<zoo>.building/`, renames any existing
-  `<zoo>` to `<zoo>.previous/`, renames the new directory into place, then
-  deletes `.previous`. An interrupted build leaves the old zoo intact.
+- **Atomic build.** Write all artifacts into a private staging generation,
+  then publish an immutable generation through a relative symlink at `<zoo>`.
+  Replace that symlink atomically only after the generation is complete.
+  Readers resolve it once, so one read uses one complete generation. Failed
+  builds remove only their own unpublished data; prior generations remain
+  intact. Retention/cleanup is explicit rather than deleting live readers'
+  generations. Refuse unowned existing outputs rather than migrate them
+  destructively. This corrects the crash window in the original two-rename
+  directory swap; the shared data filesystem does not support directory
+  exchange (checked 2026-11-01). The table/artifact layout below `<zoo>` is
+  unchanged.
 - **Deterministic and rebuildable.** The same inputs give identical table
   contents: rows are sorted by `model_key`, then `view_index`. Fingerprint and
   spectra paths are stored relative to `--data_root`.
@@ -93,8 +101,10 @@ input. File names follow the extractor's "Artifact names" rule.
 - **Retrieval constants.**
   - `RETRIEVAL_VIEWS = 32`. Retrieval uses the top-left 32×32 block of each
     view's sketch, flattened, unit-normalized per view, and stored as float16.
-  - The cosine of two concatenated rows, divided by `RETRIEVAL_VIEWS`, equals
-    the mean per-view cosine.
+  - The dot product of two concatenated rows, divided by the number of
+    compatible nonzero views present in both models, equals their mean
+    per-view cosine. Do not normalize the whole concatenated row and divide
+    again. Missing or unaligned views do not enter the denominator.
   - **Weight similarity compares only models with the same architecture
     signature.** Other models are never ranked by weights.
   - **Retrieval uses T1 fingerprints only.** A T2 sketch covers the full
@@ -390,7 +400,14 @@ def test_duplicates_grouped(tables):
     It writes `retrieval/<sig>.npy` and `.json` for every signature that has at
     least 2 models with a T1 fingerprint. T2-only models are left out (Global
     Constraints). Views a model lacks become zero blocks, and their count is
-    recorded in the `.json`.
+    recorded in the `.json`. The JSON also records per-model `presence` and
+    `coordinates` (`[geometry, r0, r1, n_cols]` or null per selected view),
+    `missing_counts`, `sketch_seed`, `row_block`, and `evidence_version`.
+    These masks exclude unaligned blocks pairwise, so vocabulary growth does
+    not discard a model's aligned layer views. The 90% threshold uses the
+    complete eligible T1 model group, including models with no view rows.
+    Successful rebuilds remove obsolete generated signature indexes, while
+    retaining unrelated files.
   - `nearest(zoo_dir: Path, key: str, sig: str, k: int) -> list[tuple[str, float]]`.
     It returns other models with their mean per-view cosine (concatenated dot
     product divided by the number of views present in both), using exact
@@ -455,8 +472,10 @@ def test_other_arch_not_in_same_matrix(tables, staged_zoo):
       retrieval cosine only picks the candidates.
     - `estimand = "same_root"`, `evidence_tier = "detected"`, and
       `evidence = "sketch_similarity"`.
-    - With `null`, `p_value` comes from the null quantiles and
-      `calibrated = True`. Without it, `p_value` is NaN and `calibrated = False`.
+    - With compatible `null`, `p_value` comes from the extractor's canonical
+      inclusive empirical tail and `calibrated = True`. Invalid/mismatched
+      calibration cannot produce a calibrated edge. Without it, `p_value` is
+      NaN and `calibrated = False`.
     - These p-values are for display. Their floor, `1 / (n + 1)`, cannot
       support per-query error control over a large pool; the P1 engine's
       calibrated edges replace them.
@@ -464,6 +483,10 @@ def test_other_arch_not_in_same_matrix(tables, staged_zoo):
     - It concatenates the tables, appends the P1 engine's Parquet if given, and
       drops exact duplicates of
       `(child_key, parent_key, estimand, evidence)`.
+    - External P1 rows take precedence on these collisions, preserving their
+      source method, calibration and measurements instead of retaining v0
+      display-only evidence. Other input collisions use deterministic first
+      occurrence. Parent, ancestor and same_root remain separate estimands.
     - `method_version` is `"zoo-v0"` for the edges built here.
 
 - [ ] **Step 1: Write the failing tests**
@@ -489,9 +512,11 @@ def test_similarity_edges_uncalibrated_then_calibrated(staged_zoo, tables, unive
 ```
 
 - [ ] **Step 2:** Run `python -m pytest zoo/tests/test_lineage.py -q`. Expected: FAIL.
-- [ ] **Step 3:** Implement `zoo/lineage.py`. The p-value is the upper-tail
-  fraction of `null_quantiles` at or above the observed cosine, floored at
-  `1 / (len(null_quantiles) + 1)`.
+- [ ] **Step 3:** Implement `zoo/lineage.py`. Use the approved extractor
+  calibration rule: `(1 + n_pairs * mean(null_quantiles >= score)) /
+  (n_pairs + 1)`. Ties are inclusive; the floor is `1 / (n_pairs + 1)`,
+  independently of the number of stored quantiles. The score remains the
+  shared `pair_similarity` median at the calibration's sketch size.
 - [ ] **Step 4:** Run the tests. Expected: PASS.
 - [ ] **Step 5:** Commit: `git commit -m "zoo: v0 lineage edges from metadata, shared tensors and sketch similarity"`
 
@@ -509,8 +534,9 @@ def test_similarity_edges_uncalibrated_then_calibrated(staged_zoo, tables, unive
   `merge_edges`.
 - Produces:
   - `build_zoo(manifests: Path, fingerprints: list[Path], out: Path, data_root: Path, frame: Path | None = None, score_tables: Sequence[pd.DataFrame] = (), lineage_edges: Path | None = None, null: Path | None = None) -> Path`.
-    It runs these steps into `<out>.building/`, then does the atomic swap from
-    Global Constraints:
+    It runs these steps in its own private staging generation, then publishes
+    the complete generation through the atomic pointer swap in Global
+    Constraints:
     1. tables;
     2. retrieval;
     3. lineage;
@@ -550,7 +576,12 @@ def test_interrupted_build_keeps_previous(universe, tmp_path, monkeypatch):
   - `zoo.json` records `zoo_version`, the input file sha256 values, row counts,
     and the build time. Time is the only non-deterministic field, and it lives
     only in `zoo.json`.
-  - On any exception, delete `.building` and re-raise.
+  - Before publication is attempted, exception cleanup removes only this
+    call's unpublished data. Once pointer replacement is attempted, retain
+    the completed generation even on error: the replacement may have committed
+    before an interrupt was delivered. A possible orphan is safer than deleting
+    a published snapshot. Remove only the private temporary pointer and re-raise;
+    current/prior generations remain intact. Readers resolve the output once.
 - [ ] **Step 4:** Run the tests. Expected: PASS.
 - [ ] **Step 5:** Commit: `git commit -m "zoo: atomic deterministic zoo build"`
 
