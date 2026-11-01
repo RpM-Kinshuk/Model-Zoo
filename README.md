@@ -435,6 +435,15 @@ coverage in a fresh directory.
 
 </details>
 
+## Weight evidence (range reads)
+
+Fingerprint checkpoints without loading a model. T1 reads row blocks for lineage
+comparisons; T2 retains full spectra for the database. Both accept pinned Hub
+repositories and local checkpoints.
+
+See the [weight evidence guide](docs/operations/evidence.md) for supported formats,
+coverage, quick-start commands and the pilot runbook.
+
 <img src="docs/assets/chapter-spectrum.svg" width="100%" alt="">
 
 <a name="verification-and-maintenance"></a>

@@ -595,9 +595,11 @@ def test_gd_rule_on_float32_noise():
       `expert_not_sampled`.
     - `status = "duplicate"` (set in Task 6): `reason` is
       `duplicate_of:<view name>`.
-  - `decode_view(view: View, read: Callable[[str, slice | None], torch.Tensor], config: dict) -> torch.Tensor`,
-    which returns the float32 matrix of the view, or its row block when given a
-    row slice.
+  - `decode_view(view: View, read: Callable[[str, slice | None], torch.Tensor], config: dict, row_slice: slice | None = None) -> torch.Tensor`,
+    which returns the float32 matrix of the view, or the requested logical
+    row slice. Existing three-argument calls return the whole view. For FP8
+    blocks, retain full-grid coordinates: read the covering scale rows and
+    remove the initial within-block row offset after expansion.
   - `NEVER_MATRIX_SUFFIXES = ("_scale", "_scale_inv", "_scale_2", ".scale", "scales", "qzeros", "g_idx", "absmax", "quant_map", "SCB", "input_scale", "_bias", ".alpha", "position_ids", "num_batches_tracked")`.
   - `component_of(name: str, file: str) -> str`: the file's subfolder (if any)
     plus the name prefix up to the first numeric segment. For example,
@@ -759,7 +761,10 @@ def test_deepseek_fp4_experts_and_e8m0_fp8():
       `base_model.model.`, and no `adapter_config.json`, as many System One
       checkpoints ship) pair with the base tensor after stripping that prefix.
       The scale is unknown, so it is set to 1.0 and recorded as
-      `lora_scale_unknown`; cosines are unaffected.
+      `lora_scale_unknown`; cosines are unaffected. When an embedded update
+      and its base would share a view name, keep the base name and append
+      `[lora]` to the update (repeating the suffix only if needed for uniqueness).
+      Standalone adapter view names remain canonical.
     - `hada_`, `lokr_`, and DoRA magnitude tensors are recorded as
       `unsupported_adapter_type`.
   - **Matrices:**
@@ -837,7 +842,10 @@ def test_deepseek_fp4_experts_and_e8m0_fp8():
       `total` parameters, and `context_length`, plus the quantization types
       parsed from the `.gguf` file names (for example `Q4_K_M` or `IQ2_S`).
       This is free T0 metadata; reading GGUF tensors waits for zoo v1;
-    - `evidence_version`.
+    - `evidence_version`; optional `source = {"zoo_data_path": "<relative path>"}`
+      for a named local checkpoint whose physical location differs from
+      `$ZOO_DATA/<repo_id>`. Resolve it against the current `ZOO_DATA`; never
+      persist an absolute physical path for a named checkpoint.
   - `select_file_set(filenames: list[str]) -> tuple[list[str], list[dict]]`.
   - `write_manifest(manifest: dict, out_dir: Path) -> Path`, an atomic write
     to `<safe>.manifest.json`.
@@ -921,6 +929,10 @@ def test_manifest_rejects_unpinned(fake_api, fake_reader):
   **Other rules:**
   - Read `config.json` and `adapter_config.json` from the hub at the pinned
     commit (8 MiB cap, as in `checkpoint_tensors`).
+  - For diffusers repositories with `model_index.json`, tensor names from
+    component files are `<component_folder>/<stored_name>` consistently in
+    tensors, coverage, views, and view sources. Original files/byte offsets
+    are retained. Root/HF shard tensor names stay unchanged.
   - A repository is an adapter if `adapter_config.json` exists **or** any
     tensor name matches a LoRA family.
   - GGUF-only, `.bin`-only, and ONNX-only repositories get T0 metadata only
@@ -966,9 +978,20 @@ def test_manifest_rejects_unpinned(fake_api, fake_reader):
       `fingerprint_model(..., "t1")`.
     - `identity` must contain `repo_id` and `revision`; otherwise it raises
       `ValueError`. The caller chooses `out_path`.
-  - **Block hash:** sha256 over the row block's bytes in the stored dtype for
-    `plain` views (for `fingerprint_tensors`, the tensor's own dtype), and over
-    the float32 decoded block for every other decode.
+  - **Block hash (v1):**
+    `sha256(b"evidence-block-v1\0" + dtype.encode("ascii") + b"\0" + payload)`.
+    For `plain` stored-tensor views (excluding `lora_product`), `payload` is
+    the contiguous row block's stored bytes
+    and `dtype` is its canonical safetensors dtype name (for example `BF16`
+    or `F16`); `fingerprint_tensors` uses the equivalent name for the input
+    tensor's dtype. For every decoded or derived view, including
+    `lora_product`, `payload` is the float32 decoded block's bytes and
+    `dtype` is `F32`. This prevents equal BF16/F16 byte
+    strings from falsely establishing identical values. Hash equality is
+    compared only for aligned block coordinates and compatible shapes.
+    This is the initial approved v1 definition, before the Task 6 production
+    writer is implemented. Regenerate hashes in pre-freeze synthetic fixtures
+    as needed.
   - `load_fingerprint(path: Path) -> Fingerprint`, a dataclass with fields
     `names`, `geometry`, `component`, `rows`, `shape`, `sketch`, `sha256`,
     `spectra: list[np.ndarray]`, `delta: dict[str, np.ndarray]` (keys
@@ -980,8 +1003,11 @@ def test_manifest_rejects_unpinned(fake_api, fake_reader):
         zero-padded to k × k;
       - `rows` i64 `[n, 2]` (the block's `r0` and `r1`);
       - `shape` i64 `[n, 2]` (the view's full matrix shape);
-      - `spectrum_values` f32 and `spectrum_offsets` i64 (the concatenated
-        block spectra, T1 only);
+      - `spectrum_values` f32 and `spectrum_offsets` i64 `[n + 1]` (the
+        concatenated block spectra, T1 only); values are sorted squared singular
+        values (ESD eigenvalues), matching the collector's T2 `/eigs` convention.
+        Offsets start at zero, are nondecreasing, and end at
+        `len(spectrum_values)`;
       - `delta_scalars` f32 `[n, 3]` (`frac_identical`, `rel_update_norm`,
         `rank`, with `rank = −1` when there is no delta);
       - `delta_top_sv` f32 `[n, 16]`.
@@ -1059,6 +1085,16 @@ def test_fingerprint_tensors_matches_file_path(local_manifest, tmp_path):
     b = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path))
     i, j = a.names.index("model.layers.0.self_attn.q_proj.weight"), b.names.index("model.layers.0.self_attn.q_proj.weight")
     assert sketch_cosine(a.sketch[i], b.sketch[j]) > 0.9999
+
+def test_block_hash_distinguishes_stored_dtype(tmp_path):
+    bits = torch.full((32, 16), 0x3F80, dtype=torch.int16)
+    identity = {"repo_id": "fixture/typed-hash", "revision": "local:" + "0" * 64}
+    a = load_fingerprint(fingerprint_tensors(
+        [("weight", bits.view(torch.bfloat16))], tmp_path / "bf16.safetensors", identity))
+    b = load_fingerprint(fingerprint_tensors(
+        [("weight", bits.view(torch.float16))], tmp_path / "f16.safetensors", identity))
+    assert a.names == b.names == ["weight"]
+    assert a.sha256[0] != b.sha256[0]  # Equal bytes encode 1.0 versus 1.875.
 
 def test_atomic_write_leaves_no_partial_file(local_manifest, tmp_path, monkeypatch):
     monkeypatch.setattr("evidence.fingerprint.two_sided_sketch", Mock(side_effect=RuntimeError))
@@ -1303,6 +1339,13 @@ def test_tokens_never_written(run_dir, models_csv, monkeypatch):
 
 **Interfaces:**
 - Consumes: the fingerprints (Task 6), and the summaries and failures (Task 8).
+  Run layout: `manifests/`, `t1/`, `t2/`, and `pairs.csv`; alternatively
+  `lab/edges.csv` plus adjacent lab tables supplies pairs. Current
+  `t1/summary.json` supplies cost observations. Current `t2/summary.json`
+  declares the requested full-spectrum cohort; absent that declaration,
+  spectral metrics are descriptive and cannot certify complete coverage.
+  Default T1 companions in `t2/` are merged into comparisons/calibration,
+  but their full-read counters never count as standalone T1 throughput.
 - Produces:
   - `pair_similarity` lives in `evidence/compare.py` (Task 8); this task uses
     it.
@@ -1315,21 +1358,37 @@ def test_tokens_never_written(run_dir, models_csv, monkeypatch):
       come from:
     - the lab's exact edge list, for parents, siblings, and grandparents;
     - known-independent pretrains with identical shapes, such as the
-      PolyPythias seed variants (the `kind = independent` rows of
-      `models.csv`);
+      PolyPythias seed variants, certified by `reference_pairs.json` or
+      `pins.json`'s `reference_type=polypythias`. The frozen CSV's
+      `kind=independent` also includes known siblings and alone is insufficient;
     - Hub declared-base pairs, as a sanity-check source only.
+    - Expected graph/reference rows survive missing manifests. Missing local
+      content pins use `unmapped:lab/<id>` endpoints; a source suffix
+      `|missing_manifest_ids=<JSON list>` preserves inventory mapping gaps
+      through CSV. These are analysis-only markers, never measured identities.
+      Missing mapping or measurements prevents complete-coverage/calibration
+      claims; no lab or fingerprint schema changes.
   - `tier_agreement(pairs, t1_dir, t2_dir) -> dict`, with these keys:
     - `auroc_t1` and `auroc_t2`, for parent against independent;
     - `auroc_parent_vs_sibling_t1/t2` and `auroc_parent_vs_grandparent_t1/t2`;
     - `spearman_within_related`, between T1 and T2 cosines over the related
       pairs only;
     - `decision_agreement`, at the threshold that gives TPR 0.9 on T2;
-    - `false_matches_per_query`, at TPR 0.9 against the full candidate set;
+    - `false_matches_per_query`, at T1's own TPR 0.9 cutoff against the full
+      compatible candidate set, with achieved TPR and actual pool/unknown
+      counts. Immediate-parent retrieval is directional. Unknown labels and
+      pools below 5k cannot certify the G0 false-match gate;
     - `null_mean`, `null_sd`, and quantiles of independent-pair similarity;
-    - `byte_curve`, the AUROC for block heights 128, 256, and 512.
+    - `byte_curve`, the AUROC for block heights 128, 256, and 512, plus
+      requested/measured/missing counts. An incomplete height is unavailable,
+      rather than compared on a selected subset.
   - `spectra_agreement(t1_dir, t2_dir) -> dict`, with
     `median_abs_alpha_diff` and `median_per_matrix_spearman` between block and
     full spectra. Block alpha is computed with the same estimator as T2.
+    Spectral coverage applies to the declared T2 cohort, allowing intentional
+    T1-only census models. Quantile-aligned sorted-spectrum Spearman is reported
+    literally but is largely automatic and does not establish spectral-shape
+    agreement.
   - `throughput_report(run_dir) -> pd.DataFrame`, per stratum: the median and
     p90 of `bytes_read` and `elapsed_seconds`, `resolves` per model,
     `fraction_of_model_bytes`, and failure rate by reason.
@@ -1342,7 +1401,9 @@ def test_tokens_never_written(run_dir, models_csv, monkeypatch):
       modeling and per-query error control belong to the P1 engine.
   - `write_g0_report(run_dir: Path, out: Path) -> None`, writing Markdown that
     compares each metric with the G0 thresholds in the merged plan (section
-    12) and prints PASS or FAIL per line.
+    12) and prints PASS or FAIL per applicable line. Missing evidence is
+    explicitly unavailable; known-empty >9B cohorts are N/A for the <=9B
+    timing requirement. Unknown sizes/strata cannot pass cost coverage.
 
 - [ ] **Step 1: Write the failing tests.** Use synthetic fingerprints from
   Task 6 on derived tiny checkpoints, all with more than 256 rows: a parent,

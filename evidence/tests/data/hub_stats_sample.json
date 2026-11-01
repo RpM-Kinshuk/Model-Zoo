@@ -1,0 +1,880 @@
+[
+  {
+    "id": "fixture/text-00",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 100,
+    "safetensors": {
+      "parameters": {
+        "BF16": 135000000
+      },
+      "total": 135000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-01",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 99,
+    "safetensors": {
+      "parameters": {
+        "BF16": 360000000
+      },
+      "total": 360000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-02",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 98,
+    "safetensors": {
+      "parameters": {
+        "BF16": 500000000
+      },
+      "total": 500000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-03",
+    "pipeline_tag": "text-generation",
+    "library_name": "peft",
+    "tags": [
+      "peft",
+      "base_model:adapter:fixture/text-00"
+    ],
+    "downloads": 97,
+    "safetensors": {
+      "parameters": {
+        "BF16": 600000000
+      },
+      "total": 600000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": {
+      "relation": "adapter",
+      "models": [
+        {
+          "_id": "fixture-text-base",
+          "id": "fixture/text-00"
+        }
+      ]
+    },
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-04",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 96,
+    "safetensors": {
+      "parameters": {
+        "BF16": 1500000000
+      },
+      "total": 1500000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-05",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 95,
+    "safetensors": {
+      "parameters": {
+        "BF16": 2000000000
+      },
+      "total": 2000000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-06",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 94,
+    "safetensors": {
+      "parameters": {
+        "BF16": 7600000000
+      },
+      "total": 7600000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-07",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [
+      "moe"
+    ],
+    "downloads": 93,
+    "safetensors": {
+      "parameters": {
+        "BF16": 8000000000
+      },
+      "total": 8000000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-08",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 92,
+    "safetensors": {
+      "parameters": {
+        "BF16": 12000000000
+      },
+      "total": 12000000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-09",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 91,
+    "safetensors": null,
+    "gguf": "{\"total\": 40000000000, \"architecture\": \"llama\"}",
+    "siblings": [
+      {
+        "rfilename": "model.Q4_K_M.gguf"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-10",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 90,
+    "safetensors": {
+      "parameters": {
+        "BF16": 80000000000
+      },
+      "total": 80000000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/text-11",
+    "pipeline_tag": "text-generation",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 89,
+    "safetensors": null,
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vlm-0",
+    "pipeline_tag": "image-text-to-text",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 88,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vlm-1",
+    "pipeline_tag": "image-text-to-text",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 87,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vlm-2",
+    "pipeline_tag": "image-text-to-text",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 86,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vision-0",
+    "pipeline_tag": "image-classification",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 85,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vision-1",
+    "pipeline_tag": "image-classification",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 84,
+    "safetensors": null,
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "pytorch_model.bin"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vision-2",
+    "pipeline_tag": "image-classification",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 83,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/vision-3",
+    "pipeline_tag": "image-classification",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 82,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/audio-0",
+    "pipeline_tag": "automatic-speech-recognition",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 81,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/audio-1",
+    "pipeline_tag": "automatic-speech-recognition",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 80,
+    "safetensors": null,
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "pytorch_model.bin"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/audio-2",
+    "pipeline_tag": "automatic-speech-recognition",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 79,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/audio-3",
+    "pipeline_tag": "automatic-speech-recognition",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 78,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/diffusion-0",
+    "pipeline_tag": "text-to-image",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 77,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/diffusion-1",
+    "pipeline_tag": "text-to-image",
+    "library_name": "diffusers",
+    "tags": [
+      "lora",
+      "base_model:adapter:fixture/diffusion-0"
+    ],
+    "downloads": 76,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "kohya_lora.safetensors"
+      }
+    ],
+    "baseModels": {
+      "relation": "adapter",
+      "models": [
+        {
+          "_id": "fixture-base",
+          "id": "fixture/diffusion-0"
+        }
+      ]
+    },
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/diffusion-2",
+    "pipeline_tag": "text-to-image",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 75,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/diffusion-3",
+    "pipeline_tag": "text-to-image",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 74,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/video-0",
+    "pipeline_tag": "text-to-video",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 73,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/video-1",
+    "pipeline_tag": "text-to-video",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 72,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/embedding-0",
+    "pipeline_tag": "sentence-similarity",
+    "library_name": "sentence-transformers",
+    "tags": [],
+    "downloads": 71,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/embedding-1",
+    "pipeline_tag": "sentence-similarity",
+    "library_name": "sentence-transformers",
+    "tags": [],
+    "downloads": 70,
+    "safetensors": null,
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "onnx/model.onnx"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/embedding-2",
+    "pipeline_tag": "sentence-similarity",
+    "library_name": "sentence-transformers",
+    "tags": [],
+    "downloads": 69,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/3d-0",
+    "pipeline_tag": "text-to-3d",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 68,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/3d-1",
+    "pipeline_tag": "text-to-3d",
+    "library_name": "diffusers",
+    "tags": [],
+    "downloads": 67,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/robotics-0",
+    "pipeline_tag": "robotics",
+    "library_name": "lerobot",
+    "tags": [],
+    "downloads": 66,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/robotics-1",
+    "pipeline_tag": "robotics",
+    "library_name": "lerobot",
+    "tags": [],
+    "downloads": 65,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/decision-0",
+    "pipeline_tag": "text-classification",
+    "library_name": "transformers",
+    "tags": [
+      "system-one"
+    ],
+    "downloads": 64,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/decision-1",
+    "pipeline_tag": "text-classification",
+    "library_name": "transformers",
+    "tags": [
+      "decision-model"
+    ],
+    "downloads": 63,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/decision-2",
+    "pipeline_tag": "text-classification",
+    "library_name": "transformers",
+    "tags": [],
+    "downloads": 62,
+    "safetensors": {
+      "parameters": {
+        "BF16": 100000000
+      },
+      "total": 100000000
+    },
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "model.safetensors"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  },
+  {
+    "id": "fixture/no-weights",
+    "pipeline_tag": null,
+    "library_name": null,
+    "tags": [],
+    "downloads": 61,
+    "safetensors": null,
+    "gguf": null,
+    "siblings": [
+      {
+        "rfilename": "README.md"
+      }
+    ],
+    "baseModels": null,
+    "createdAt": "2026-10-01T00:00:00",
+    "cardData": "{\"license\": \"apache-2.0\"}"
+  }
+]
