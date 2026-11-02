@@ -503,3 +503,18 @@ The diagrams are editable, self-contained assets. Their
 <p align="center"><sub><a href="#top">Back to top ↑</a> &nbsp; · &nbsp; <a href="LICENSE">License</a> &nbsp; · &nbsp; <a href="docs/assets/README.md">Visual system</a></sub></p>
 
 <img src="docs/assets/page-closing.svg" width="100%" alt="">
+
+## Zoo database (build)
+
+Build a queryable snapshot from existing evidence artifacts:
+
+```bash
+python -m zoo.cli build --manifests "$MANIFESTS" \
+  --fingerprints "$FINGERPRINTS" --data_root "$ZOO_DATA" \
+  --out "$ZOO_DATA/builds/current"
+```
+
+The snapshot contains Parquet tables, retrieval indexes and links to full HDF5
+spectra. Zoo-Keeper provides `find`, `info`, `similar`, `family`, `diff` and
+`check`. See the [build and query guide](docs/operations/zoo.md) for score inputs,
+evidence tiers and revision handling.

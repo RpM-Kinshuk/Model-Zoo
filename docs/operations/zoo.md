@@ -1,0 +1,115 @@
+# Build and query a zoo
+
+A zoo combines pinned model metadata, fingerprints, measured scores and lineage
+in one snapshot. Building uses existing artifacts; querying needs no server.
+
+## Build
+
+Use the existing environment and set `ZOO_DATA` to the artifact root. From
+Model-Zoo:
+
+```bash
+python -m zoo.cli build \
+  --manifests "$MANIFESTS" \
+  --fingerprints "$FINGERPRINTS" \
+  --data_root "$ZOO_DATA" \
+  --out "$ZOO_DATA/builds/current"
+```
+
+`MANIFESTS` contains one manifest per pinned model. `FINGERPRINTS` contains the
+canonical T1/T2 files; extra T1 block sizes are kept alongside them. Multiple
+fingerprint directories may follow `--fingerprints`.
+
+Optional inputs:
+
+| Option | Input |
+| --- | --- |
+| `--frame` | Selection CSV, including sampling probabilities |
+| `--leaderboard_v2` | Leaderboard export with Raw scores and available evaluation SHAs |
+| `--scores_csv` and `--scores_mapping` | Measured scores and their column mapping |
+| `--lineage_edges` | Lineage Parquet using the frozen edge schema |
+| `--null` | An applicable calibration JSON from the analysis pipeline |
+
+A score mapping names the CSV columns, for example:
+
+```json
+{"repo_id":"model","revision":"commit","benchmark":"benchmark","value":"value","skill":"skill","source":"our_eval"}
+```
+
+`source` may also be a constant label. Missing or mismatched evaluation SHAs
+produce unverified score rows. Default score filters use revision-verified rows;
+`--include_unverified` opts into the others.
+
+The output defaults to `<data_root>/builds/current`; `data_root` defaults to
+`ZOO_DATA`. Choose a fresh output or an existing zoo-managed publication path.
+The builder publishes atomically, and open readers keep their original snapshot.
+Older generations remain available until explicitly cleaned up.
+
+## What is stored
+
+| Table | Contents |
+| --- | --- |
+| `models` | Pinned identity, metadata, coverage and artifact links |
+| `views` | Measured matrices and their block hashes |
+| `coverage` | Measured/skipped tensors and reasons |
+| `lineage` | Candidate relationships with evidence tiers and statistics |
+| `scores` | Measured scores and revision verification |
+| `predictions` | Separate prediction records; empty in v0 |
+
+Full per-view spectra remain in HDF5 files linked by the model table. Artifact
+paths are relative to `ZOO_DATA`. Retrieval compares T1 row-block fingerprints
+within the same architecture signature, giving comparable coordinates and
+shapes. Full-matrix T2 sketches have a different measurement scope.
+
+## Read the evidence
+
+- **Declared:** supplied relationship metadata.
+- **Detected:** a method-derived candidate, with its method and statistics.
+- **Verified:** evidence checked under the producing method's rules.
+
+An **uncalibrated** verdict means no applicable calibrated null supports a
+relationship decision. Cosine remains a measured similarity statistic.
+Duplicate labels mean "identical on every measured block."
+
+## Query
+
+From Zoo-Keeper, use `python -m zoo_keeper.cli`. The commands are `find`, `info`,
+`similar`, `family`, `diff`, and `check`; each supports `--zoo PATH` and `--json`.
+The default zoo is `$ZOO_DATA/builds/current`. Use a complete `repo@revision` key
+when a repository has several revisions.
+
+See Zoo-Keeper's README for a worked command per query. Without `--json`, output
+is a table or indented card. With it, stdout is one JSON document. Errors go to
+stderr.
+
+Exit codes: **0** completed (including uncalibrated or base-not-in-zoo checks),
+**1** an inconsistent `check`, **2** invalid input or unavailable/ambiguous
+comparison. Read the verdict as well as the exit code.
+
+## Validation status
+
+The 2026-11-02 scoped CLI smoke passed on 85 models: 43 measured checkpoints and
+42 metadata-only entries, retaining all 43 full-spectrum links. Rebuild it with:
+
+```bash
+python -m zoo.cli build \
+  --manifests "$ZOO_DATA/runs/track-a-z7-query-20261102.hhji0j6t/manifests" \
+  --fingerprints "$ZOO_DATA/runs/track-a-l12-20261102.mnbqfy_y/t2-k128/fingerprints" \
+  --data_root "$ZOO_DATA" --out "$ZOO_DATA/builds/example" \
+  --leaderboard_v2 "$ZOO_DATA/Zoo-Keeper/data/heritability/sampled_leaderboard.csv"
+```
+
+The validated output is `runs/track-a-z8-cli-20261102.c45u9pog/zoo` under the
+data root. It contains 18 leaderboard score rows, six revision-verified.
+All six query commands passed with JSON output. For the dialogue LoRA r8 and
+its SmolLM2-135M base: `diff` found 151 views identical on their measured blocks
+and 60 changed views;
+`diff` and `check` reported `uncalibrated`. `similar -k 3` returned three
+neighbors; `family --depth 2` returned one ancestor and no descendants.
+Zoo-Keeper's README records the worked queries. Exact argv, outputs and timings
+are saved beside the snapshot in `commands.json`, `*.stdout` and
+`cli-smoke-report.json`.
+
+The full R6 pilot smoke also needs the R3/R4 pilot outputs and the R5 G0
+calibration. Those prerequisites remain separate from this scoped smoke; no
+calibration is fabricated for it.
