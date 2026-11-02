@@ -235,3 +235,52 @@ def test_empty_matrices_keep_valid_inputs_and_existing_skip_reason(api, tmp_path
         assert coverage[name]["reason"] == "not_a_matrix"
     assert coverage["valid.weight"]["status"] == "measured"
     assert coverage["valid.weight"]["views"] == ["valid.weight"]
+
+
+def test_t2_records_default_cpu_spectrum_device(local_manifest, tmp_path):
+    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path)
+    with h5py.File(path.with_name(path.name.replace(".fingerprint.safetensors", ".spectra.h5"))) as handle:
+        assert handle.attrs["compute_device"] == "cpu"
+
+
+def test_t2_forwards_cuda_device_only_to_spectrum_collector(local_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+
+    collector = module.compute_esd_for_weight
+    devices = []
+
+    def simulated_cuda(*args):
+        assert args[1].device.type == "cpu"
+        devices.append(args[10])
+        result = collector(*args[:10], None, *args[11:])
+        return dict(result, compute_device=f"cuda:{args[10]}")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(module, "compute_esd_for_weight", simulated_cuda)
+    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
+                             compute_device="cuda:1", also_t1_blocks=(256,))
+    assert devices and set(devices) == {1}
+    with h5py.File(path.with_name(path.name.replace(".fingerprint.safetensors", ".spectra.h5"))) as handle:
+        assert handle.attrs["compute_device"] == "cuda:1"
+
+
+@pytest.mark.parametrize("device", ["bogus", "mps", "cpu:1", "cuda:-1", "cuda:3"])
+def test_invalid_compute_device_rejected_before_extraction(device, local_manifest, tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    reader = HubReader()
+    before = dict(reader.stats)
+    with pytest.raises(ValueError, match="[Dd]evice|CUDA"):
+        fingerprint_model(local_manifest, reader, "t2", tmp_path / "out", compute_device=device)
+    assert reader.stats == before
+    assert not (tmp_path / "out").exists()
+
+
+def test_unavailable_cuda_rejected_before_extraction(local_manifest, tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    reader = HubReader()
+    with pytest.raises(ValueError, match="CUDA"):
+        fingerprint_model(local_manifest, reader, "t2", tmp_path / "out", compute_device="cuda:0")
+    assert reader.stats == dict(resolves=0, range_reads=0, bytes_read=0, refreshes=0, retries=0)
+    assert not (tmp_path / "out").exists()

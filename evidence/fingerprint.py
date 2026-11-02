@@ -348,25 +348,46 @@ class _Records:
         return path
 
 
+def _compute_device(value):
+    try:
+        device = torch.device(value)
+    except (TypeError, RuntimeError):
+        raise ValueError("Invalid spectrum compute device") from None
+    if device.type == "cpu" and device.index is None:
+        return device
+    if device.type != "cuda":
+        raise ValueError("Spectrum compute device must be cpu or cuda:<index>")
+    if not torch.cuda.is_available():
+        raise ValueError("Requested CUDA compute device is unavailable")
+    index = device.index if device.index is not None else 0
+    if index >= torch.cuda.device_count():
+        raise ValueError("Requested CUDA compute device index is unavailable")
+    return torch.device("cuda", index)
+
+
 class _Spectra:
-    def __init__(self, path):
+    def __init__(self, path, compute_device):
         self.path, self.temporary = path, _atomic_path(path)
+        self.compute_device = compute_device
         self.handle = h5py.File(self.temporary, "w")
         self.layers = self.handle.create_group("layers")
         self.layers.create_dataset("longname", (0,), maxshape=(None,), dtype=h5py.string_dtype())
         self.eigs = self.handle.create_dataset("eigs", (0,), maxshape=(None,), dtype=h5py.vlen_dtype(np.dtype("float32")))
         self.config = measurement_config(SimpleNamespace(analysis_source="checkpoint"))
         self.handle.attrs.update(format_version=FORMAT_VERSION, numerics_version=NUMERICS_VERSION,
-                                 measurement_config_json=json.dumps(self.config, sort_keys=True))
+                                 measurement_config_json=json.dumps(self.config, sort_keys=True),
+                                 compute_device=str(compute_device))
 
     def add(self, name, tensor):
         cfg = self.config
         result = compute_esd_for_weight(name, tensor, cfg["evals_thresh"], cfg["bins"],
                                         cfg["fix_fingers"], cfg["xmin_pos"], cfg["conv_norm"],
-                                        cfg["filter_zeros"], cfg["use_svd"], True, None,
+                                        cfg["filter_zeros"], cfg["use_svd"], True, self.compute_device.index,
                                         tensor.numel(), cfg["compute_dtype"])
         if result is None:
             raise ValueError(f"No collector spectrum for view {name}")
+        if result.get("compute_device") != str(self.compute_device):
+            raise ValueError("Collector spectrum used an unexpected compute device")
         index = len(self.eigs)
         for key, value in result.items():
             if key not in ("eigs", "longname") and isinstance(value, (int, float, bool, np.number)):
@@ -398,12 +419,14 @@ def _metadata(identity, parent, k, height, stats, elapsed):
 def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Path,
                       parent: dict | None = None, parent_cache: Path | None = None,
                       sketch_k: int = SKETCH_K_DEFAULT, all_experts: bool = False,
-                      also_t1_blocks: tuple[int, ...] = (), read_threads: int = 8) -> Path:
+                      also_t1_blocks: tuple[int, ...] = (), read_threads: int = 8,
+                      compute_device: str = "cpu") -> Path:
     """Measure one pinned manifest, publishing the final T2 marker last."""
     if tier not in ("t1", "t2") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
         raise ValueError("Invalid tier, sketch size, or read thread count")
     if any(type(height) is not int or height <= 0 for height in also_t1_blocks):
         raise ValueError("Block heights must be positive integers")
+    device = _compute_device(compute_device)
     started = time.monotonic()
     initial_resolves = reader.stats["resolves"]
     safe = safe_filename(f"{manifest['repo_id']}@{manifest['revision']}")
@@ -422,7 +445,7 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
             heights = [None] if tier == "t2" else [ROW_BLOCK]
             if tier == "t2":
                 heights += sorted(set(also_t1_blocks))
-                spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5")
+                spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5", device)
             records = {height: _Records(coverage, sketch_k, "t2" if height is None else ("t1" if height == ROW_BLOCK else f"t1b{height}")) for height in heights}
             previous_sources, full = None, None
             # Grouping bounds the full-source cache to one weight/factor group.

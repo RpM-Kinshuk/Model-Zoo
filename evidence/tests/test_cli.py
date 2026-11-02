@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from evidence.cli import main
 from conftest import run_cli, run_cli_code
@@ -300,3 +301,37 @@ def test_declared_base_denied_retry_keeps_resolved_pin(tmp_path, denying_reader,
     assert calls == [SHA]
     bases = [json.loads(p.read_text()) for p in output.glob("*.manifest.json")]
     assert [(m["revision"], m["access"]) for m in bases if m["repo_id"] == "org/gated"] == [(SHA, "granted")]
+
+
+@pytest.mark.parametrize("command", ["fingerprint", "batch"])
+def test_cli_forwards_spectrum_compute_device(command, tiny_checkpoint, tmp_path, monkeypatch):
+    import evidence.cli as module
+    from evidence.hub import HubReader
+    from evidence.manifest import build_manifest, write_manifest
+
+    original = module.fingerprint_model
+    devices = []
+    source = tmp_path / "device-source"
+    source.mkdir()
+    for path in tiny_checkpoint.iterdir():
+        if path.is_file():
+            (source / path.name).write_bytes(path.read_bytes())
+
+    def cpu_fixture_run(*args, **kwargs):
+        devices.append(kwargs.pop("compute_device"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "fingerprint_model", cpu_fixture_run)
+    args = [command, "--tier", "t2", "--out", str(tmp_path / "device-out"),
+            "--compute_device", "cuda:1"]
+    if command == "fingerprint":
+        args.append(str(source))
+    else:
+        directory = tmp_path / "device-manifests"
+        manifest = build_manifest(str(source), "main", HubReader(), None)
+        write_manifest(manifest, directory)
+        models = tmp_path / "device-models.csv"
+        pd.DataFrame([{"repo_id": str(source), "revision": manifest["revision"]}]).to_csv(models, index=False)
+        args += ["--models", str(models), "--manifests", str(directory), "--workers", "1"]
+    assert main(args) == 0
+    assert devices and set(devices) == {"cuda:1"}

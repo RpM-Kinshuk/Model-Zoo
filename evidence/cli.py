@@ -218,7 +218,8 @@ def _batch_job(job):
             path = fingerprint_model(manifest, _READER, tier, out, parent=parent,
                                      parent_cache=options["parent_cache"], sketch_k=k,
                                      all_experts=options["all_experts"],
-                                     also_t1_blocks=tuple(options["also_t1_blocks"]))
+                                     also_t1_blocks=tuple(options["also_t1_blocks"]),
+                                     compute_device=options.get("compute_device", "cpu"))
         fp = load_fingerprint(path)
         result = _record(row, "batch", _READER, started, before)
         result.update(status="skipped" if complete else "complete", reason="already_complete" if complete else "",
@@ -425,7 +426,7 @@ def _single(args, factory, api):
             raise ValueError("Target has no accessible checkpoint weights")
         write_manifest(manifest, out)
         path = fingerprint_model(manifest, reader, args.tier, out, sketch_k=args.sketch_k,
-                                 all_experts=args.all_experts)
+                                 all_experts=args.all_experts, compute_device=args.compute_device)
         fp = load_fingerprint(path)
         print(json.dumps({"repo_id": manifest["repo_id"], "revision": manifest["revision"],
                           "fingerprint": path.name, "tier": args.tier, "n_views": len(fp.names)}, sort_keys=True))
@@ -480,6 +481,7 @@ def _parser():
     single.add_argument("--out")
     single.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
     single.add_argument("--all_experts", action="store_true")
+    single.add_argument("--compute_device", default="cpu", help="T2 spectrum device: cpu or cuda:<index>")
     single.add_argument("--json", action="store_true")
     for name in ("diff", "check"):
         command = commands.add_parser(name)
@@ -514,6 +516,7 @@ def _parser():
             command.add_argument("--tier", choices=("t1", "t2"), required=True)
             command.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
             command.add_argument("--all_experts", action="store_true")
+            command.add_argument("--compute_device", default="cpu", help="T2 spectrum device: cpu or cuda:<index>")
             command.add_argument("--also_t1_blocks", default="")
             command.add_argument("--with_parent", action="store_true")
             command.add_argument("--parent_cache", type=Path)
