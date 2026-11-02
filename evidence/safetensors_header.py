@@ -69,8 +69,10 @@ def parse_header(prefix: bytes, file: str) -> tuple[dict[str, TensorEntry], dict
     if not isinstance(header, dict):
         raise ValueError("Safetensors header must be an object")
     metadata = header.pop("__metadata__", {})
-    if not isinstance(metadata, dict):
-        raise ValueError("Safetensors metadata must be an object")
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict) or not all(isinstance(value, str) for value in metadata.values()):
+        raise ValueError("Safetensors metadata must be a string-valued object or null")
     entries = {}
     for name, value in header.items():
         if not isinstance(value, dict):

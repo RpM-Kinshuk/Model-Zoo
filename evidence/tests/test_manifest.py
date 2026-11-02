@@ -260,3 +260,134 @@ def test_explicit_precision_precedes_untagged_but_diffusers_prefers_nonvariant()
     assert skipped == [{"filename": "model.safetensors", "reason": "precision_variant"}]
     keep, _ = select_file_set(["model_index.json", "unet/model.safetensors", "unet/model-bf16.safetensors"])
     assert keep == ["unet/model.safetensors"]
+
+
+@pytest.mark.parametrize("canonical", ["model.safetensors", "adapter_model.safetensors"])
+def test_canonical_root_layout_excludes_nested_checkpoint_alternatives(canonical):
+    keep, skipped = select_file_set([
+        canonical, f"checkpoint-10/{canonical}", f"checkpoint-20/{canonical}",
+        f"sft/{canonical}",
+    ])
+    assert keep == [canonical]
+    assert {item["filename"] for item in skipped} == {
+        f"checkpoint-10/{canonical}", f"checkpoint-20/{canonical}", f"sft/{canonical}",
+    }
+    assert {item["reason"] for item in skipped} == {"duplicate_layout"}
+
+
+def test_canonical_root_model_excludes_unindexed_precision_shards():
+    keep, skipped = select_file_set([
+        "model.safetensors", "model.fp32-00001-of-00002.safetensors",
+        "model.fp32-00002-of-00002.safetensors",
+    ])
+    assert keep == ["model.safetensors"]
+    assert len(skipped) == 2
+    assert {item["reason"] for item in skipped} == {"duplicate_layout"}
+
+
+def test_adapter_config_identifies_bundled_adapter_folders():
+    keep, skipped = select_file_set([
+        "model.safetensors", "adapter/adapter_model.safetensors",
+        "adapter/adapter_config.json", "adapter_vllm/adapter_model.safetensors",
+        "adapter_vllm/adapter_config.json",
+    ])
+    assert keep == ["model.safetensors"]
+    assert {item["reason"] for item in skipped} == {"bundled_adapter"}
+
+
+def test_training_state_does_not_turn_adapter_only_repo_into_bundled_adapter():
+    keep, skipped = select_file_set([
+        "adapter_model.safetensors", "adapter_config.json", "training_args.bin",
+        "checkpoint-10/adapter_model.safetensors", "checkpoint-10/adapter_config.json",
+        "checkpoint-10/optimizer.pt", "checkpoint-10/scheduler.pt",
+    ])
+    assert keep == ["adapter_model.safetensors"]
+    reasons = {item["filename"]: item["reason"] for item in skipped}
+    assert reasons["checkpoint-10/adapter_model.safetensors"] == "duplicate_layout"
+    assert reasons["training_args.bin"] == "pickle_not_read"
+
+
+def test_canonical_root_adapter_survives_excluded_nested_base_checkpoint():
+    keep, skipped = select_file_set([
+        "adapter_model.safetensors", "adapter_config.json", "training_args.bin",
+        "checkpoint-10/model.safetensors",
+    ])
+    assert keep == ["adapter_model.safetensors"]
+    assert skipped == [
+        {"filename": "checkpoint-10/model.safetensors", "reason": "duplicate_layout"},
+        {"filename": "training_args.bin", "reason": "pickle_not_read"},
+    ]
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_root_layout_prevents_nested_index_restoring_alternate(tmp_path, indexed):
+    import torch
+    from safetensors.torch import save_file
+
+    root_file = "part-a.safetensors" if indexed else "model.safetensors"
+    save_file({"layer.weight": torch.ones(16, 16)}, tmp_path / root_file)
+    nested = tmp_path / "checkpoint-20"
+    nested.mkdir()
+    save_file({"layer.weight": torch.ones(16, 16)}, nested / "part-b.safetensors")
+    (nested / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"layer.weight": "part-b.safetensors"},
+    }))
+    if indexed:
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
+            "weight_map": {"layer.weight": root_file},
+        }))
+
+    manifest = build_manifest(str(tmp_path), "local", HubReader(), None)
+    assert [item["filename"] for item in manifest["files"]] == [root_file]
+    assert [item["name"] for item in manifest["tensors"]] == ["layer.weight"]
+    assert manifest["skipped_files"] == [{
+        "filename": "checkpoint-20/part-b.safetensors", "reason": "duplicate_layout",
+    }]
+
+
+def test_collection_without_canonical_root_remains_explicitly_ambiguous(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    for component in ("checkpoint-10", "checkpoint-20"):
+        folder = tmp_path / component
+        folder.mkdir()
+        save_file({"layer.weight": torch.ones(16, 16)}, folder / "model.safetensors")
+    with pytest.raises(ValueError, match="duplicate tensor names"):
+        build_manifest(str(tmp_path), "local", HubReader(), None)
+
+
+def test_bundled_root_adapter_does_not_disable_base_index_membership(tmp_path):
+    import torch
+    from safetensors.torch import save_file
+
+    for filename in ("part-a.safetensors", "unused.safetensors"):
+        save_file({"layer.weight": torch.ones(16, 16)}, tmp_path / filename)
+    save_file({"layer.lora_A.weight": torch.ones(4, 16)}, tmp_path / "adapter_model.safetensors")
+    (tmp_path / "adapter_config.json").write_text("{}")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"layer.weight": "part-a.safetensors"},
+    }))
+    manifest = build_manifest(str(tmp_path), "local", HubReader(), None)
+    assert [item["filename"] for item in manifest["files"]] == ["part-a.safetensors"]
+
+
+@pytest.mark.parametrize("auxiliary", ["head", "classifier", "score"])
+@pytest.mark.parametrize("indexed", [False, True])
+def test_canonical_index_requires_explicit_auxiliary_head_membership(tmp_path, auxiliary, indexed):
+    import torch
+    from safetensors.torch import save_file
+
+    save_file({"layer.weight": torch.ones(16, 16)}, tmp_path / "part-a.safetensors")
+    save_file({"proj.weight": torch.ones(24, 16)}, tmp_path / f"{auxiliary}.safetensors")
+    mapping = {"layer.weight": "part-a.safetensors"}
+    if indexed:
+        mapping["proj.weight"] = f"{auxiliary}.safetensors"
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": mapping}))
+    if indexed:
+        manifest = build_manifest(str(tmp_path), "local", HubReader(), None)
+        assert {item["name"] for item in manifest["tensors"]} == {"layer.weight", "proj.weight"}
+        assert manifest["skipped_files"] == []
+    else:
+        with pytest.raises(ValueError, match="auxiliary.*ambiguous"):
+            build_manifest(str(tmp_path), "local", HubReader(), None)

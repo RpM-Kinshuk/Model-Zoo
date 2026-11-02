@@ -83,6 +83,13 @@ def _layout_rank(filename):
 
 
 def _select_indexes(filenames):
+    if "model_index.json" not in filenames:
+        if "model.safetensors" in filenames:
+            return []
+        if "model.safetensors.index.json" in filenames:
+            return ["model.safetensors.index.json"]
+        if "adapter_model.safetensors" in filenames:
+            return []
     indexes = sorted(name for name in filenames if name.endswith(".index.json"))
     if any(not name.startswith("original/") for name in indexes):
         indexes = [name for name in indexes if not name.startswith("original/")]
@@ -105,24 +112,37 @@ def select_file_set(filenames: list[str]) -> tuple[list[str], list[dict]]:
     weights = [name for name in names if name.lower().endswith(_WEIGHTS)]
     safe = [name for name in weights if name.endswith(".safetensors")]
     adapters = {name for name in weights if "lora" in PurePosixPath(name).name.lower()
-                or "loras" in PurePosixPath(name).parts}
-    bundled = bool(set(weights) - adapters)
+                or "loras" in PurePosixPath(name).parts
+                or (PurePosixPath(name).name.startswith("adapter_model.")
+                    and str(PurePosixPath(name).parent / "adapter_config.json") in names)}
     diffusers = "model_index.json" in names and any("/" in name for name in safe)
     hf_shards = any(re.search(r"-\d{5}-of-\d{5}\.safetensors$", name) for name in safe)
     root_safe = any("/" not in name for name in safe)
+    canonical_root = not diffusers and bool({
+        "model.safetensors", "adapter_model.safetensors", "model.safetensors.index.json",
+    } & set(names))
     reasons = {}
     for name in weights:
         lower = name.lower()
-        if bundled and name in adapters:
-            reasons[name] = "bundled_adapter"
-        elif safe and lower.endswith(_PICKLE):
+        if safe and lower.endswith(_PICKLE):
             reasons[name] = "pickle_not_read"
+        elif canonical_root and name.endswith(".safetensors") and "/" in name:
+            reasons[name] = "duplicate_layout"
+        elif (not diffusers and "model.safetensors" in names
+              and re.search(r"-\d{5}-of-\d{5}\.safetensors$", name)
+              and _variant(re.sub(r"-\d{5}-of-\d{5}(?=\.safetensors$)", "", name))[0]
+              == _variant("model.safetensors")[0]):
+            reasons[name] = "duplicate_layout"
         elif diffusers and ("/" not in name or ".fp16." in lower or "ema" in PurePosixPath(name).stem.lower()
                             or "_0.9vae" in lower):
             reasons[name] = "duplicate_layout"
         elif (hf_shards and PurePosixPath(name).name.startswith("consolidated")) or (
                 (hf_shards or root_safe) and name.startswith("original/")):
             reasons[name] = "duplicate_layout"
+    bundled = any(name not in reasons and name not in adapters for name in weights)
+    if bundled:
+        for name in adapters:
+            reasons[name] = "bundled_adapter"
     if diffusers:
         components = {}
         for name in safe:
@@ -298,6 +318,10 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
             if has_safetensors:
                 indexed_folders.add(folder)
         if indexes:
+            if "model.safetensors.index.json" in indexes and any(
+                    name not in indexed for name in ("head.safetensors", "classifier.safetensors", "score.safetensors")
+                    if name in selected):
+                raise ValueError("Checkpoint index omits an auxiliary head; compound layout is ambiguous")
             for name in list(selected):
                 if name.endswith(".safetensors") and PurePosixPath(name).parent in indexed_folders and name not in indexed:
                     selected.remove(name)

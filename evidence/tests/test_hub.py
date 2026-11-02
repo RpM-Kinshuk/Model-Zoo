@@ -92,7 +92,7 @@ def test_lookup_metadata_env_token_and_small_file(fake_transport, monkeypatch):
         if method == "HEAD":
             assert headers["Authorization"] == "Bearer hf_secret_marker"
             return 200, {"Content-Length": "1000", "ETag": '"small"', "X-Xet-Hash": "xet"}, b""
-        assert "Authorization" not in headers
+        assert headers["Authorization"] == "Bearer hf_secret_marker"
         return fake_transport(method, url, headers)
 
     reader = HubReader(transport=transport)
@@ -223,6 +223,209 @@ def test_offline_blocks_cached_hub_reads_but_allows_local(fake_transport, tiny_c
     local = reader.resolve(str(tiny_checkpoint), "model-00001-of-00002.safetensors", "local")
     assert reader.read_header(local)
     assert reader.stats["resolves"] == 1 and reader.stats["range_reads"] == 0
+
+
+def test_cached_cdn_307_follows_relative_location_without_auth():
+    urls = []
+
+    def transport(method, url, headers):
+        if method == "HEAD":
+            return 302, {"X-Linked-Size": "8", "Location": "https://cdn.example/old/blob"}, b""
+        urls.append(url)
+        assert headers == {"Range": "bytes=0-7"}
+        if len(urls) == 1:
+            return 307, {"Location": "../new/blob"}, b""
+        assert url == "https://cdn.example/new/blob"
+        return 206, {"Content-Range": "bytes 0-7/8"}, b"abcdefgh"
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert reader.read(remote, 0, 8) == b"abcdefgh"
+
+
+@pytest.mark.parametrize("redirect_status", [301, 302, 303, 307, 308])
+def test_range_redirect_preserves_bounds_auth_and_caches_target(redirect_status):
+    calls = []
+
+    def transport(method, url, headers):
+        calls.append((method, url, dict(headers)))
+        if method == "HEAD":
+            return 200, {"Content-Length": "16", "ETag": '"stable"'}, b""
+        assert headers["Range"] in ("bytes=0-7", "bytes=8-15")
+        if "/resolve/" in url:
+            assert headers["Authorization"] == "Bearer secret"
+            return redirect_status, {"Location": "/api/resolve-cache/org/m/blob?download=1"}, b""
+        if url.startswith("https://huggingface.co/"):
+            assert headers["Authorization"] == "Bearer secret"
+            return redirect_status, {"Location": "https://cdn.example/blob?signed=secret"}, b""
+        assert "Authorization" not in headers
+        return 206, {"Content-Range": "bytes " + headers["Range"][6:] + "/16"}, b"abcdefgh"
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert reader.read(remote, 0, 8) == b"abcdefgh"
+    cached = reader.resolve("org/m", "model.safetensors", SHA)
+    assert (cached.repo_id, cached.filename, cached.revision, cached.size, cached.sha256) == (
+        "org/m", "model.safetensors", SHA, 16, "stable")
+    assert cached.url == "https://cdn.example/blob?signed=secret"
+    assert reader.read(remote, 8, 16) == b"abcdefgh"
+    assert [method for method, _, _ in calls] == ["HEAD", "GET", "GET", "GET", "GET"]
+    assert calls[-1][1] == cached.url
+
+
+@pytest.mark.parametrize("target", [
+    "https://cdn.example/blob", "https://mirror.example.evil.example/blob",
+    "http://mirror.example/blob", "https://mirror.example:444/blob", "https://huggingface.co/blob",
+])
+def test_range_redirect_only_authenticates_configured_origin(target, monkeypatch):
+    monkeypatch.setenv("HF_ENDPOINT", "https://mirror.example:443")
+
+    def transport(method, url, headers):
+        if method == "HEAD":
+            return 302, {"X-Linked-Size": "8", "Location": "https://mirror.example/cache"}, b""
+        if url == "https://mirror.example/cache":
+            assert headers["Authorization"] == "Bearer secret"
+            return 307, {"Location": target}, b""
+        assert url == target and "Authorization" not in headers
+        return 206, {"Content-Range": "bytes 0-7/8"}, b"abcdefgh"
+
+    reader = HubReader(token="secret", transport=transport)
+    assert reader.read(reader.resolve("org/m", "model.safetensors", SHA), 0, 8) == b"abcdefgh"
+
+
+def test_lookup_follows_relative_redirect_without_file_metadata():
+    calls = []
+
+    def transport(method, url, headers):
+        calls.append(url)
+        assert method == "HEAD" and headers["Authorization"] == "Bearer secret"
+        if "/resolve/" in url:
+            return 307, {"Location": "/renamed/model?revision=pinned", "Content-Length": "0"}, b""
+        assert url == "https://huggingface.co/renamed/model?revision=pinned"
+        return 302, {"X-Linked-Size": "8", "Location": "https://cdn.example/blob"}, b""
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert remote.size == 8 and remote.url == "https://cdn.example/blob"
+    assert reader.resolve("org/m", "model.safetensors", SHA) is remote and len(calls) == 2
+
+
+@pytest.mark.parametrize("location", [None, "", "file:///tmp/blob", "https://user:pass@cdn.example/blob",
+                                      "https://cdn.example:invalid/blob", "https://[invalid/blob",
+                                      "\nhttps://cdn.example/blob", "/blob\x00"])
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+def test_malformed_redirects_fail_without_contacting_target(method, location):
+    calls = []
+
+    def transport(request_method, url, headers):
+        calls.append((request_method, url))
+        if request_method == "HEAD" and method == "GET":
+            return 200, {"Content-Length": "8"}, b""
+        return 307, {"Location": location, "X-Linked-Size": "8"}, b""
+
+    reader = HubReader(token="secret", transport=transport)
+    with pytest.raises(OSError, match="redirect") as error:
+        remote = reader.resolve("org/m", "model.safetensors", SHA)
+        reader.read(remote, 0, 8)
+    assert "user:pass" not in str(error.value)
+    assert len(calls) == (1 if method == "HEAD" else 2)
+
+
+@pytest.mark.parametrize("cycle", [True, False])
+@pytest.mark.parametrize("method", ["HEAD", "GET"])
+def test_redirect_chain_is_bounded(cycle, method):
+    urls = []
+
+    def transport(method, url, headers):
+        if method == "HEAD" and requested_method == "GET":
+            return 200, {"Content-Length": "8"}, b""
+        urls.append(url)
+        return 307, {"Location": "/loop" if cycle else f"/hop/{len(urls)}"}, b""
+
+    requested_method = method
+    reader = HubReader(token="secret", transport=transport)
+    with pytest.raises(OSError, match="redirect"):
+        remote = reader.resolve("org/m", "model.safetensors", SHA)
+        reader.read(remote, 0, 8)
+    assert len(urls) <= 6
+    if cycle:
+        assert len(urls) == len(set(urls))
+
+
+@pytest.mark.parametrize("response_headers, body, message", [
+    ({"Content-Range": "bytes 1-8/16"}, b"abcdefgh", "Content-Range"),
+    ({"Content-Range": "bytes 0-7/17"}, b"abcdefgh", "Content-Range"),
+    ({"Content-Range": "bytes 0-7/16"}, b"abcdefg", "byte count"),
+    ({"Content-Range": "bytes 0-7/16"}, b"abcdefghi", "byte count"),
+])
+def test_redirect_target_cached_only_after_range_validation(response_headers, body, message):
+    def transport(method, url, headers):
+        if method == "HEAD":
+            return 200, {"Content-Length": "16"}, b""
+        if "/resolve/" in url:
+            return 307, {"Location": "https://cdn.example/blob"}, b""
+        return 206, response_headers, body
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    with pytest.raises(ValueError, match=message):
+        reader.read(remote, 0, 8)
+    assert reader.resolve("org/m", "model.safetensors", SHA) is remote
+
+
+def test_expired_cdn_401_refreshes_once_without_claiming_denial(fake_transport):
+    reads = []
+
+    def transport(method, url, headers):
+        if method == "GET":
+            reads.append(url)
+            assert "Authorization" not in headers
+            return 401, {}, b""
+        return fake_transport(method, url, headers)
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    with pytest.raises(OSError, match="401") as error:
+        reader.read(remote, 0, 8)
+    assert not isinstance(error.value, AccessDenied)
+    assert len(reads) == 2 and reads[0] != reads[1]
+    assert reader.stats["refreshes"] == 1 and reader.stats["resolves"] == 2
+
+
+def test_authenticated_hub_401_is_not_confirmed_denial_or_cdn_expiry():
+    def transport(method, url, headers):
+        assert headers["Authorization"] == "Bearer secret"
+        if method == "HEAD":
+            return 200, {"Content-Length": "8"}, b""
+        return 401, {"X-Error-Message": "unauthorized secret"}, b"secret"
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    with pytest.raises(OSError, match="401") as error:
+        reader.read(remote, 0, 8)
+    assert not isinstance(error.value, AccessDenied) and "secret" not in str(error.value)
+    assert reader.stats["refreshes"] == 0
+
+
+@pytest.mark.parametrize("failure", ["size", "etag", "xet"])
+def test_refresh_preserves_pinned_file_identity(failure):
+    heads = []
+
+    def transport(method, url, headers):
+        if method == "GET":
+            return 403, {}, b""
+        heads.append(url)
+        changed = len(heads) == 2
+        return 302, {"Location": "https://cdn.example/blob", "X-Linked-Size":
+                     "9" if changed and failure == "size" else "8", "X-Linked-ETag":
+                     '"changed"' if changed and failure == "etag" else '"stable"',
+                     "X-Xet-Hash": "changed" if changed and failure == "xet" else "stable"}, b""
+
+    reader = HubReader(token="secret", transport=transport)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    with pytest.raises(ValueError, match="Pinned file"):
+        reader.read(remote, 0, 8)
+    assert reader.resolve("org/m", "model.safetensors", SHA) is remote
 
 
 @pytest.mark.skipif(os.environ.get("MODEL_ZOO_NETWORK_TESTS") != "1", reason="opt-in network smoke test")

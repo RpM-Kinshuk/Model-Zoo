@@ -56,6 +56,23 @@ def prefix_for(header):
     return len(raw).to_bytes(8, "little") + raw
 
 
+def test_parse_accepts_nullable_metadata_without_changing_tensor_offsets():
+    prefix = prefix_for({
+        "__metadata__": None,
+        "weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+    })
+    entries, metadata = parse_header(prefix, "model.safetensors")
+    assert metadata == {}
+    assert entries["weight"].start == len(prefix)
+    assert entries["weight"].end == len(prefix) + 4
+
+
+@pytest.mark.parametrize("metadata", [[], "pt", {"format": 1}, {"format": None}])
+def test_parse_rejects_metadata_not_accepted_by_safetensors(metadata):
+    with pytest.raises(ValueError, match="metadata"):
+        parse_header(prefix_for({"__metadata__": metadata}), "unused.safetensors")
+
+
 @pytest.mark.parametrize("entry", [
     {"dtype": "F32", "shape": [-1], "data_offsets": [0, 4]},
     {"dtype": "F32", "shape": [True], "data_offsets": [0, 4]},

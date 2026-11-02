@@ -1,13 +1,13 @@
 """Resolve pinned Hub files once, then read bounded byte ranges."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import re
 import time
 from typing import Callable
 from urllib.error import HTTPError
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from measurement_config import is_commit_sha
@@ -37,6 +37,41 @@ class RemoteFile:
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_MAX_REDIRECTS = 5
+
+
+def _url_origin(url):
+    """Validate transport URLs without including signed URLs in error messages."""
+    try:
+        if (not isinstance(url, str) or "\\" in url
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url)):
+            raise ValueError
+        parsed = urlsplit(url)
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None or parsed.fragment):
+            raise ValueError
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    except (TypeError, ValueError):
+        raise OSError("Invalid Hub redirect URL") from None
+    return parsed.scheme, parsed.hostname, port
+
+
+def _redirect_url(url, headers):
+    location = headers.get("location")
+    if not location:
+        raise OSError("Hub redirect is missing its location")
+    if (not isinstance(location, str) or "\\" in location
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in location)):
+        raise OSError("Invalid Hub redirect URL")
+    try:
+        target = urljoin(url, location)
+    except (TypeError, ValueError):
+        raise OSError("Invalid Hub redirect URL") from None
+    _url_origin(target)
+    return target
 
 
 def _transport(method, url, headers):
@@ -70,6 +105,10 @@ class HubReader:
 
     def _request(self, method, url, headers):
         self._online()
+        # Recompute auth for each hop; signed CDN URLs never receive the token.
+        headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
+        if _url_origin(url) == _url_origin(self._endpoint) and self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         for attempt in range(4):
             self.stats["resolves" if method == "HEAD" else "range_reads"] += 1
             try:
@@ -100,17 +139,39 @@ class HubReader:
             time.sleep(delay)
         raise AssertionError("Unreachable retry state")
 
+    def _range_request(self, url, headers):
+        visited = {url}
+        for redirects in range(_MAX_REDIRECTS + 1):
+            status, response_headers, body = self._request("GET", url, headers)
+            if status not in _REDIRECT_STATUSES:
+                return status, response_headers, body, url
+            target = _redirect_url(url, response_headers)
+            if target in visited or redirects == _MAX_REDIRECTS:
+                raise OSError("Hub redirect chain is cyclic or exceeds its limit")
+            visited.add(target)
+            url = target
+        raise AssertionError("Unreachable redirect state")
+
     def _lookup(self, repo_id, filename, revision):
         if not self._token:
             raise AccessDenied("Hub lookup requires an HF_TOKEN or explicit token")
         url = f"{self._endpoint}/{quote(repo_id, safe='/')}/resolve/{revision}/{quote(filename, safe='/')}"
-        headers = {"Authorization": f"Bearer {self._token}"}
-        status, headers, _ = self._request("HEAD", url, headers)
-        if status not in (200, 301, 302, 303, 307, 308):
-            raise OSError(f"Unexpected Hub lookup status: {status}")
-        location = headers.get("location")
-        if status != 200 and not location:
-            raise OSError("Hub redirect is missing its location")
+        visited = {url}
+        for redirects in range(_MAX_REDIRECTS + 1):
+            status, headers, _ = self._request("HEAD", url, {})
+            if status not in (200, *_REDIRECT_STATUSES):
+                raise OSError(f"Unexpected Hub lookup status: {status}")
+            target = _redirect_url(url, headers) if status in _REDIRECT_STATUSES else url
+            # Rename/cache redirects may carry only the redirect body's length.
+            # Linked file metadata is sufficient and avoids an extra HEAD.
+            if (status in _REDIRECT_STATUSES and not headers.get("x-linked-size")
+                    and _url_origin(target) == _url_origin(self._endpoint)):
+                if target in visited or redirects == _MAX_REDIRECTS:
+                    raise OSError("Hub redirect chain is cyclic or exceeds its limit")
+                visited.add(target)
+                url = target
+                continue
+            break
         try:
             size = int(headers.get("x-linked-size", headers.get("content-length", "")))
         except (TypeError, ValueError):
@@ -118,9 +179,20 @@ class HubReader:
         if size < 0:
             raise ValueError("Hub file size must be nonnegative")
         etag = headers.get("x-linked-etag", headers.get("etag"))
-        remote = RemoteFile(repo_id, filename, revision, urljoin(url, location) if location else url,
+        remote = RemoteFile(repo_id, filename, revision, target,
                             size, etag.strip('"') if etag else None, headers.get("x-xet-hash"))
-        self._files[(repo_id, filename, revision)] = remote
+        key = (repo_id, filename, revision)
+        previous = self._files.get(key)
+        if previous is not None:
+            if previous.size != remote.size:
+                raise ValueError("Pinned file size changed during refresh")
+            for name in ("sha256", "xet_hash"):
+                old, new = getattr(previous, name), getattr(remote, name)
+                if old is not None and new is not None and old != new:
+                    raise ValueError("Pinned file identity changed during refresh")
+            remote = replace(remote, sha256=remote.sha256 or previous.sha256,
+                             xet_hash=remote.xet_hash or previous.xet_hash)
+        self._files[key] = remote
         return remote
 
     def resolve(self, repo_id, filename, revision) -> RemoteFile:
@@ -160,13 +232,13 @@ class HubReader:
             key = (remote.repo_id, remote.filename, remote.revision)
             current = self._files.get(key, remote)
             headers = {"Range": f"bytes={start}-{end - 1}"}
-            status, response_headers, body = self._request("GET", current.url, headers)
-            if status == 403:
+            status, response_headers, body, target = self._range_request(current.url, headers)
+            if status in (401, 403) and _url_origin(target) != _url_origin(self._endpoint):
                 self.stats["refreshes"] += 1
                 current = self._lookup(*key)
                 if current.size != remote.size:
                     raise ValueError("Pinned file size changed during refresh")
-                status, response_headers, body = self._request("GET", current.url, headers)
+                status, response_headers, body, target = self._range_request(current.url, headers)
             if status != 206:
                 raise OSError(f"Unexpected Hub range status: {status}")
             content_range = response_headers.get("content-range")
@@ -174,6 +246,8 @@ class HubReader:
                 raise ValueError("Hub Content-Range does not match the requested bytes")
         if len(body) != end - start:
             raise ValueError("File read returned an unexpected byte count")
+        if not Path(remote.repo_id).is_dir() and current.url != target:
+            self._files[key] = replace(current, url=target)
         return body
 
     def read_header(self, remote: RemoteFile) -> dict[str, TensorEntry]:
