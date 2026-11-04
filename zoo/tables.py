@@ -20,6 +20,15 @@ _FRAME_FIELDS = ("modality", "pipeline_tag", "downloads", "params", "stratum", "
 _NUMERIC_FRAME_FIELDS = {"downloads", "params", "inclusion_prob"}
 
 
+def _gated(value):
+    """Normalize Hub gating metadata for the nullable boolean database field."""
+    if value is None or type(value) is bool:
+        return value
+    if isinstance(value, str) and value in ("auto", "manual"):
+        return True
+    raise ValueError(f"Unknown manifest gated value: {value!r}")
+
+
 def _relative(path, root):
     try:
         return Path(path).resolve().relative_to(root).as_posix()
@@ -175,7 +184,7 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
         shapes = [tuple(shape) for shape in fp.shape] if fp else []
         model_rows.append(dict(model_key=key, repo_id=manifest["repo_id"], revision=manifest["revision"],
             access=access, weight_format=manifest.get("weight_format"), is_adapter=manifest.get("is_adapter", False),
-            license=manifest.get("license"), gated=manifest.get("gated", False), declared_bases=manifest.get("declared_bases", []),
+            license=manifest.get("license"), gated=_gated(manifest.get("gated", False)), declared_bases=manifest.get("declared_bases", []),
             base_model_relation=manifest.get("base_model_relation"), architecture=config.get("model_type") or manifest.get("gguf", {}).get("architecture"),
             **{field: decision.get(field) for field in ("is_decision", "system_one", "decision_type", "num_labels", "labels")},
             arch_signature=arch_signature(config, shapes), n_views=len(fp.names) if fp else 0,

@@ -113,3 +113,27 @@ are saved beside the snapshot in `commands.json`, `*.stdout` and
 The full R6 pilot smoke also needs the R3/R4 pilot outputs and the R5 G0
 calibration. Those prerequisites remain separate from this scoped smoke; no
 calibration is fabricated for it.
+
+### Finished pilot artifact smoke (2026-11-03)
+
+The finished pilot has97/97 new T1 successes and241/287 new T2 successes;46
+T2 failures remain explicit. Six previous T2 bundles are reused, giving247
+complete pilot T2 bundles with full spectra and all128/256/512 companions.
+
+The artifact-only snapshot at
+`runs/track-a-r3-r6-20261102.rcsy95ap/zoo` contains556 model records,89,286
+measured views,790 lineage rows and150 score rows. Its284 full-spectrum HDF5
+links include reused lab evidence; all links exist. No weights were re-extracted
+for this build. Hub gated states `auto`/`manual` are normalized to true only
+when assembling the boolean database column; raw manifests remain unchanged.
+
+All six query commands passed on the Smol135 dialogue LoRA r8/base example.
+`find` and `similar -k3` returned three rows; `info`, `family`, `diff` and
+`check` returned valid JSON. `check` remains `uncalibrated`. Exact commands
+and outputs are beside the snapshot in `pilot-query-commands.json` and
+`query-*.stdout`; `FINAL_REPORT.md` records failures and next priorities.
+Both Model-Zoo and Zoo-Keeper must be on PYTHONPATH for source-tree queries.
+Pass `--data_root` explicitly when ZOO_DATA is unset.
+
+This closes the uncalibrated artifact/query smoke. Full R6 and G0 still need
+complete formal calibration and required measurement coverage.

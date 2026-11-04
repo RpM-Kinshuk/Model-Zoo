@@ -45,3 +45,20 @@ def test_head_sketch_cosine_uses_every_shared_column():
     x = np.array([[1.0, 1.0]])
     y = np.array([[1.0, -1.0, 4.0], [2.0, 3.0, 4.0]])
     assert sketch_cosine(x, y) == pytest.approx(0.0)
+
+
+def test_cuda_sketch_dispatch_keeps_device_tensor(monkeypatch):
+    import evidence.sketch as engine
+    class DeviceMatrix:
+        is_cuda = True
+        ndim = 2
+        shape = (8, 12)
+    matrix = DeviceMatrix()
+    expected = np.arange(16, dtype=np.float32).reshape(4, 4)
+    calls = []
+    def cuda_sketch(w, k):
+        calls.append((w, k))
+        return expected
+    monkeypatch.setattr(engine, '_cuda_two_sided_sketch', cuda_sketch)
+    assert engine.two_sided_sketch(matrix, 4) is expected
+    assert calls == [(matrix, 4)]

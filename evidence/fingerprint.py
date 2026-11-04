@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+from itertools import groupby
 from pathlib import Path
 import tempfile
 from threading import Lock
@@ -21,14 +22,15 @@ import torch
 
 from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION,
                                 measurement_config, safe_filename)
-from net_esd.core import compute_esd_for_weight
+from net_esd.core import compute_esd_for_weight, _svdvals_for_measurement
 
 from . import EVIDENCE_VERSION
-from .delta import block_delta
+from .delta import block_delta, _compute_device
 from .hub import HubReader
 from .safetensors_header import TensorEntry, _DTYPE_BYTES, _numel, decode_plain
 from .sketch import (ROW_BLOCK, SKETCH_K_DEFAULT, SKETCH_K_MAX, SKETCH_SEED,
                      row_block_bounds, two_sided_sketch)
+from .source_prefetch import SourcePrefetch
 from .views import View, _expert_transpose, _fp8_blocks, decode_view, plan_views
 
 
@@ -257,7 +259,8 @@ def _cache_write(path, block):
         temporary.unlink(missing_ok=True)
 
 
-def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, height):
+def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, height,
+                  compute_device="cpu", *, full=None, parent_block=None):
     other = parent_views.get(view.name)
     if other is None:
         return _no_delta()
@@ -267,22 +270,43 @@ def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, heig
         result["status"] = "incompatible_shape"
         return result
     path = _cache_path(cache, parent_sources.manifest, view.name, bounds) if cache is not None else None
-    if path is not None and path.exists():
+    if parent_block is not None:
+        pass
+    elif path is not None and path.exists():
         raw = path.read_bytes()
         if len(raw) != block.numel() * 4:
             raise ValueError("Invalid cached parent block size")
         parent_block = torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(block.shape)
     else:
-        parent_block, _, _ = parent_sources.block(other, bounds)
+        parent_block, _, _ = parent_sources.block(other, bounds, full)
         if path is not None:
             _cache_write(path, parent_block)
     dtype = _TORCH_DTYPES_REVERSE.get(parent_sources.entries[other.sources[0]].dtype, torch.float32)
     if other.decode != "plain" or other.geometry == "lora_product":
         dtype = torch.float32
-    return block_delta(block, parent_block, dtype)
+    if torch.device(compute_device).type == "cpu":
+        return block_delta(block, parent_block, dtype)
+    return block_delta(block, parent_block, dtype, compute_device=compute_device)
 
 
 _TORCH_DTYPES_REVERSE = {name: dtype for dtype, name in _TORCH_DTYPES.items()}
+
+
+def _to_compute(tensor, device):
+    return tensor.to(device=device)
+
+
+def _view_device(block, device):
+    # Large single required views can exceed a device even when source reads
+    # are bounded. Keep the original CPU arithmetic for that view explicitly.
+    if device.type == "cuda" and block.numel()*block.element_size() > 128*1024**2:
+        free, _ = torch.cuda.mem_get_info(device)
+        reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+        if block.numel()*4*20 > .8*(free + reusable):
+            import warnings
+            warnings.warn("Matrix exceeds CUDA workspace budget; using CPU derived statistics for this view", RuntimeWarning)
+            return torch.device("cpu")
+    return device
 
 
 class _Records:
@@ -291,8 +315,9 @@ class _Records:
         self.k, self.tier, self.records, self.seen = k, tier, [], {}
         self.by_source = {record["name"]: record for record in self.coverage}
 
-    def add(self, view, bounds, block, stored, factors, dtype, delta):
-        digest = _block_hash(stored if stored is not None else block.float(), dtype if stored is not None else "F32")
+    def add(self, view, bounds, block, stored, factors, dtype, delta, *, host_block=None):
+        digest = _block_hash(stored if stored is not None else (
+            host_block if host_block is not None else block.float()), dtype if stored is not None else "F32")
         duplicate_key = (view.matrix_shape, bounds, digest)
         if duplicate_key in self.seen:
             for source in view.sources:
@@ -305,13 +330,16 @@ class _Records:
         spectrum = np.empty(0, np.float32)
         if self.tier != "t2":
             if factors is None:
-                singular = torch.linalg.svdvals(block.float())
+                singular = _svdvals_for_measurement(block.float()) if block.is_cuda else torch.linalg.svdvals(block.float())
             else:
                 b, a = factors
+                if block.is_cuda:
+                    b, a = b.to(block.device), a.to(block.device)
                 rb = torch.linalg.qr(b.double(), mode="reduced").R
                 ra = torch.linalg.qr(a.double().T, mode="reduced").R
-                singular = torch.linalg.svdvals(rb @ ra.T)
-            spectrum = torch.sort(singular.square()).values.float().numpy()
+                product = rb @ ra.T
+                singular = _svdvals_for_measurement(product) if product.is_cuda else torch.linalg.svdvals(product)
+            spectrum = torch.sort(singular.square()).values.float().cpu().numpy()
         self.records.append(dict(view=view, rows=bounds, sha256=digest, sketch=padded,
                                  spectrum=spectrum, delta=delta))
         for source in view.sources:
@@ -346,23 +374,6 @@ class _Records:
         finally:
             temporary.unlink(missing_ok=True)
         return path
-
-
-def _compute_device(value):
-    try:
-        device = torch.device(value)
-    except (TypeError, RuntimeError):
-        raise ValueError("Invalid spectrum compute device") from None
-    if device.type == "cpu" and device.index is None:
-        return device
-    if device.type != "cuda":
-        raise ValueError("Spectrum compute device must be cpu or cuda:<index>")
-    if not torch.cuda.is_available():
-        raise ValueError("Requested CUDA compute device is unavailable")
-    index = device.index if device.index is not None else 0
-    if index >= torch.cuda.device_count():
-        raise ValueError("Requested CUDA compute device index is unavailable")
-    return torch.device("cuda", index)
 
 
 class _Spectra:
@@ -416,17 +427,121 @@ def _metadata(identity, parent, k, height, stats, elapsed):
                 evidence_version=EVIDENCE_VERSION, elapsed_seconds=elapsed, **stats)
 
 
+def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
+                        heights, records, spectra, manifest, device, window, max_bytes):
+    groups = [list(group) for _, group in groupby(
+        sorted(views, key=lambda view: (view.sources, view.name)), key=lambda view: view.sources)]
+
+    def parent_groups(group):
+        result = {}
+        if parent_sources is not None and parent_cache is None:
+            for view in group:
+                other = parent_views.get(view.name)
+                if other is not None and other.matrix_shape == view.matrix_shape:
+                    result.setdefault(other.sources, other)
+        return result
+
+    def estimate(group):
+        total = sum(sources.entries[name].end-sources.entries[name].start for name in group[0].sources)
+        for names in parent_groups(group):
+            total += sum(parent_sources.entries[name].end-parent_sources.entries[name].start for name in names)
+        return total
+
+    def load(group):
+        child = sources.full(group[0])
+        parents = {names: parent_sources.full(other) for names, other in parent_groups(group).items()}
+        return child, parents
+
+    def measure_view(view, full, parents):
+        plain = view.decode == "plain" and view.geometry != "lora_product"
+        cpu_full, stored_full, factors_full = sources.block(view, (0, view.matrix_shape[0]), full)
+        current_device = _view_device(cpu_full, device)
+        gpu_full = _to_compute(cpu_full, current_device)
+        gpu_factors = tuple(_to_compute(factor, current_device) for factor in factors_full) if factors_full is not None else None
+        other = parent_views.get(view.name)
+        parent_full = parents.get(other.sources) if other is not None else None
+        parent_gpu = None
+        if (parent_sources is not None and parent_cache is None and other is not None
+                and other.matrix_shape == view.matrix_shape and other.decode == "plain"
+                and other.geometry != "lora_product"):
+            cpu_parent = parent_sources.block(other, (0, other.matrix_shape[0]), parent_full)[0]
+            parent_gpu = _to_compute(cpu_parent, current_device)
+            del cpu_parent
+        for height, result in records.items():
+            bounds = (0, view.matrix_shape[0]) if height is None else row_block_bounds(view.matrix_shape[0], height)
+            # A full-matrix workspace fallback must not move its small,
+            # independently bounded companion computations off CUDA.
+            block_device = current_device if height is None else device
+            if height is None:
+                cpu_block, stored, factors = cpu_full, stored_full, factors_full
+                block = gpu_full
+            elif plain:
+                cpu_block = cpu_full[bounds[0]:bounds[1]]
+                stored = stored_full[bounds[0]:bounds[1]] if stored_full is not None else None
+                factors = None
+                block = (gpu_full[bounds[0]:bounds[1]] if block_device == current_device
+                         else _to_compute(cpu_block, block_device))
+            else:
+                # Decode/hash the canonical host block for packed and
+                # adapter layouts; do not change F32 product rounding.
+                cpu_block, stored, factors = sources.block(view, bounds, full)
+                block = _to_compute(cpu_block, block_device)
+            if gpu_factors is not None:
+                factors = (gpu_factors[0][bounds[0]:bounds[1]], gpu_factors[1])
+            override = parent_gpu[bounds[0]:bounds[1]] if parent_gpu is not None else None
+            delta = _parent_delta(block, view, bounds, parent_sources, parent_views,
+                                  parent_cache, height, block_device, full=parent_full,
+                                  parent_block=override) if parent_sources else _no_delta()
+            kept = result.add(view, bounds, block, stored, factors,
+                              sources.entries[view.sources[0]].dtype, delta, host_block=cpu_block)
+            if parent_cache is not None:
+                _cache_write(_cache_path(parent_cache, manifest, view.name, bounds), cpu_block)
+            if kept and height is None:
+                if view.geometry == "conv_flat":
+                    # Collector conv normalization needs the original 4D
+                    # stored weight, not the flattened view used by hashes.
+                    weight = full[view.sources[0]] if full is not None else stored_full.reshape(sources.entries[view.sources[0]].shape)
+                else:
+                    weight = block
+                spectra.add(view.name, weight)
+
+    def measure(group, payload):
+        full, parents = payload if payload is not None else (None, {})
+        for view in group:
+            measure_view(view, full, parents)
+
+    loader = SourcePrefetch(groups, load, estimate, window=window, max_bytes=max_bytes)
+    try:
+        while True:
+            try:
+                group, payload = loader.next()
+            except StopIteration:
+                break
+            measure(group, payload)
+            # Release the current group's host/device references before the
+            # next payload becomes current; never retain three source groups.
+            del group, payload
+    finally:
+        loader.close()
+
+
 def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Path,
                       parent: dict | None = None, parent_cache: Path | None = None,
                       sketch_k: int = SKETCH_K_DEFAULT, all_experts: bool = False,
                       also_t1_blocks: tuple[int, ...] = (), read_threads: int = 8,
-                      compute_device: str = "cpu") -> Path:
+                      compute_device: str = "cpu", prefetch_groups: int | None = None,
+                      prefetch_bytes: int = 512*1024**2) -> Path:
     """Measure one pinned manifest, publishing the final T2 marker last."""
     if tier not in ("t1", "t2") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
         raise ValueError("Invalid tier, sketch size, or read thread count")
     if any(type(height) is not int or height <= 0 for height in also_t1_blocks):
         raise ValueError("Block heights must be positive integers")
     device = _compute_device(compute_device)
+    window = (2 if device.type == "cuda" and tier == "t2" else 0) if prefetch_groups is None else prefetch_groups
+    if type(window) is not int or window not in (0, 1, 2):
+        raise ValueError("prefetch_groups must be 0, 1 or 2")
+    if type(prefetch_bytes) is not int or prefetch_bytes < 1:
+        raise ValueError("prefetch_bytes must be positive")
     started = time.monotonic()
     initial_resolves = reader.stats["resolves"]
     safe = safe_filename(f"{manifest['repo_id']}@{manifest['revision']}")
@@ -447,6 +562,10 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 heights += sorted(set(also_t1_blocks))
                 spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5", device)
             records = {height: _Records(coverage, sketch_k, "t2" if height is None else ("t1" if height == ROW_BLOCK else f"t1b{height}")) for height in heights}
+            if tier == "t2" and (device.type == "cuda" or window):
+                _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
+                                    heights, records, spectra, manifest, device, window, prefetch_bytes)
+                views = []
             previous_sources, full = None, None
             # Grouping bounds the full-source cache to one weight/factor group.
             for view in sorted(views, key=lambda view: (view.sources, view.name)):
@@ -457,7 +576,8 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 for height, result in records.items():
                     bounds = (0, view.matrix_shape[0]) if height is None else row_block_bounds(view.matrix_shape[0], height)
                     block, stored, factors = sources.block(view, bounds, full)
-                    delta = _parent_delta(block, view, bounds, parent_sources, parent_views, parent_cache, height) if parent_sources else _no_delta()
+                    delta = _parent_delta(block, view, bounds, parent_sources, parent_views,
+                                          parent_cache, height, device) if parent_sources else _no_delta()
                     kept = result.add(view, bounds, block, stored, factors, sources.entries[view.sources[0]].dtype, delta)
                     if parent_cache is not None:
                         _cache_write(_cache_path(parent_cache, manifest, view.name, bounds), block)

@@ -4,6 +4,8 @@ import math
 import numpy as np
 import torch
 
+from net_esd.core import _svdvals_for_measurement
+
 FLOOR_FRAC_IDENTICAL = 0.5
 
 # Explicit mantissa bits and minimum normal exponent of each stored format.
@@ -13,6 +15,35 @@ _STORAGE_PRECISION = {
     torch.float8_e4m3fn: (3, -6),
     torch.float8_e5m2: (2, -14),
 }
+
+
+def _compute_device(value):
+    try:
+        device = torch.device(value)
+    except (TypeError, RuntimeError):
+        raise ValueError("Invalid spectrum compute device") from None
+    if device.type == "cpu" and device.index is None:
+        return device
+    if device.type != "cuda":
+        raise ValueError("Spectrum compute device must be cpu or cuda:<index>")
+    if not torch.cuda.is_available():
+        raise ValueError("Requested CUDA compute device is unavailable")
+    index = device.index if device.index is not None else 0
+    if index >= torch.cuda.device_count():
+        raise ValueError("Requested CUDA compute device index is unavailable")
+    return torch.device("cuda", index)
+
+
+def _delta_svdvals(matrix, device):
+    if device.type == "cpu":
+        return torch.linalg.svdvals(matrix).numpy()
+    # Inputs are the original CPU-computed float64 delta/whitened matrices.
+    # Use the collector's precision-tested CUDA QR driver, never Jacobi SVD.
+    return _svdvals_for_measurement(matrix.to(device)).cpu().numpy()
+
+
+def _delta_stored(tensor, storage_dtype, device):
+    return tensor.detach().to(device=device, dtype=storage_dtype).contiguous()
 
 
 def gavish_donoho_rank(singular_values: np.ndarray, rows: int, cols: int) -> int:
@@ -29,13 +60,14 @@ def gavish_donoho_rank(singular_values: np.ndarray, rows: int, cols: int) -> int
 
 
 def block_delta(child: torch.Tensor, parent: torch.Tensor,
-                storage_dtype: torch.dtype) -> dict:
+                storage_dtype: torch.dtype, *, compute_device="cpu") -> dict:
+    device = _compute_device(compute_device)
     if child.shape != parent.shape:
         raise ValueError('child and parent shapes must match')
     if child.ndim != 2 or min(child.shape) == 0:
         raise ValueError('expected nonempty matrix blocks')
-    child_stored = child.detach().to(device='cpu', dtype=storage_dtype).contiguous()
-    parent_stored = parent.detach().to(device='cpu', dtype=storage_dtype).contiguous()
+    child_stored = _delta_stored(child, storage_dtype, device)
+    parent_stored = _delta_stored(parent, storage_dtype, device)
     rows, cols = parent.shape
     identical = (child_stored.view(torch.uint8).reshape(rows, cols, -1)
                  == parent_stored.view(torch.uint8).reshape(rows, cols, -1)).all(dim=-1)
@@ -59,24 +91,32 @@ def block_delta(child: torch.Tensor, parent: torch.Tensor,
     if frac_identical == 1.0 or frac_identical > FLOOR_FRAC_IDENTICAL:
         return result
 
-    raw_values = torch.linalg.svdvals(delta).numpy()
+    del child_stored, parent_stored, child_float, identical
+    raw_values = _delta_svdvals(delta, device)
     count = min(16, raw_values.size)
     result['top_singular_values'][:count] = raw_values[:count]
     if storage_dtype in _STORAGE_PRECISION:
         mantissa_bits, min_exponent = _STORAGE_PRECISION[storage_dtype]
         magnitude = parent_float.abs().double()
+        del parent_float
         _, exponent = torch.frexp(magnitude)
+        del _
         exponent = torch.where(magnitude == 0, min_exponent + 1, exponent)
+        del magnitude
         spacing = torch.ldexp(torch.ones_like(delta), torch.clamp(
             exponent - mantissa_bits - 1, min=min_exponent - mantissa_bits,
         ))
+        del exponent
         variance = spacing.square() / 12
-        u, v = torch.ones(rows, dtype=torch.float64), torch.ones(cols, dtype=torch.float64)
+        del spacing
+        u = torch.ones(rows, dtype=torch.float64, device=delta.device)
+        v = torch.ones(cols, dtype=torch.float64, device=delta.device)
         for _ in range(50):
             u = 1 / ((variance @ v) / cols)
             v = 1 / ((variance.T @ u) / rows)
         whitened = u.sqrt()[:, None] * delta * v.sqrt()[None, :]
-        values = torch.linalg.svdvals(whitened).numpy()
+        del variance, delta, u, v
+        values = _delta_svdvals(whitened, device)
         threshold = 1.1 * (math.sqrt(rows) + math.sqrt(cols))
         rank = int(np.count_nonzero(values > threshold))
     else:

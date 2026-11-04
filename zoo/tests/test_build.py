@@ -90,6 +90,22 @@ def test_all_empty_label_maps_and_skipped_lists_serialize(tmp_path):
     assert model.labels == {} and model.skipped_tensors == [] and model.declared_bases == []
 
 
+def test_hub_gating_values_roundtrip_as_nullable_booleans_without_manifest_changes(tmp_path):
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    values = {"auto": "auto", "manual": "manual", "true": True, "false": False, "unknown": None}
+    for name, gated in values.items():
+        manifest = dict(repo_id=f"org/{name}", revision=SHA1, access="t0_only", tensors=[], gated=gated)
+        (manifests / f"{name}.manifest.json").write_text(json.dumps(manifest))
+    before = _snapshot(manifests)
+    out = build_zoo(manifests, [], tmp_path / "zoo", tmp_path)
+    gated = pq.read_table(out / "models.parquet").select(["repo_id", "gated"])
+    assert pa.types.is_boolean(gated.schema.field("gated").type)
+    assert {row["repo_id"]: row["gated"] for row in gated.to_pylist()} == {
+        "org/auto": True, "org/manual": True, "org/true": True, "org/false": False, "org/unknown": None}
+    assert _snapshot(manifests) == before
+
+
 def test_selected_input_provenance_excludes_raw_weights_and_is_deterministic(universe, tmp_path, null_dict):
     null_path = tmp_path / "null.json"
     null_path.write_text(json.dumps(null_dict))

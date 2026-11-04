@@ -258,6 +258,7 @@ def test_t2_forwards_cuda_device_only_to_spectrum_collector(local_manifest, tmp_
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     monkeypatch.setattr(module, "compute_esd_for_weight", simulated_cuda)
+    monkeypatch.setattr(module, "_to_compute", lambda tensor, device: tensor)
     path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
                              compute_device="cuda:1", also_t1_blocks=(256,))
     assert devices and set(devices) == {1}
@@ -284,3 +285,131 @@ def test_unavailable_cuda_rejected_before_extraction(local_manifest, tmp_path, m
         fingerprint_model(local_manifest, reader, "t2", tmp_path / "out", compute_device="cuda:0")
     assert reader.stats == dict(resolves=0, range_reads=0, bytes_read=0, refreshes=0, retries=0)
     assert not (tmp_path / "out").exists()
+
+
+def test_parent_delta_cuda_forwarded_to_full_and_all_companion_blocks(
+        local_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+    collector, original_delta = module.compute_esd_for_weight, module.block_delta
+    seen = []
+
+    def simulated_spectrum(*args):
+        result = collector(*args[:10], None, *args[11:])
+        return dict(result, compute_device=f"cuda:{args[10]}")
+
+    def simulated_delta(child, parent, dtype, **kwargs):
+        seen.append((child.shape[0], kwargs.get("compute_device")))
+        return original_delta(child, parent, dtype)
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(module, "compute_esd_for_weight", simulated_spectrum)
+    monkeypatch.setattr(module, "block_delta", simulated_delta)
+    monkeypatch.setattr(module, "_to_compute", lambda tensor, device: tensor)
+    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
+                      parent=local_manifest, compute_device="cuda:1",
+                      also_t1_blocks=(128, 256, 512))
+    assert seen
+    assert all(torch.device(device) == torch.device("cuda:1") for _, device in seen)
+    assert {128, 256, 512} <= {rows for rows, _ in seen}
+    assert 768 in {rows for rows, _ in seen}  # Full T2 matrix, not a companion.
+
+
+def test_parent_delta_default_keeps_legacy_cpu_call(
+        child_with_extended_vocab, parent_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+    original = module.block_delta
+    seen = []
+
+    def legacy_delta(child, parent, dtype):
+        seen.append(child.shape)
+        return original(child, parent, dtype)
+
+    monkeypatch.setattr(module, "block_delta", legacy_delta)
+    fingerprint_model(child_with_extended_vocab, HubReader(), "t1", tmp_path,
+                      parent=parent_manifest)
+    assert seen
+
+
+def test_bounded_prefetch_reuses_parent_full_reads(local_manifest, tmp_path):
+    class CountingReader(HubReader):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+        def read(self, remote, start, end):
+            self.calls.append((remote.filename, start, end))
+            return super().read(remote, start, end)
+    reader = CountingReader()
+    baseline = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "baseline",
+                                                 parent=local_manifest, also_t1_blocks=(128, 256, 512)))
+    optimized = load_fingerprint(fingerprint_model(local_manifest, reader, "t2", tmp_path / "prefetched",
+                                                  parent=local_manifest, also_t1_blocks=(128, 256, 512),
+                                                  prefetch_groups=2, prefetch_bytes=1024**2))
+    assert len(reader.calls) == 4  # Two child + two parent source matrices, not four parent reads each.
+    assert baseline.names == optimized.names and baseline.sha256 == optimized.sha256
+    np.testing.assert_array_equal(baseline.sketch, optimized.sketch)
+    for suffix in ("t1b128", "t1", "t1b512"):
+        name = baseline.meta["repo_id"] + "@" + baseline.meta["revision"]
+        filename = safe_filename(name) + "." + suffix + ".fingerprint.safetensors"
+        a, b = (load_fingerprint(tmp_path / folder / filename) for folder in ("baseline", "prefetched"))
+        assert a.sha256 == b.sha256
+        np.testing.assert_array_equal(a.sketch, b.sketch)
+        for x, y in zip(a.spectra, b.spectra):
+            np.testing.assert_array_equal(x, y)
+
+
+def test_over_budget_experts_use_selected_view_reads(moe_manifest, tmp_path):
+    class CountingReader(HubReader):
+        def __init__(self):
+            super().__init__()
+            self.sizes = []
+        def read(self, remote, start, end):
+            self.sizes.append(end-start)
+            return super().read(remote, start, end)
+    reader = CountingReader()
+    fp = load_fingerprint(fingerprint_model(moe_manifest, reader, "t2", tmp_path,
+                                           all_experts=True, prefetch_groups=2, prefetch_bytes=1024))
+    assert fp.geometry.count("expert_slice") == 8
+    assert max(reader.sizes) <= 1024*512*4  # Never the entire four-expert source tensor.
+
+
+@pytest.mark.parametrize("options", [{"prefetch_groups": 3}, {"prefetch_groups": -1},
+                                     {"prefetch_bytes": 0}, {"prefetch_bytes": -1}])
+def test_invalid_prefetch_options_leave_no_output(local_manifest, tmp_path, options):
+    with pytest.raises(ValueError, match="prefetch"):
+        fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "invalid", **options)
+    assert not (tmp_path / "invalid").exists()
+
+
+def test_full_cpu_workspace_fallback_keeps_small_companions_on_cuda(
+        local_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+
+    collector, add = module.compute_esd_for_weight, module._Records.add
+    transferred, measured = {}, []
+
+    def simulated_transfer(tensor, device):
+        transferred[id(tensor)] = torch.device(device)
+        return tensor
+
+    def record(self, view, bounds, block, *args, **kwargs):
+        measured.append((self.tier, block.shape[0], transferred.get(id(block))))
+        return add(self, view, bounds, block, *args, **kwargs)
+
+    def simulated_spectrum(*args):
+        result = collector(*args[:10], None, *args[11:])
+        return dict(result, compute_device=f"cuda:{args[10]}")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(module, "_view_device", lambda block, device: torch.device("cpu"))
+    monkeypatch.setattr(module, "_to_compute", simulated_transfer)
+    monkeypatch.setattr(module._Records, "add", record)
+    monkeypatch.setattr(module, "compute_esd_for_weight", simulated_spectrum)
+    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
+                      compute_device="cuda:0", also_t1_blocks=(128, 256, 512))
+    assert measured
+    assert all(device == torch.device("cpu") for tier, _, device in measured if tier == "t2")
+    companions = [(rows, device) for tier, rows, device in measured if tier != "t2"]
+    assert {rows for rows, _ in companions} == {128, 256, 512}
+    assert all(device == torch.device("cuda:0") for _, device in companions)

@@ -136,3 +136,11 @@ def test_paths_cannot_escape_data_root_and_empty_inputs_stay_typed(universe, tmp
     result = build_tables(empty, [], tmp_path)
     assert all(table.empty for table in result.values())
     assert list(result["models"].columns) == MODELS_COLUMNS
+
+
+@pytest.mark.parametrize("gated", ["unexpected", "false", ""])
+def test_unknown_hub_gating_strings_are_explicit_errors(tmp_path, gated):
+    manifest = dict(repo_id="org/model", revision=SHA1, access="t0_only", tensors=[], gated=gated)
+    (tmp_path / "model.manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="gated"):
+        build_tables(tmp_path, [], tmp_path)

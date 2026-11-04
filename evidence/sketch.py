@@ -13,6 +13,9 @@ OPERATOR_CACHE_BYTES = 2 * 1024**3
 
 _OPERATOR_CACHE = OrderedDict()
 _CACHE_BYTES = 0
+_CUDA_OPERATOR_CACHE = OrderedDict()
+_CUDA_CACHE_BYTES = 0
+CUDA_OPERATOR_CACHE_BYTES = 128 * 1024**2
 
 
 def sketch_operator(dim: int, side: int, k: int = SKETCH_K_DEFAULT) -> np.ndarray:
@@ -48,14 +51,55 @@ def _matrix(w: torch.Tensor) -> np.ndarray:
 
 
 def two_sided_sketch(w: torch.Tensor, k: int = SKETCH_K_DEFAULT) -> np.ndarray:
+    if w.is_cuda:
+        return _cuda_two_sided_sketch(w, k)
     matrix = _matrix(w)
     left = sketch_operator(matrix.shape[0], 0, k).astype(np.float64)
     right = sketch_operator(matrix.shape[1], 1, k).astype(np.float64)
     return (left @ matrix @ right.T).astype(np.float32)
 
 
+def _cuda_operator(dim, side, k, device):
+    """Cache the original NumPy operator on the compute device, bounded in bytes."""
+    global _CUDA_CACHE_BYTES
+    key = (dim, side, k, str(device))
+    operator = _CUDA_OPERATOR_CACHE.pop(key, None)
+    if operator is None:
+        fixed = sketch_operator(dim, side, k).astype(np.float64)
+        operator = torch.from_numpy(fixed).to(device)
+        size = operator.numel() * operator.element_size()
+        if size > CUDA_OPERATOR_CACHE_BYTES:
+            return operator
+        while _CUDA_OPERATOR_CACHE and _CUDA_CACHE_BYTES + size > CUDA_OPERATOR_CACHE_BYTES:
+            _, oldest = _CUDA_OPERATOR_CACHE.popitem(last=False)
+            _CUDA_CACHE_BYTES -= oldest.numel() * oldest.element_size()
+        _CUDA_CACHE_BYTES += size
+    _CUDA_OPERATOR_CACHE[key] = operator
+    return operator
+
+
+def _cuda_two_sided_sketch(w, k):
+    if w.ndim != 2 or min(w.shape) <= 0:
+        raise ValueError('expected a nonempty matrix')
+    matrix = w.detach().double()
+    left = _cuda_operator(matrix.shape[0], 0, k, matrix.device)
+    right = _cuda_operator(matrix.shape[1], 1, k, matrix.device)
+    return (left @ matrix @ right.T).float().cpu().numpy()
+
+
 def factored_sketch(b: torch.Tensor, a: torch.Tensor,
                     k: int = SKETCH_K_DEFAULT) -> np.ndarray:
+    if b.is_cuda or a.is_cuda:
+        device = b.device if b.is_cuda else a.device
+        left_factor = b.detach().to(device=device, dtype=torch.float64)
+        right_factor = a.detach().to(device=device, dtype=torch.float64)
+        if (left_factor.ndim != 2 or right_factor.ndim != 2
+                or min(left_factor.shape) <= 0 or min(right_factor.shape) <= 0
+                or left_factor.shape[1] != right_factor.shape[0]):
+            raise ValueError('expected compatible nonempty matrix factors')
+        left = _cuda_operator(left_factor.shape[0], 0, k, device)
+        right = _cuda_operator(right_factor.shape[1], 1, k, device)
+        return ((left @ left_factor) @ (right_factor @ right.T)).float().cpu().numpy()
     left_factor, right_factor = _matrix(b), _matrix(a)
     if left_factor.shape[1] != right_factor.shape[0]:
         raise ValueError('incompatible factor shapes')

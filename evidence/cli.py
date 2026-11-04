@@ -481,7 +481,7 @@ def _parser():
     single.add_argument("--out")
     single.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
     single.add_argument("--all_experts", action="store_true")
-    single.add_argument("--compute_device", default="cpu", help="T2 spectrum device: cpu or cuda:<index>")
+    single.add_argument("--compute_device", default="cpu", help="Spectrum and parent-delta device: cpu or cuda:<index>")
     single.add_argument("--json", action="store_true")
     for name in ("diff", "check"):
         command = commands.add_parser(name)
@@ -516,7 +516,7 @@ def _parser():
             command.add_argument("--tier", choices=("t1", "t2"), required=True)
             command.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
             command.add_argument("--all_experts", action="store_true")
-            command.add_argument("--compute_device", default="cpu", help="T2 spectrum device: cpu or cuda:<index>")
+            command.add_argument("--compute_device", default="cpu", help="Spectrum and parent-delta device: cpu or cuda:<index>")
             command.add_argument("--also_t1_blocks", default="")
             command.add_argument("--with_parent", action="store_true")
             command.add_argument("--parent_cache", type=Path)
