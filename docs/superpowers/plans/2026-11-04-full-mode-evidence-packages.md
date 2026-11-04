@@ -2,12 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-11-04):** Owner authorized incremental execution. Tasks 1–2,
-including bounded parent-block prefetch, are committed by the owner at
-`375f427`. Task 3 (sidecar API) is implemented and reviewed, uncommitted.
-Full suite: 1336 passed, 1 skipped (esd_ind). Tasks 4–9 pending; Task 7 still
-requires XF approval. Progress ledger:
-`.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
+**Status (2026-11-04):** Owner authorized incremental execution. Tasks 1–3
+are committed through `4fec3a3`; Tasks 4 and 6 are implemented and reviewed,
+uncommitted. Full suite: 1378 passed, 1 skipped (esd_ind). Task 6 includes
+atomic model packages, worker publishing, package-driven builds and the layers
+table. Preliminary/full tiers use distinct immutable convention IDs; the default
+build accepts both current tiers and prefers full evidence. Tasks 5, 7–9 pending;
+Task 7 still requires XF approval. Next: Task 5 before Task 8 sizing/prefetch.
+Progress ledger: `.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
 
 **Agents: never run commit steps.** Leave changes uncommitted and record each
 task's suggested message in `Zoo-Keeper/handoff/STATUS.md` (DIRECTIVES, "Git:
@@ -367,7 +369,7 @@ are always passed explicitly.
   evidence reruns with `--evidence_only`: it loads the model, skips ESD and
   reuses `metrics/*.h5`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `test_runner_defaults_enable_evidence` and
     `test_plain_worker_run_writes_package_files`: with no extra flags, a tiny
     model gets the manifest; t2, t1, t1b128 and t1b512 fingerprints; and the
@@ -382,13 +384,13 @@ are always passed explicitly.
   - `test_checkpoint_mode_turns_evidence_off_with_notice`,
     `test_completion_requires_t2_marker_with_evidence` and
     `test_prepare_writes_manifests_for_models_and_declared_bases`.
-- [ ] **Step 2:** Run `python -m pytest esd_experiment/tests -q`. Expected: the
+- [x] **Step 2:** Run `python -m pytest esd_experiment/tests -q`. Expected: the
   new tests FAIL; existing tests pass after updating any that assumed evidence
   off.
-- [ ] **Step 3:** Implement the bridge, the worker stages and the runner flags.
-- [ ] **Step 4:** Run `python -m pytest esd_experiment/tests evidence/tests -q`.
+- [x] **Step 3:** Implement the bridge, the worker stages and the runner flags.
+- [x] **Step 4:** Run `python -m pytest esd_experiment/tests evidence/tests -q`.
   Expected: all PASS.
-- [ ] **Step 5:** Update the README and analysis guide. Record the suggested
+- [x] **Step 5:** Update the README and analysis guide. Record the suggested
   message `feat(runner): evidence sidecar on by default in full-mode workers`.
 
 ### Task 5: Automatic CPU thread budget per job
@@ -467,7 +469,7 @@ are always passed explicitly.
   `current_conventions_id()` and writes `$ZOO_DATA/builds/current`. Packages
   under other conventions are skipped and counted in the build summary.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   `test_publish_creates_sharded_package_with_hashes`,
   `test_publish_is_idempotent`,
   `test_publish_never_overwrites_and_separates_conventions`,
@@ -479,12 +481,12 @@ are always passed explicitly.
   `test_build_reports_skipped_conventions`,
   `test_build_from_packages_matches_build_from_directories` (the six existing
   tables are equal) and `test_layers_rows_match_metrics_h5`.
-- [ ] **Step 2:** Run `python -m pytest zoo/tests esd_experiment/tests/test_worker.py -q`.
+- [x] **Step 2:** Run `python -m pytest zoo/tests esd_experiment/tests/test_worker.py -q`.
   Expected: the new tests FAIL.
-- [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run `python -m pytest zoo/tests evidence/tests esd_experiment/tests -q`.
+- [x] **Step 3:** Implement.
+- [x] **Step 4:** Run `python -m pytest zoo/tests evidence/tests esd_experiment/tests -q`.
   Expected: all PASS.
-- [ ] **Step 5:** Update `docs/operations/zoo.md` and the README. Record the
+- [x] **Step 5:** Update `docs/operations/zoo.md` and the README. Record the
   suggested message `feat(zoo): model packages, automatic publishing and per-layer metrics`.
 
 ### Task 7: Delta pass for parents found by similarity

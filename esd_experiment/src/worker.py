@@ -23,6 +23,8 @@ import numpy as np
 import h5py
 import json
 import re
+import shutil
+import signal
 
 # Add project root to path
 SCRIPT_DIR = Path(__file__).parent
@@ -37,6 +39,9 @@ from measurement_config import (
     measurement_config as build_measurement_config,
     validate_model_pin,
 )
+from evidence_bridge import (add_evidence_arguments, validate_evidence_arguments, create_sidecar,
+                             evidence_complete, evidence_dir, loaded_block, measure_tensors,
+                             metrics_results, read_metrics, evidence_settings, quarantine_evidence, publish_model)
 from net_esd import net_esd_estimator
 from net_esd.utils import weight_usage_report
 
@@ -75,7 +80,9 @@ def parse_args():
     parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute (off by default)")
     parser.add_argument("--max_retries", type=int, default=0, help="Max retry attempts")
     
+    add_evidence_arguments(parser, worker=True)
     args = parser.parse_args()
+    validate_evidence_arguments(args, parser)
     try:
         build_measurement_config(args)
         validate_model_pin(args.model_id, args.revision, args.source_model, args.base_model_relation, args.loader_scenario)
@@ -712,7 +719,11 @@ def cleanup_model(model):
         torch.cuda.empty_cache()
 
 
-def main():
+def _publish_model(args, output_dir, repo_id, revision):
+    return publish_model(args, output_dir, repo_id, revision)
+
+
+def _main():
     """Main worker function."""
     args = parse_args()
     measurement = build_measurement_config(
@@ -724,6 +735,7 @@ def main():
     # Parse model ID (may include revision) and allow curated revision override
     repo_id, revision = resolve_model_revision(args.model_id, args.revision)
     display_name = args.model_id
+    evidence_enabled = bool(getattr(args, "evidence", False))
     
     # Setup output path
     output_dir = Path(args.output_dir)
@@ -737,6 +749,9 @@ def main():
     # Check if already done
     try:
         if args.overwrite:
+            if evidence_enabled:
+                shutil.rmtree(evidence_dir(output_dir, repo_id, revision), ignore_errors=True)
+                (output_dir / "logs/coverage" / f"{safe_filename(display_name)}.json").unlink(missing_ok=True)
             if output_file.exists() or metrics_file.exists() or temp_output_file.exists() or temp_metrics_file.exists():
                 print("Overwrite requested; clearing existing artifacts before regeneration")
                 cleanup_output_artifacts(
@@ -758,18 +773,23 @@ def main():
                                            "incompatible_results", message, attempt=0)
                     heartbeat.stop(state="failed", stage="save")
                     return 1
-                print(f"Results already exist: {output_file}")
-                record_terminal_status(
-                    output_dir,
-                    display_name,
-                    status="success",
-                    stage="skip",
-                    reason="already_complete",
-                    message="Results already exist",
-                    attempt=0,
-                )
-                heartbeat.stop(state="success", stage="skip")
-                return 0
+                if evidence_enabled and not evidence_complete(output_dir, display_name, revision, measurement=measurement, options=args, stratum=args.stratum):
+                    print("ESD outputs exist; retrying evidence only")
+                    args.evidence_only = True
+                else:
+                    _publish_model(args, output_dir, repo_id, revision)
+                    print(f"Results already exist: {output_file}")
+                    record_terminal_status(
+                        output_dir,
+                        display_name,
+                        status="success",
+                        stage="skip",
+                        reason="already_complete",
+                        message="Results already exist",
+                        attempt=0,
+                    )
+                    heartbeat.stop(state="success", stage="skip")
+                    return 0
     except Exception as exc:
         stage, reason, message = classify_runtime_error("save", exc)
         record_failure(output_dir, display_name, stage, reason, message, attempt=0)
@@ -798,6 +818,9 @@ def main():
     
     for attempt in range(1, args.max_retries + 2):
         checkpoint = None
+        sidecar, evidence_error, sidecar_started = None, None, False
+        evidence_backup = None
+        evidence_finished = False
         fallback = None
         current_stage = "load"
         heartbeat.update(stage=current_stage)
@@ -858,13 +881,25 @@ def main():
                 model_devices = {str(param.device) for param in model.parameters()}
                 print(f"Model devices: {', '.join(sorted(model_devices))}")
             
+            if evidence_enabled and checkpoint is None and not evidence_complete(output_dir, display_name, revision, measurement=measurement, options=args, stratum=args.stratum):
+                try:
+                    evidence_backup = quarantine_evidence(output_dir, repo_id, revision)
+                    sidecar = create_sidecar(args, output_dir, repo_id, revision)
+                    if torch.cuda.is_available() and args.device_map != "cpu":
+                        sidecar.start()
+                        sidecar_started = True
+                except Exception as exc:
+                    evidence_error = exc
+
             # Run ESD analysis
             print("\nRunning ESD analysis...")
             fix_fingers_value = None if args.fix_fingers == "DKS" else args.fix_fingers
             layer_coverage = []
             
             try:
-                if checkpoint is not None:
+                if getattr(args, "evidence_only", False):
+                    metrics, coverage = read_metrics(metrics_file)
+                elif checkpoint is not None:
                     device = args.device_map
                     if device == "auto":
                         device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -890,6 +925,8 @@ def main():
                 raise LoaderFailure(stage, reason, message) from exc
 
             coverage.update(model_id=display_name, measurement_config=measurement)
+            if evidence_enabled and checkpoint is not None:
+                coverage["evidence"] = "skipped_checkpoint_fallback"
             # Preserve missingness information even if every candidate is skipped.
             _write_json_atomic(output_dir / "logs" / "coverage" / f"{safe_filename(display_name)}.json", coverage)
             print(f"Coverage: {json.dumps(coverage['counts'], sort_keys=True)}")
@@ -903,38 +940,67 @@ def main():
             print(f"ESD analysis completed successfully")
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
             
-            # Save results
+            def persist_results():
+                cleanup_temp_path(temp_output_file)
+                cleanup_temp_path(temp_metrics_file)
+                try:
+                    save_results(
+                        metrics,
+                        temp_output_file,
+                        display_name,
+                        is_adapter,
+                        source_model if is_adapter else None,
+                        base_model_relation=args.base_model_relation or "",
+                        fix_fingers=args.fix_fingers or "",
+                        h5_output_path=temp_metrics_file,
+                        save_eigs=getattr(args, "save_eigs", True),
+                        measurement_config=measurement,
+                        coverage=coverage,
+                    )
+                    finalize_output_path(temp_output_file, output_file)
+                    if temp_metrics_file.exists():
+                        finalize_output_path(temp_metrics_file, metrics_file)
+                except Exception as exc:
+                    cleanup_output_artifacts(
+                        temp_output_file,
+                        temp_metrics_file,
+                        output_file,
+                        metrics_file,
+                    )
+                    stage, reason, message = classify_runtime_error("save", exc)
+                    raise LoaderFailure(stage, reason, message) from exc
+
+
+            # Commit expensive ESD before entering a potentially long evidence
+            # stage, so supervisor termination cannot discard completed spectra.
             current_stage = "save"
             heartbeat.update(stage=current_stage)
-            cleanup_temp_path(temp_output_file)
-            cleanup_temp_path(temp_metrics_file)
-            try:
-                save_results(
-                    metrics,
-                    temp_output_file,
-                    display_name,
-                    is_adapter,
-                    source_model if is_adapter else None,
-                    base_model_relation=args.base_model_relation or "",
-                    fix_fingers=args.fix_fingers or "",
-                    h5_output_path=temp_metrics_file,
-                    save_eigs=getattr(args, "save_eigs", True),
-                    measurement_config=measurement,
-                    coverage=coverage,
-                )
-                finalize_output_path(temp_output_file, output_file)
-                if temp_metrics_file.exists():
-                    finalize_output_path(temp_metrics_file, metrics_file)
-            except Exception as exc:
-                cleanup_output_artifacts(
-                    temp_output_file,
-                    temp_metrics_file,
-                    output_file,
-                    metrics_file,
-                )
-                stage, reason, message = classify_runtime_error("save", exc)
-                raise LoaderFailure(stage, reason, message) from exc
-            
+            if not getattr(args, "evidence_only", False):
+                persist_results()
+
+            if evidence_enabled and checkpoint is None:
+                current_stage = "fingerprint"
+                heartbeat.update(stage=current_stage)
+                try:
+                    if evidence_error is not None:
+                        raise evidence_error
+                    if sidecar is not None:
+                        if not sidecar_started:
+                            sidecar.start()
+                        counts = sidecar.finish(metrics_results(metrics), loaded_block(model),
+                                                lambda items: measure_tensors(items, measurement), measurement)
+                        folder = evidence_dir(output_dir, repo_id, revision)
+                        _write_json_atomic(folder / "evidence.json", dict(counts, settings=evidence_settings(args), stratum=args.stratum))
+                        coverage["evidence"] = counts
+                        _write_json_atomic(output_dir / "logs/coverage" / f"{safe_filename(display_name)}.json", coverage)
+                        evidence_finished = True
+                except BaseException:
+                    raise
+
+            current_stage = "save"
+            heartbeat.update(stage=current_stage)
+            _publish_model(args, output_dir, repo_id, revision)
+
             success = True
             break
             
@@ -947,7 +1013,7 @@ def main():
                 output_dir,
                 display_name,
                 status="failed",
-                stage="save",
+                stage=current_stage,
                 reason="interrupted",
                 message="Interrupted by user",
                 attempt=attempt,
@@ -1010,6 +1076,15 @@ def main():
                 break
         
         finally:
+            if sidecar is not None:
+                sidecar.cancel()
+            if evidence_backup is not None:
+                if evidence_finished or success:
+                    shutil.rmtree(evidence_backup, ignore_errors=True)
+                else:
+                    folder = evidence_dir(output_dir, repo_id, revision)
+                    shutil.rmtree(folder, ignore_errors=True)
+                    os.replace(evidence_backup, folder)
             # Cleanup
             model = None  # Release the caller's reference before clearing CUDA cache/retrying.
             cleanup_model(model)
@@ -1046,6 +1121,21 @@ def main():
     )
     heartbeat.stop(state="success", stage="save")
     return 0
+
+
+def _terminate(signum, frame):
+    raise KeyboardInterrupt("Worker terminated")
+
+
+def main():
+    if threading.current_thread() is not threading.main_thread():
+        return _main()
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        return _main()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

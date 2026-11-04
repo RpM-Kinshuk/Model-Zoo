@@ -27,15 +27,20 @@ from . import ZOO_VERSION
 from .lineage import declared_edges, merge_edges, shared_tensor_edges, similarity_edges
 from .retrieval import build_retrieval
 from .schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
-                     PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS)
-from .tables import _fingerprint_files, build_tables, duplicate_groups
+                     PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS, LAYERS_COLUMNS, empty_table)
+from .tables import _fingerprint_files, _manifest_files, build_tables, duplicate_groups
+from .publish import package_inputs, current_conventions_id
+from .layers import build_layers
+from measurement_config import safe_filename
 
 
 _COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COLUMNS,
-                lineage=LINEAGE_COLUMNS, scores=SCORES_COLUMNS, predictions=PREDICTIONS_COLUMNS)
+                lineage=LINEAGE_COLUMNS, scores=SCORES_COLUMNS, predictions=PREDICTIONS_COLUMNS, layers=LAYERS_COLUMNS)
 _PROTOCOL = "immutable-generation-v1"
 _FLOATS = {"score", "p_value", "value", "lower", "upper", "inclusion_prob", "downloads", "params"}
-_INTS = {"view_index", "n_rows", "n_cols", "r0", "r1", "n_views", "num_labels", "n_items"}
+_LAYER_FLOATS = set(LAYERS_COLUMNS) - {"model_key", "longname", "module_name", "weight_attribute", "slice", "view_name", "fit_status", "h5_index", "num_evals", "matrix_rank", "n_tail"}
+_FLOATS |= _LAYER_FLOATS
+_INTS = {"view_index", "n_rows", "n_cols", "r0", "r1", "n_views", "num_labels", "n_items", "h5_index", "num_evals", "matrix_rank", "n_tail"}
 _BOOLS = {"is_adapter", "gated", "is_decision", "system_one", "calibrated", "revision_verified"}
 _NESTED = {
     "labels": pa.map_(pa.string(), pa.string()),
@@ -115,9 +120,11 @@ def _check_output(out):
         raise ValueError("Output does not point to an owned complete generation") from error
 
 
-def build_zoo(manifests: Path, fingerprints: list[Path], out: Path, data_root: Path,
+def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = None,
+              out: Path | None = None, data_root: Path | None = None,
               frame: Path | None = None, score_tables: Sequence[pd.DataFrame] = (),
-              lineage_edges: Path | None = None, null: Path | None = None) -> Path:
+              lineage_edges: Path | None = None, null: Path | None = None,
+              packages: Path | None = None, conventions_id: str | None = None) -> Path:
     """Read evidence artifacts, build privately, and publish with one os.replace.
 
     No checkpoint weights are read. Pre-commit failure leaves the old pointer;
@@ -125,27 +132,56 @@ def build_zoo(manifests: Path, fingerprints: list[Path], out: Path, data_root: P
     Concurrent builds use private names; last successful publication wins.
     Old generations and legacy .previous paths are never automatically deleted.
     """
-    requested_out = Path(out)
-    out = requested_out.absolute().parent.resolve() / requested_out.name
+    if data_root is None:
+        if not os.environ.get("ZOO_DATA"):
+            raise ValueError("Set data_root or ZOO_DATA")
+        data_root = Path(os.environ["ZOO_DATA"])
     root = Path(data_root).resolve()
-    manifests = Path(manifests).resolve()
-    fingerprints = [Path(path).resolve() for path in fingerprints]
+    requested_out = Path(out) if out is not None else root / "builds/current"
+    out = requested_out.absolute().parent.resolve() / requested_out.name
+    selected_packages, skipped = [], 0
+    package_mode = packages is not None or (manifests is None and fingerprints is None)
+    package_sources = []
+    if package_mode:
+        if manifests is not None or fingerprints is not None:
+            raise ValueError("Choose packages or explicit manifests/fingerprints")
+        packages = Path(packages or root / "packages").resolve()
+        if not packages.is_dir():
+            raise ValueError("Packages input must be an existing directory")
+        conventions_id = conventions_id or current_conventions_id()
+        selected_packages, skipped = package_inputs(packages, conventions_id)
+        manifests, fingerprints = [], []
+        for folder, package in selected_packages:
+            safe = safe_filename(package["model_key"])
+            manifests.append(folder / f"{safe}.manifest.json")
+            fingerprints.extend(folder / name for name in package["files"]
+                                if name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")))
+            package_sources.append(folder / "package.json")
+            package_sources.extend(folder / name for name in package["files"])
+        sources = [packages]
+    else:
+        if manifests is None or fingerprints is None:
+            raise ValueError("Explicit manifests and fingerprints must be supplied together")
+        manifests = Path(manifests).resolve()
+        fingerprints = [Path(path).resolve() for path in fingerprints]
+        sources = [manifests, *fingerprints]
     score_tables = tuple(score_tables)
     optional = [Path(path).resolve() for path in (frame, lineage_edges, null) if path is not None]
-    sources = [manifests, *fingerprints, *optional]
+    sources += optional
     token = uuid4().hex
     stage = out.with_name(f".{out.name}.building-{token}")
     generation = out.with_name(f".{out.name}.generation-{token}")
     pointer = out.with_name(f".{out.name}.publish-{token}")
     _check_locations([out, stage, generation, pointer], root, sources)
     _check_output(out)
-    inputs = list(manifests.glob("*.manifest.json")) + list(_fingerprint_files(fingerprints)) + optional
+    inputs = list(_manifest_files(manifests)) + list(_fingerprint_files(fingerprints)) + optional + package_sources
     out.parent.mkdir(parents=True, exist_ok=True)
     stage.mkdir(mode=0o700)
     moved = False
     publication_attempted = False
     try:
         tables = build_tables(manifests, fingerprints, root, frame=frame, score_tables=score_tables)
+        tables["layers"] = build_layers(selected_packages)
         for relative in tables["models"].spectra_t2:
             if relative:
                 path = (root / relative).resolve()
@@ -164,7 +200,8 @@ def build_zoo(manifests: Path, fingerprints: list[Path], out: Path, data_root: P
         for name in _COLUMNS:
             pq.write_table(_arrow(name, tables[name]), stage / f"{name}.parquet")
         metadata = dict(zoo_version=ZOO_VERSION, build_time=datetime.now(timezone.utc).isoformat(),
-                        publication_protocol=_PROTOCOL, inputs=_provenance(inputs, score_tables, root),
+                        publication_protocol=_PROTOCOL, conventions_id=conventions_id,
+                        skipped_conventions=skipped, inputs=_provenance(inputs, score_tables, root),
                         row_counts={name: len(tables[name]) for name in _COLUMNS})
         (stage / "zoo.json").write_text(json.dumps(metadata, sort_keys=True, indent=2, allow_nan=False) + "\n")
         stage.rename(generation)
@@ -186,6 +223,9 @@ def open_tables(zoo: Path) -> dict[str, pd.DataFrame]:
     generation = Path(zoo).resolve(strict=True)
     tables = {}
     for name, columns in _COLUMNS.items():
+        if name == "layers" and not (generation / "layers.parquet").is_file():
+            tables[name] = empty_table(columns)
+            continue
         records = pq.read_table(generation / f"{name}.parquet").to_pylist()
         if name == "models":
             for row in records:

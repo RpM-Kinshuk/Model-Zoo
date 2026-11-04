@@ -111,7 +111,7 @@ def test_worker_dense_fallback_uses_loaded_weights_and_records_selection(tmp_pat
     load_model = Mock(return_value=(model, False))
     monkeypatch.setattr(worker, "load_model", load_model)
     arguments = ["worker.py", "--model_id", "org/control", "--revision", "a" * 40,
-                 "--output_dir", str(tmp_path), "--device_map", "cpu", "--no-parallel_esd"]
+                 "--output_dir", str(tmp_path), "--device_map", "cpu", "--no-parallel_esd", "--no-evidence"]
     monkeypatch.setattr(sys, "argv", arguments + flags)
 
     assert worker.main() == 0
@@ -1178,3 +1178,335 @@ def test_heartbeat_reporter_keeps_stage_entered_at_until_stage_changes(tmp_path:
     assert second["stage_entered_at"] == first["stage_entered_at"]
     assert third["stage"] == "analyze"
     assert third["stage_entered_at"] != first["stage_entered_at"]
+
+
+@pytest.fixture
+def evidence_worker(tmp_path, monkeypatch):
+    import torch
+    import net_esd
+    from net_esd.utils import weight_usage_report
+    from safetensors.torch import save_file
+    from huggingface_hub.errors import LocalEntryNotFoundError
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False), torch.nn.Linear(16, 16, bias=False))
+    source = tmp_path / "snapshot"
+    source.mkdir()
+    save_file(model.state_dict(), source / "model.safetensors")
+    (source / "config.json").write_text('{}')
+    def snapshot(repo, **kwargs):
+        if repo != "org/tiny":
+            raise LocalEntryNotFoundError("not cached")
+        return str(source)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot)
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda repo, filename, **kwargs:
+                        str(source / filename) if repo == "org/tiny" and (source / filename).is_file() else None)
+    worker = load_worker_module()
+    monkeypatch.setattr(worker, "torch", torch)
+    monkeypatch.setattr(worker, "net_esd_estimator", net_esd.net_esd_estimator)
+    monkeypatch.setattr(worker, "weight_usage_report", weight_usage_report)
+    monkeypatch.setattr(worker, "load_model", Mock(return_value=(model, False)))
+    out = tmp_path / "run"
+    argv = ["worker.py", "--model_id", "org/tiny", "--revision", "a" * 40,
+            "--output_dir", str(out), "--device_map", "cpu", "--no-parallel_esd"]
+    monkeypatch.setattr(sys, "argv", argv)
+    return worker, out, argv, source
+
+
+def test_plain_worker_run_writes_package_files(evidence_worker):
+    worker, out, _, _ = evidence_worker
+    assert worker.main() == 0
+    folder = next((out / "evidence").iterdir())
+    for suffix in ("manifest.json", "t2.fingerprint.safetensors", "t1.fingerprint.safetensors",
+                   "t1b128.fingerprint.safetensors", "t1b512.fingerprint.safetensors", "t2.spectra.h5"):
+        assert list(folder.glob("*." + suffix))
+    summary = json.loads((folder / "evidence.json").read_text())
+    assert summary["reused"] == 2 and summary["measured"] == 0
+
+
+def test_cpu_only_worker_runs_sidecar_after_esd(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, _, _, _ = evidence_worker
+    order = []
+    original_start, original_esd = EvidenceSidecar.start, worker.net_esd_estimator
+    monkeypatch.setattr(EvidenceSidecar, "start", lambda self: (order.append("sidecar"), original_start(self))[-1])
+    def esd(*args, **kwargs):
+        order.append("esd")
+        return original_esd(*args, **kwargs)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    assert worker.main() == 0
+    assert order == ["esd", "sidecar"]
+
+
+def test_evidence_without_token_uses_local_download(evidence_worker):
+    worker, out, _, source = evidence_worker
+    (source / "README.md").write_text('---\nbase_model: org/missing-parent\n---\n')
+    assert worker.main() == 0
+    from evidence.fingerprint import load_fingerprint
+    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    assert set(fp.delta["status"]) == {"parent_unavailable"}
+    manifest = json.loads(next((out / "evidence").rglob("*.manifest.json")).read_text())
+    assert manifest["repo_id"] == "org/tiny" and manifest["revision"] == "a" * 40
+
+
+def test_evidence_failure_keeps_esd_outputs_and_retries_evidence_only(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, out, _, _ = evidence_worker
+    real_finish, esd = EvidenceSidecar.finish, Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: (_ for _ in ()).throw(RuntimeError("sidecar failed")))
+    assert worker.main() == 1
+    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    saved = [p.read_bytes() for p in paths]
+    assert not list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    monkeypatch.setattr(EvidenceSidecar, "finish", real_finish)
+    assert worker.main() == 0
+    assert esd.call_count == 1
+    assert [p.read_bytes() for p in paths] == saved
+    assert list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+
+
+def test_interrupt_in_fingerprint_stage_publishes_nothing(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, out, _, _ = evidence_worker
+    monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    assert worker.main() == 1
+    assert not list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert not list((out / "evidence").rglob(".evidence-sidecar-*"))
+    record = json.loads(next((out / "logs/terminal_status").glob("*.json")).read_text())
+    assert record["stage"] == "fingerprint" and record["reason"] == "interrupted"
+
+
+def test_no_evidence_outputs_unchanged(evidence_worker, monkeypatch):
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--no-evidence"])
+    assert worker.main() == 0
+    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    saved = [p.read_bytes() for p in paths]
+    assert not (out / "evidence").exists()
+    assert worker.main() == 0
+    assert [p.read_bytes() for p in paths] == saved
+
+
+def test_worker_checkpoint_mode_turns_evidence_off_with_notice(evidence_worker, monkeypatch, capsys):
+    worker, _, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--analysis_source", "checkpoint"])
+    assert worker.parse_args().evidence is False
+    assert "evidence" in capsys.readouterr().out.lower()
+
+
+def test_gpu_worker_starts_cpu_sidecar_before_esd(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, _, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", ["auto" if value == "cpu" else value for value in argv])
+    monkeypatch.setattr(worker.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(worker.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(worker.torch.cuda, "get_device_name", lambda i: "simulated")
+    order = []
+    start, esd = EvidenceSidecar.start, worker.net_esd_estimator
+    monkeypatch.setattr(EvidenceSidecar, "start", lambda self: (order.append("sidecar"), start(self))[-1])
+    monkeypatch.setattr(worker, "net_esd_estimator", lambda *a, **kw: (order.append("esd"), esd(*a, **kw))[-1])
+    assert worker.main() == 0
+    assert order == ["sidecar", "esd"]
+
+
+def test_missing_pinned_parent_without_token_is_a_delta_gap(evidence_worker, monkeypatch):
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--source_model", "org/missing-parent@" + "b" * 40])
+    assert worker.main() == 0
+    from evidence.fingerprint import load_fingerprint
+    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    assert set(fp.delta["status"]) == {"parent_unavailable"}
+
+
+def test_overwrite_recomputes_evidence_with_new_settings(evidence_worker, monkeypatch):
+    worker, out, argv, _ = evidence_worker
+    assert worker.main() == 0
+    monkeypatch.setattr(sys, "argv", argv + ["--overwrite", "--fix_fingers", "xmin_peak"])
+    assert worker.main() == 0
+    with worker.h5py.File(next((out / "evidence").rglob("*.t2.spectra.h5"))) as h:
+        assert json.loads(h.attrs["measurement_config_json"])["fix_fingers"] == "xmin_peak"
+
+
+def test_sigterm_in_fingerprint_preserves_durable_esd_and_cleans_stage(evidence_worker, monkeypatch):
+    import signal
+    from evidence.sidecar import EvidenceSidecar
+    worker, out, _, _ = evidence_worker
+    handlers, durable = {}, []
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.setdefault(sig, handler))
+    def terminate(*args):
+        durable.append((out / "stats/org--tiny.csv").is_file() and (out / "metrics/org--tiny.h5").is_file())
+        if callable(handlers.get(signal.SIGTERM)):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(EvidenceSidecar, "finish", terminate)
+    assert worker.main() == 1
+    assert durable == [True]
+    assert callable(handlers.get(signal.SIGTERM))
+    record = json.loads(next((out / "logs/terminal_status").glob("*.json")).read_text())
+    assert record["stage"] == "fingerprint" and record["reason"] == "interrupted"
+    assert not list((out / "evidence").rglob(".evidence-sidecar-*"))
+
+
+def test_changed_sketch_rebuilds_only_evidence(evidence_worker, monkeypatch):
+    from evidence.fingerprint import load_fingerprint
+    worker, out, argv, _ = evidence_worker
+    esd = Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    assert worker.main() == 0
+    saved = (out / "metrics/org--tiny.h5").read_bytes()
+    monkeypatch.setattr(sys, "argv", argv + ["--sketch_k", "32"])
+    assert worker.main() == 0
+    assert esd.call_count == 1 and (out / "metrics/org--tiny.h5").read_bytes() == saved
+    assert load_fingerprint(next((out / "evidence").rglob("*.t2.fingerprint.safetensors"))).meta["sketch_k"] == 32
+
+
+def test_stale_evidence_after_esd_only_overwrite_is_rebuilt(evidence_worker, monkeypatch):
+    worker, out, argv, _ = evidence_worker
+    esd = Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    assert worker.main() == 0
+    monkeypatch.setattr(sys, "argv", argv + ["--no-evidence", "--overwrite", "--fix_fingers", "xmin_peak"])
+    assert worker.main() == 0
+    saved = (out / "metrics/org--tiny.h5").read_bytes()
+    monkeypatch.setattr(sys, "argv", argv + ["--fix_fingers", "xmin_peak"])
+    assert worker.main() == 0
+    assert esd.call_count == 2 and (out / "metrics/org--tiny.h5").read_bytes() == saved
+    with worker.h5py.File(next((out / "evidence").rglob("*.t2.spectra.h5"))) as h:
+        assert json.loads(h.attrs["measurement_config_json"])["fix_fingers"] == "xmin_peak"
+
+
+def test_scalar_only_esd_can_retry_evidence_without_estimator(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--no-save_eigs"])
+    real = EvidenceSidecar.finish
+    esd = Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: (_ for _ in ()).throw(RuntimeError("evidence failed")))
+    assert worker.main() == 1
+    saved = (out / "metrics/org--tiny.h5").read_bytes()
+    monkeypatch.setattr(EvidenceSidecar, "finish", real)
+    assert worker.main() == 0
+    assert esd.call_count == 1 and (out / "metrics/org--tiny.h5").read_bytes() == saved
+    counts = json.loads(next((out / "evidence").rglob("evidence.json")).read_text())
+    assert counts["measured"] == 2 and counts["reused"] == 0
+
+
+def test_online_worker_resolves_unpinned_declared_parent(evidence_worker, monkeypatch):
+    import evidence.manifest as manifests
+    from evidence.hub import HubReader
+    from evidence.fingerprint import load_fingerprint
+    import evidence_bridge as bridge
+    worker, out, _, source = evidence_worker
+    child = manifests.build_manifest("org/tiny", "a" * 40, HubReader(local_cache=True), None)
+    child["declared_bases"] = ["org/base"]
+    manifests.write_manifest(child, bridge.evidence_dir(out, "org/tiny", "a" * 40))
+    pins = []
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_marker")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(manifests, "pin_revision", lambda api, repo, revision: pins.append((repo, revision)) or "b" * 40)
+    monkeypatch.setattr(manifests, "build_manifest", lambda repo, revision, *args: dict(child, repo_id=repo, revision=revision, declared_bases=[]))
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda repo, filename, **kwargs: str(source / filename))
+    assert worker.main() == 0
+    assert pins == [("org/base", "main")]
+    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    assert set(fp.delta["status"]) == {"identical"}
+
+
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_tokenless_parent_uses_private_block_cache_before_declaring_gap(evidence_worker, monkeypatch, tmp_path, use_cache):
+    import evidence.manifest as manifests
+    from evidence.hub import HubReader
+    from evidence.block_cache import BlockCache
+    from evidence.fingerprint import load_fingerprint
+    import evidence_bridge as bridge
+    from safetensors.torch import load_file
+    worker, out, argv, source = evidence_worker
+    child = manifests.build_manifest("org/tiny", "a" * 40, HubReader(local_cache=True), None)
+    parent = dict(child, repo_id="org/base", revision="b" * 40, declared_bases=[])
+    child["declared_bases"] = ["org/base"]
+    manifests.write_manifest(child, bridge.evidence_dir(out, "org/tiny", "a" * 40))
+    manifests.write_manifest(parent, bridge.evidence_dir(out, "org/base", "b" * 40))
+    cache = BlockCache(tmp_path / "parent-blocks")
+    for name, tensor in load_file(source / "model.safetensors").items():
+        cache.put(parent, name, (0, 16), tensor)
+    flags = ["--parent_cache", str(cache.root)] if use_cache else ["--no-parent_cache"]
+    monkeypatch.setattr(sys, "argv", argv + flags)
+    assert worker.main() == 0
+    folder = bridge.evidence_dir(out, "org/tiny", "a" * 40)
+    fp = load_fingerprint(next(folder.glob("*.t1.fingerprint.safetensors")))
+    assert set(fp.delta["status"]) == ({"identical"} if use_cache else {"parent_unavailable"})
+
+
+def test_completion_uses_each_workers_stratum(evidence_worker, monkeypatch):
+    from test_run_experiment import run_experiment as runner
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--stratum", "lab"])
+    assert worker.main() == 0
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "unused", "--output_dir", str(out)])
+    args = runner.parse_args()
+    assert runner._completed_models_from_artifacts(out, runner.measurement_config(args), evidence=True,
+                                                   evidence_options=args) == {"org/tiny"}
+
+
+def test_fingerprint_stage_preserves_already_saved_esd_pair(evidence_worker, monkeypatch):
+    from evidence.sidecar import EvidenceSidecar
+    worker, out, _, _ = evidence_worker
+    saved = []
+    real = EvidenceSidecar.finish
+    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    def finish(*args):
+        saved.extend(path.read_bytes() for path in paths)
+        return real(*args)
+    monkeypatch.setattr(EvidenceSidecar, "finish", finish)
+    assert worker.main() == 0
+    assert [path.read_bytes() for path in paths] == saved
+
+
+def test_worker_publishes_package_by_default(evidence_worker):
+    worker, out, _, _ = evidence_worker
+    assert worker.main() == 0
+    paths = list((out / "packages").rglob("package.json"))
+    assert len(paths) == 1
+    assert json.loads(paths[0].read_text())["complete"] is True
+
+
+def test_no_publish_keeps_run_folder_only(evidence_worker, monkeypatch):
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--no-publish"])
+    assert worker.main() == 0
+    assert list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert not (out / "packages").exists()
+
+
+def test_runner_resume_backfills_package_without_loading_model(evidence_worker, monkeypatch):
+    from test_run_experiment import run_experiment as runner
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--no-publish"])
+    assert worker.main() == 0
+    assert not (out / "packages").exists()
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "unused", "--output_dir", str(out)])
+    args = runner.parse_args()
+    rows = runner.pd.DataFrame([dict(model_id="org/tiny", revision_norm="a" * 40, source_model="", base_model_relation="")])
+    pending = runner.filter_models_to_run(rows, out, args=args, skip_failed=False)
+    assert len(pending) == 0
+    assert list((out / "packages").rglob("package.json"))
+
+
+def test_failed_publish_keeps_rebuilt_evidence_for_publication_only_retry(evidence_worker, monkeypatch):
+    import zoo.publish as publisher
+    from evidence.sidecar import EvidenceSidecar
+    from evidence.fingerprint import load_fingerprint
+    worker, out, argv, _ = evidence_worker
+    assert worker.main() == 0
+    original = publisher.publish_package
+    monkeypatch.setattr(publisher, "publish_package", lambda *args: (_ for _ in ()).throw(OSError("publication failed")))
+    monkeypatch.setattr(sys, "argv", argv + ["--sketch_k", "32"])
+    assert worker.main() == 1
+    fp = next((out / "evidence").glob("*/*.t2.fingerprint.safetensors"))
+    assert load_fingerprint(fp).meta["sketch_k"] == 32
+    monkeypatch.setattr(publisher, "publish_package", original)
+    monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: pytest.fail("evidence recomputed"))
+    monkeypatch.setattr(worker, "load_model", lambda *args, **kwargs: pytest.fail("model reloaded"))
+    assert worker.main() == 0

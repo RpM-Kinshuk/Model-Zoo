@@ -252,6 +252,9 @@ def _parent_storage_dtype(sources, view):
     return _TORCH_DTYPES_REVERSE.get(sources.entries[view.sources[0]].dtype, torch.float32)
 
 
+_PARENT_UNAVAILABLE = object()
+
+
 def _read_parent_block(sources, view, bounds, cache, full=None):
     plain = view.decode == "plain" and view.geometry != "lora_product"
     shape = (bounds[1] - bounds[0], view.matrix_shape[1])
@@ -259,7 +262,11 @@ def _read_parent_block(sources, view, bounds, cache, full=None):
                        _parent_storage_dtype(sources, view), shape) if cache else None
     if stored is not None:
         return stored.float() * view.scale if plain else stored
-    block, stored, _ = sources.block(view, bounds, full)
+    try:
+        block, stored, _ = sources.block(view, bounds, full)
+    except OSError:
+        # Cached blocks remain useful after private parent downloads disappear.
+        return _PARENT_UNAVAILABLE
     if cache:
         cache.put(sources.manifest, view.name, bounds, stored if plain else block.float())
     return block
@@ -267,6 +274,8 @@ def _read_parent_block(sources, view, bounds, cache, full=None):
 
 def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, height,
                   compute_device="cpu", *, full=None, parent_block=None):
+    if parent_sources.manifest.get("access") == "parent_unavailable":
+        return dict(_no_delta(), status="parent_unavailable")
     other = parent_views.get(view.name)
     if other is None:
         return _no_delta()
@@ -278,6 +287,8 @@ def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, heig
     dtype = _parent_storage_dtype(parent_sources, other)
     if parent_block is None:
         parent_block = _read_parent_block(parent_sources, other, bounds, cache if height is not None else None, full)
+    if parent_block is _PARENT_UNAVAILABLE:
+        return dict(_no_delta(), status="parent_unavailable")
     if torch.device(compute_device).type == "cpu":
         return block_delta(block, parent_block, dtype)
     return block_delta(block, parent_block, dtype, compute_device=compute_device)

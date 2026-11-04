@@ -729,3 +729,57 @@ def test_worker_threads_loader_scenario_into_load_model(tmp_path: Path):
 
     assert exit_code == 0
     assert worker.load_model.call_args.kwargs["loader_scenario"] == "quantized_transformers_native"
+
+
+def test_runner_defaults_enable_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path)])
+    args = run_experiment.parse_args()
+    assert args.evidence is True and args.evidence_device == "cpu" and args.evidence_max_inflight_gib == 2
+    rows = pd.DataFrame([dict(model_id="org/m", revision_norm="a" * 40, source_model="", base_model_relation="", stratum="anchor")])
+    command = shlex.split(generate_commands(rows, tmp_path, args)[0])
+    assert "--evidence" in command and command[command.index("--stratum") + 1] == "anchor"
+
+
+def test_checkpoint_mode_turns_evidence_off_with_notice(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path), "--analysis_source", "checkpoint"])
+    assert run_experiment.parse_args().evidence is False
+    assert "evidence" in capsys.readouterr().out.lower()
+
+
+def test_completion_requires_t2_marker_with_evidence(tmp_path):
+    import json
+    (tmp_path / "stats").mkdir()
+    (tmp_path / "metrics").mkdir()
+    _write_compatible_h5(tmp_path / "metrics/org--m.h5")
+    assert run_experiment._completed_models_from_artifacts(tmp_path, evidence=True) == set()
+    assert run_experiment._completed_models_from_artifacts(tmp_path, evidence=False) == {"org/m"}
+    folder = tmp_path / "evidence" / ("org--m__" + "a" * 40)
+    folder.mkdir(parents=True)
+    (folder / (folder.name + ".manifest.json")).write_text(json.dumps(dict(repo_id="org/m", revision="a" * 40)))
+    (folder / (folder.name + ".t2.fingerprint.safetensors")).write_bytes(b"marker")
+    assert run_experiment._completed_models_from_artifacts(tmp_path, evidence=True) == {"org/m"}
+
+
+def test_prepare_writes_manifests_for_models_and_declared_bases(tmp_path, monkeypatch):
+    import evidence.manifest as manifests
+    calls = []
+    def build(repo, revision, *args):
+        calls.append((repo, revision))
+        return dict(repo_id=repo, revision=revision, access="granted", declared_bases=["org/base"] if repo == "org/child" else [])
+    monkeypatch.setattr(manifests, "build_manifest", build)
+    monkeypatch.setattr(manifests, "pin_revision", lambda *args: "b" * 40)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_marker")
+    rows = pd.DataFrame([dict(model_id="org/child", revision_norm="a" * 40, source_model="")])
+    run_experiment.prepare_evidence_manifests(rows, tmp_path)
+    assert calls == [("org/child", "a" * 40), ("org/base", "b" * 40)]
+    assert len(list((tmp_path / "evidence").rglob("*.manifest.json"))) == 2
+
+
+def test_runner_schedules_evidence_only_for_existing_esd_pair(tmp_path, monkeypatch):
+    (tmp_path / "stats").mkdir()
+    (tmp_path / "metrics").mkdir()
+    _write_compatible_h5(tmp_path / "metrics/org--m.h5")
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path)])
+    args = run_experiment.parse_args()
+    rows = pd.DataFrame([dict(model_id="org/m", revision_norm="a" * 40, source_model="", base_model_relation="")])
+    assert "--evidence_only" in shlex.split(generate_commands(rows, tmp_path, args)[0])

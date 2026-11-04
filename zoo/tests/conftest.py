@@ -56,3 +56,39 @@ def built_zoo(universe, tmp_path):
     from zoo.build import build_zoo
     return build_zoo(universe.manifests, [universe.fingerprints],
                      tmp_path / "zoo", data_root=universe.root)
+
+
+@pytest.fixture
+def package_run(tmp_path, monkeypatch):
+    """One complete, real local model run; no network or GPUs."""
+    from types import SimpleNamespace
+    from safetensors.torch import save_file
+    import torch
+    from evidence.hub import HubReader
+    from evidence.manifest import build_manifest
+    from evidence.sidecar import EvidenceSidecar
+    from measurement_config import measurement_config, safe_filename
+    from net_esd import net_esd_estimator
+    from evidence_bridge import loaded_block, measure_tensors, metrics_results
+    from worker import save_results
+    monkeypatch.setenv("ZOO_DATA", str(tmp_path))
+    source, run = tmp_path / "source", tmp_path / "run"
+    source.mkdir()
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False), torch.nn.Linear(16, 16, bias=False))
+    save_file(model.state_dict(), source / "model.safetensors")
+    manifest = build_manifest(str(source), "main", HubReader(), None)
+    manifest.update(repo_id="lab/tiny", source=dict(zoo_data_path="source"))
+    safe = safe_filename(f"{manifest['repo_id']}@{manifest['revision']}")
+    folder = run / "evidence" / safe
+    cfg = measurement_config(SimpleNamespace(), model_id=manifest["repo_id"], revision=manifest["revision"])
+    cfg["runtime"] = dict(analysis_source="model", device_map_requested="cpu", filter_type=False)
+    metrics = net_esd_estimator(model, parallel=False, save_eigs=True, fix_fingers="xmin_mid", filter_zeros=True)
+    save_results(metrics, run / "stats/lab--tiny.csv", "lab/tiny", False,
+                 h5_output_path=run / "metrics/lab--tiny.h5", measurement_config=cfg, coverage={"counts": {}}, save_eigs=True)
+    sidecar = EvidenceSidecar(manifest, folder)
+    sidecar.start()
+    counts = sidecar.finish(metrics_results(metrics), loaded_block(model), lambda items: measure_tensors(items, cfg), cfg)
+    import json
+    (folder / "evidence.json").write_text(json.dumps(counts))
+    return SimpleNamespace(root=tmp_path, run=run, manifest=manifest, folder=folder,
+                           safe=safe, config=cfg, packages=tmp_path / "packages")

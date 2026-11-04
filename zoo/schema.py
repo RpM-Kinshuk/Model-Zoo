@@ -32,6 +32,12 @@ SCORES_COLUMNS = [
 ]
 PREDICTIONS_COLUMNS = ["model_key", "skill", "value", "lower", "upper", "method", "inputs"]
 
+LAYERS_COLUMNS = [
+    "model_key", "longname", "module_name", "weight_attribute", "slice", "view_name",
+    "alpha", "alpha_weighted", "D", "xmin", "xmax", "n_tail", "fit_status",
+    "spectral_norm", "log_spectral_norm", "stable_rank", "entropy", "matrix_rank", "num_evals", "h5_index",
+]
+
 _CONFIG_FIELDS = (
     "model_type", "hidden_size", "num_hidden_layers", "intermediate_size",
     "num_attention_heads", "num_key_value_heads", "num_experts",

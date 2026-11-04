@@ -11,17 +11,17 @@ import pytest
 
 from zoo.build import build_zoo, open_tables
 from zoo.schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
-                        PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS)
+                        PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS, LAYERS_COLUMNS)
 from zoo.testing import SHA1, SHA11
 
 
 COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COLUMNS,
-               lineage=LINEAGE_COLUMNS, scores=SCORES_COLUMNS, predictions=PREDICTIONS_COLUMNS)
+               lineage=LINEAGE_COLUMNS, scores=SCORES_COLUMNS, predictions=PREDICTIONS_COLUMNS, layers=LAYERS_COLUMNS)
 
 
 def test_build_writes_all_tables(built_zoo):
     t = open_tables(built_zoo)
-    assert set(t) == {"models", "views", "coverage", "lineage", "scores", "predictions"}
+    assert set(t) == {"models", "views", "coverage", "lineage", "scores", "predictions", "layers"}
     assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "0"
     assert list((built_zoo / "retrieval").glob("*.npy"))
 
@@ -254,6 +254,6 @@ def test_open_tables_resolves_generation_once(built_zoo, universe, monkeypatch):
         return read(path, *args, **kwargs)
     monkeypatch.setattr("zoo.build.pq.read_table", switch_during_read)
     actual = open_tables(built_zoo)
-    assert len(calls) == 6 and set(calls) == {old}
+    assert len(calls) == 7 and set(calls) == {old}
     for name in expected:
         pd.testing.assert_frame_equal(expected[name], actual[name])

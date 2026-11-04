@@ -501,10 +501,11 @@ def test_explicit_model_mode_does_not_fall_back(auto_worker, monkeypatch):
     case.inspection.assert_not_called()
 
 
-def test_auto_uses_a_supported_model_without_inspecting_raw_tensors(auto_worker):
+def test_auto_uses_a_supported_model_without_inspecting_raw_tensors(auto_worker, monkeypatch):
     from test_loader_checkpoint_integrity import tiny_bert
     case = auto_worker
     tiny_bert().save_pretrained(case.weights)
+    monkeypatch.setattr(sys, "argv", case.arguments + ["--no-evidence"])
     assert case.worker.main() == 0
     case.inspection.assert_not_called()
     with case.worker.h5py.File(case.output / "metrics/org--control.h5") as h5:
@@ -566,8 +567,9 @@ def test_auto_does_not_guess_from_generic_error_messages(auto_worker, error):
 
 
 @pytest.mark.parametrize("keep_standard", [True, False])
-def test_auto_does_not_fill_in_partial_or_empty_module_analysis(auto_worker, keep_standard):
+def test_auto_does_not_fill_in_partial_or_empty_module_analysis(auto_worker, keep_standard, monkeypatch):
     case = auto_worker
+    monkeypatch.setattr(sys, "argv", case.arguments + ["--no-evidence"])
     model = torch.nn.Module()
     model.unknown = torch.nn.Module()
     # Ordinary 2D parameters are eligible now; an undeclared 3D layout remains unsupported.

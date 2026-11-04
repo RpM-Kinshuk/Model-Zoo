@@ -9,15 +9,52 @@ Use the existing environment and set `ZOO_DATA` to the artifact root. From
 Model-Zoo:
 
 ```bash
-python -m zoo.cli build \
-  --manifests "$MANIFESTS" \
-  --fingerprints "$FINGERPRINTS" \
-  --data_root "$ZOO_DATA" \
+python -m zoo.cli build
+```
+
+This reads `$ZOO_DATA/packages` under current measurement conventions and writes
+`$ZOO_DATA/builds/current`. `--packages PATH` selects another package tree;
+`--conventions ID` selects other settings. The build summary counts packages
+skipped for different conventions. Default T1-only and full packages use distinct
+tier convention IDs; the default build accepts both and prefers full evidence
+when both exist for the same model. This preserves preliminary packages during
+later full-mode upgrades.
+
+Full-mode workers publish packages automatically. Set `--packages_root PATH`,
+or `--no-publish` to keep run-folder outputs only. Backfill existing completed
+runs without loading any weights:
+
+```bash
+python -m zoo.cli publish --runs /path/to/run-a /path/to/run-b
+```
+
+A package lives at `<packages_root>/<shard>/<safe>/<conventions_id>/`. It contains
+only derived evidence files and, for full mode, `esd/stats.csv` and
+`esd/metrics.h5`; raw checkpoint and cached parent blocks are never included.
+`package.json` records pinned identity, kind, conventions, artifact SHA256 hashes,
+reuse counts and source-run provenance. Sources outside `data_root` have an
+absolute provenance-only `source_run`; stored database artifact links remain
+relative to `data_root`.
+
+Publication uses hardlinks (copies across filesystems), a private staging
+directory and one rename. An identical existing package is reused; different
+contents never overwrite it. Producers must replace run artifacts atomically,
+as the worker does, rather than modifying hardlinked files in place. Convention
+hashes exclude model identity and runtime observations, include algorithm/format
+versions and evidence tier, and preserve the default per-stratum sketch/expert
+policy. Explicit evidence overrides receive separate conventions. When old runs
+lack a worker summary, sketch/expert settings are inferred from fingerprints.
+
+For legacy explicit inputs:
+
+```bash
+python -m zoo.cli build --manifests "$MANIFESTS" \
+  --fingerprints "$FINGERPRINTS" --data_root "$ZOO_DATA" \
   --out "$ZOO_DATA/builds/current"
 ```
 
-`MANIFESTS` contains one manifest per pinned model. `FINGERPRINTS` contains the
-canonical T1/T2 files; extra T1 block sizes are kept alongside them. Multiple
+`MANIFESTS` contains one manifest per pinned model. `FINGERPRINTS` contains
+canonical T1/T2 files; extra T1 block sizes remain alongside them. Multiple
 fingerprint directories may follow `--fingerprints`.
 
 Optional inputs:
@@ -51,12 +88,20 @@ Older generations remain available until explicitly cleaned up.
 | --- | --- |
 | `models` | Pinned identity, metadata, coverage and artifact links |
 | `views` | Measured matrices and their block hashes |
+| `layers` | Per-layer alpha, fit quality, spectral metrics and HDF5 row indices |
 | `coverage` | Measured/skipped tensors and reasons |
 | `lineage` | Candidate relationships with evidence tiers and statistics |
 | `scores` | Measured scores and revision verification |
 | `predictions` | Separate prediction records; empty in v0 |
 
-Full per-view spectra remain in HDF5 files linked by the model table. Artifact
+Eigenvalues remain in HDF5. For full packages, `models.spectra_t2` links to
+`esd/metrics.h5`; each `layers.h5_index` indexes that file's aligned `/layers`
+and `/eigs` records. `view_name` maps exact stored identities when possible and
+is empty otherwise. The stored-view T2 spectra remain beside the T2 fingerprint
+under their frozen filename, including second-round views absent from the
+original runner metrics. Legacy direct-input builds keep their original
+stored-view spectrum links; their `layers` table is empty. Older six-table zoo
+generations remain readable with an empty `layers` table. Artifact
 paths are relative to `ZOO_DATA`. Retrieval compares T1 row-block fingerprints
 within the same architecture signature, giving comparable coordinates and
 shapes. Full-matrix T2 sketches have a different measurement scope.

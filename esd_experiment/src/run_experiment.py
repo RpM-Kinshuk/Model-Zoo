@@ -42,6 +42,8 @@ from gputracker.gputracker import get_logger, DispatchThread, GPUDispatcher, Wor
 from gputracker.supervision import _write_json_atomic
 from model_preflight import classify_row_preflight
 from model_loader import get_hf_token, safe_filename
+from evidence_bridge import (add_evidence_arguments, validate_evidence_arguments, evidence_complete,
+                             prepare_evidence_manifests, cached_models, identity, publish_model, publication_complete)
 from measurement_config import artifact_compatibility, is_commit_sha, measurement_config, validate_model_pin
 
 
@@ -108,7 +110,7 @@ class RunOutcomes:
     failed_models: FrozenSet[str]
 
 
-def _completed_models_from_artifacts(output_dir: Path, expected_config=None) -> set[str]:
+def _completed_models_from_artifacts(output_dir: Path, expected_config=None, evidence=False, evidence_options=None) -> set[str]:
     completed = set()
 
     stats_dir = output_dir / "stats"
@@ -120,6 +122,10 @@ def _completed_models_from_artifacts(output_dir: Path, expected_config=None) -> 
             if not artifact_compatibility(csv_file, metrics_file, expected_config)[0]:
                 continue
             model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+            if evidence and not evidence_complete(output_dir, model_id, measurement=expected_config, options=evidence_options):
+                continue
+            if evidence_options is not None and not publication_complete(evidence_options, output_dir, model_id):
+                continue
             completed.add(model_id)
 
     return completed
@@ -172,8 +178,8 @@ def _legacy_failed_models(output_dir: Path) -> set[str]:
     return failed_models
 
 
-def collect_run_outcomes(output_dir: Path, expected_config=None) -> RunOutcomes:
-    completed_models = frozenset(_completed_models_from_artifacts(output_dir, expected_config))
+def collect_run_outcomes(output_dir: Path, expected_config=None, evidence=False, evidence_options=None) -> RunOutcomes:
+    completed_models = frozenset(_completed_models_from_artifacts(output_dir, expected_config, evidence=evidence, evidence_options=evidence_options))
     failed_models = set(_terminal_failed_models(output_dir) | _legacy_failed_models(output_dir))
     failed_models -= set(completed_models)
     return RunOutcomes(
@@ -372,7 +378,9 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
     parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
     
+    add_evidence_arguments(parser)
     args = parser.parse_args()
+    validate_evidence_arguments(args, parser)
     for key in ("max_worker_ram_gib", "max_worker_cache_gib", "max_weight_gib"):
         if not math.isfinite(getattr(args, key)) or getattr(args, key) < 0:
             parser.error(f"--{key} must be finite and >= 0")
@@ -713,6 +721,11 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
     """
     commands = []
     worker_script = SCRIPT_DIR / "worker.py"
+    cache_rows = cached_models(getattr(args, "cache_models", None))
+    cache_rows.update(identity(str(value))[0] for value in model_df.get("source_model", []) if value)
+    for path in (Path(output_dir) / "evidence").glob("*/*.manifest.json"):
+        manifest = json.loads(path.read_text())
+        cache_rows.update(identity(base)[0] for base in manifest.get("declared_bases", []) if isinstance(base, str))
     
     for _, row in model_df.iterrows():
         model_id = _normalize_text(row["model_id"])
@@ -743,6 +756,32 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
         cmd_parts.extend(["--load_dtype", getattr(args, "load_dtype", "auto")])
         cmd_parts.extend(["--compute_dtype", getattr(args, "compute_dtype", "float32")])
         cmd_parts.append("--save_eigs" if getattr(args, "save_eigs", True) else "--no-save_eigs")
+        enabled = getattr(args, "evidence", True) and getattr(args, "analysis_source", "auto") != "checkpoint"
+        cmd_parts.append("--evidence" if enabled else "--no-evidence")
+        cmd_parts.append("--publish" if getattr(args, "publish", True) else "--no-publish")
+        if getattr(args, "packages_root", None):
+            cmd_parts.extend(["--packages_root", str(args.packages_root)])
+        cmd_parts.extend(["--evidence_device", getattr(args, "evidence_device", "cpu"),
+                          "--evidence_max_inflight_gib", str(getattr(args, "evidence_max_inflight_gib", 2)),
+                          "--parent_cache_max_gib", str(getattr(args, "parent_cache_max_gib", 64)),
+                          "--stratum", _normalize_text(row.get("stratum", "")) or getattr(args, "stratum", ""),
+                          "--sketch_k", str(getattr(args, "sketch_k", "auto"))])
+        if getattr(args, "parent_cache", None):
+            cmd_parts.extend(["--parent_cache", str(args.parent_cache)])
+        if getattr(args, "no_parent_cache", False):
+            cmd_parts.append("--no-parent_cache")
+        cmd_parts.append("--with_parent" if getattr(args, "with_parent", True) else "--no-with_parent")
+        experts = getattr(args, "all_experts", "auto")
+        if experts != "auto":
+            cmd_parts.append("--all_experts" if experts else "--no-all_experts")
+        if identity(model_id)[0] in cache_rows:
+            cmd_parts.append("--cache_self")
+        if enabled and not args.overwrite:
+            stem = safe_filename(model_id)
+            if artifact_compatibility(output_dir / "stats" / f"{stem}.csv", output_dir / "metrics" / f"{stem}.h5")[0]:
+                if not evidence_complete(output_dir, model_id, revision_norm, measurement=measurement_config(args), options=args,
+                                         stratum=_normalize_text(row.get("stratum", "")) or getattr(args, "stratum", "")):
+                    cmd_parts.append("--evidence_only")
         if args.overwrite: cmd_parts.append("--overwrite")
         if getattr(args, "trust_remote_code", False): cmd_parts.append("--trust_remote_code")
         if revision_norm: cmd_parts.extend(["--revision", revision_norm])
@@ -845,6 +884,16 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
                 f"Existing results for {model_id} are incompatible ({reason}). "
                 "Use a fresh output directory or explicitly pass --overwrite; existing files were not changed."
             )
+        if (args is not None and getattr(args, "evidence", False)
+                and not evidence_complete(output_dir, model_id, _normalize_text(row.get("revision_norm", "")), measurement=expected, options=args,
+                                          stratum=_normalize_text(row.get("stratum", "")) or getattr(args, "stratum", ""))):
+            continue
+        if args is not None and getattr(args, "publish", False):
+            try:
+                publish_model(args, output_dir, model_id, _normalize_text(row.get("revision_norm", "")))
+            except (OSError, ValueError):
+                # Retry/report publication in a worker without loading weights.
+                continue
         completed.add(model_id)
     skipped_models = set(completed)
     if skip_failed:
@@ -906,6 +955,8 @@ def main():
             print(f"Resolving {len(model_df)} model rows (metadata/config only; no weights)", flush=True)
             pinned = pin_model_revisions(model_df, max_weight_gib=args.max_weight_gib)
             write_pinned_model_list(pinned, manifest_path)
+            if getattr(args, "evidence", False):
+                prepare_evidence_manifests(pinned, output_dir)
             errors = int(pinned["pin_status"].eq("error").sum())
             print(f"Saved {len(pinned) - errors} pinned models and {errors} unresolved rows to {manifest_path}")
             ready = int(pinned["preparation_status"].eq("ready").sum())
@@ -919,6 +970,8 @@ def main():
             return
         model_df, held_models = split_prepared_models(model_df)
         validate_model_list_pins(model_df)
+        if getattr(args, "evidence", False):
+            prepare_evidence_manifests(model_df, output_dir)
     except (OSError, ValueError) as exc:
         print(f"Cannot prepare or launch: {exc}")
         raise SystemExit(2) from exc
@@ -991,7 +1044,7 @@ def main():
     
     if len(model_df) == 0:
         logger.info("No models to process (all completed, skipped, or blocked by preflight)")
-        outcomes = collect_run_outcomes(output_dir, measurement_config(args))
+        outcomes = collect_run_outcomes(output_dir, measurement_config(args), evidence=args.evidence, evidence_options=args)
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
         logger.info(f"Failed: {outcomes.failure_count} models")
         logger.info(f"Results saved to: {output_dir}")
@@ -1036,7 +1089,7 @@ def main():
     logger.info("=" * 80)
     
     # Print summary
-    outcomes = collect_run_outcomes(output_dir, measurement_config(args))
+    outcomes = collect_run_outcomes(output_dir, measurement_config(args), evidence=args.evidence, evidence_options=args)
     logger.info(f"Successfully analyzed: {outcomes.success_count} models")
     logger.info(f"Failed: {outcomes.failure_count} models")
     logger.info(f"Results saved to: {output_dir}")

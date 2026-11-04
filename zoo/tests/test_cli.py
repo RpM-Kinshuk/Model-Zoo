@@ -94,3 +94,32 @@ def test_module_entrypoint_help():
                             cwd=Path(__file__).resolve().parents[2], text=True, capture_output=True,
                             env=dict(os.environ, HF_HUB_OFFLINE="1"))
     assert result.returncode == 0 and "build" in result.stdout and not result.stderr
+
+
+def test_build_without_arguments_uses_packages_and_current_conventions(package_run, monkeypatch):
+    from zoo.publish import publish_package, current_conventions_id
+    r = package_run
+    publish_package(r.run, "lab/tiny", r.packages, r.root)
+    assert main(["build"]) == 0
+    meta = json.loads((r.root / "builds/current/zoo.json").read_text())
+    assert meta["conventions_id"] == current_conventions_id()
+    assert meta["row_counts"]["models"] == 1 and meta["row_counts"]["layers"] == 2
+
+
+def test_build_reports_skipped_conventions(package_run):
+    from zoo.publish import publish_package
+    import h5py
+    r = package_run
+    publish_package(r.run, "lab/tiny", r.packages, r.root)
+    for source in [r.run / "metrics/lab--tiny.h5", next(r.folder.glob("*.spectra.h5"))]:
+        replacement = source.with_suffix(".new")
+        replacement.write_bytes(source.read_bytes())
+        with h5py.File(replacement, "r+") as h:
+            cfg = json.loads(h.attrs["measurement_config_json"])
+            cfg["fix_fingers"] = "xmin_peak"
+            h.attrs["measurement_config_json"] = json.dumps(cfg)
+        os.replace(replacement, source)
+    publish_package(r.run, "lab/tiny", r.packages, r.root)
+    assert main(["build"]) == 0
+    meta = json.loads((r.root / "builds/current/zoo.json").read_text())
+    assert meta["skipped_conventions"] == 1 and meta["row_counts"]["models"] == 1

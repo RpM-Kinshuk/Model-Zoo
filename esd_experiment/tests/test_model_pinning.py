@@ -364,7 +364,7 @@ def test_prepare_only_stops_before_gpu_backends_or_dispatch(tmp_path, monkeypatc
     output = tmp_path / "run"
     hub.responses[("org/model", "main")] = OSError("unavailable") if failed else model_info()
     monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", str(source),
-                                     "--output_dir", str(output), "--prepare_only"])
+                                     "--output_dir", str(output), "--prepare_only", "--no-evidence"])
     forbid_runtime(monkeypatch)
 
     if failed:

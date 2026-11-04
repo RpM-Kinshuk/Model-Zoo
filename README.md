@@ -95,7 +95,7 @@ python esd_experiment/run_experiment.py \
 > [!NOTE]
 > **Review before launch** · Check the generated `models.csv` for pins, config
 > labels, weight budget and ready/held status. Preparation reads metadata and
-> small JSON files, not weights.
+> small JSON files and selected safetensors headers, not tensor values.
 
 <details>
 <summary><strong>Preparation notes</strong> &nbsp; / &nbsp; Pins, held rows and curated inputs</summary>
@@ -125,6 +125,15 @@ python esd_experiment/run_experiment.py \
   --gpus 0 1 2 3 --num_gpus_per_job 1 \
   --worker_cache_root /scratch/$USER/model_zoo_worker_cache
 ```
+
+Full-mode runs also write pinned evidence under `evidence/<safe>/`: T2 and
+128/256/512-row T1 fingerprints, full spectra, and declared-parent deltas.
+Evidence runs on CPU alongside GPU analysis by default. Use `--no-evidence` for
+the previous CSV/H5-only behavior; checkpoint mode disables evidence with a notice.
+If evidence fails, the ESD pair is retained and the next run retries evidence only.
+Completed models publish immutable packages to `$ZOO_DATA/packages`, or
+`<output_dir>/packages` when `ZOO_DATA` is unset. Set `--packages_root PATH` or
+use `--no-publish` to retain only run-folder outputs.
 
 > [!TIP]
 > **Continue where you left off.** Relaunch with the same pins and settings;
@@ -506,15 +515,19 @@ The diagrams are editable, self-contained assets. Their
 
 ## Zoo database (build)
 
-Build a queryable snapshot from existing evidence artifacts:
+Build a queryable snapshot from completed model packages:
 
 ```bash
-python -m zoo.cli build --manifests "$MANIFESTS" \
-  --fingerprints "$FINGERPRINTS" --data_root "$ZOO_DATA" \
-  --out "$ZOO_DATA/builds/current"
+python -m zoo.cli build
 ```
 
-The snapshot contains Parquet tables, retrieval indexes and links to full HDF5
-spectra. Zoo-Keeper provides `find`, `info`, `similar`, `family`, `diff` and
+With `ZOO_DATA` set, this selects current measurement conventions from
+`$ZOO_DATA/packages` and publishes `$ZOO_DATA/builds/current`. Use `--packages`
+and `--conventions` to select explicit inputs. Existing manifest/fingerprint
+builds remain available through `--manifests` and `--fingerprints`.
+Backfill completed runs with `python -m zoo.cli publish --runs RUN_DIR`.
+
+The snapshot contains Parquet tables, including per-layer fit metrics, retrieval
+indexes and links to full HDF5 spectra. Zoo-Keeper provides `find`, `info`, `similar`, `family`, `diff` and
 `check`. See the [build and query guide](docs/operations/zoo.md) for score inputs,
 evidence tiers and revision handling.

@@ -1,7 +1,8 @@
 # ESD analysis
 
 From the repository root, first prepare a small, pinned model list in a fresh
-output directory. This contacts HF for metadata and adapter JSON, not weights:
+output directory. This contacts HF for metadata, adapter JSON and evidence
+safetensors headers, without reading tensor values:
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -128,6 +129,34 @@ Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
   actual model class, loading checks, installed backend versions and config
   commit. Per-layer fields record source/compute dtype, compute device, weight
   layout and fit status. Visible GPU names alone do not identify where a layer ran.
+
+### Full-mode evidence
+
+Evidence is on by default. Each model additionally writes
+`evidence/<safe>/<safe>.manifest.json`, T2 and T1 (128/256/512 rows) fingerprints,
+`<safe>.t2.spectra.h5`, and `evidence.json` with reuse/measurement counts and
+settings. The T2 spectra identify each layer as `runner` or `second_round`.
+Runner spectra are reused only after exact stored-key, shape, dtype and
+256-row byte checks.
+
+The CPU sidecar overlaps GPU ESD; CPU-only runs start the sidecar after ESD.
+`--evidence_device gpu` explicitly uses visible GPU0 for evidence;
+`--evidence_max_inflight_gib` defaults to2. Parent-cache, sketch and expert
+controls follow the [evidence guide](evidence.md). Without a token, manifests
+come from local downloads and parent deltas use cached blocks when available;
+otherwise those deltas report `parent_unavailable`.
+
+The ESD CSV/H5 pair is saved before waiting for evidence, including during
+supervisor termination. A retry with a compatible pair skips the estimator and
+finishes evidence using saved HDF5 spectra. Scalar-only pairs can recover by
+measuring the missing spectra in the second round. Completion checks the T2
+marker and measurement/evidence settings; stale evidence is rebuilt without
+rewriting the compatible ESD pair. Superseded evidence is restored if rebuilding
+fails. The worker handles SIGTERM through its normal interruption cleanup.
+
+`--no-evidence` retains the previous CSV/H5-only behavior. Explicit checkpoint
+mode disables evidence with a notice; automatic checkpoint fallback records
+`evidence: skipped_checkpoint_fallback`. Model-package publishing is a later step.
 
 ### Query models and read a named spectrum
 

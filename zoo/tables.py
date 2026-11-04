@@ -36,11 +36,23 @@ def _relative(path, root):
         raise ValueError(f"Artifact outside data_root: {path}") from error
 
 
+def _manifest_files(inputs):
+    if isinstance(inputs, (str, Path)):
+        path = Path(inputs)
+        return sorted(path.glob("*.manifest.json")) if path.is_dir() else [path]
+    return sorted(Path(path) for path in inputs)
+
+
 def _fingerprint_files(inputs):
     for item in inputs:
         path = Path(item)
         if path.is_dir():
-            yield from sorted(path.glob("*.t[12].fingerprint.safetensors"))
+            if (path / "package.json").is_file():
+                metadata = json.loads((path / "package.json").read_text())
+                yield from sorted(path / name for name in metadata["files"]
+                                  if name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")))
+            else:
+                yield from sorted(path.glob("*.t[12].fingerprint.safetensors"))
         elif path.is_file() and path.name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")):
             yield path
         else:
@@ -143,7 +155,7 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
     """
     root = Path(data_root).resolve()
     records, manifest_paths = {}, {}
-    for path in sorted(Path(manifests).glob("*.manifest.json")):
+    for path in _manifest_files(manifests):
         manifest = json.loads(path.read_text())
         key = model_key(manifest["repo_id"], manifest["revision"])
         if key in records:
@@ -179,7 +191,13 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
         spectra = ""
         if "t2" in pair:
             path = pair["t2"][0]
-            spectra = _relative(path.with_name(path.name.removesuffix(".t2.fingerprint.safetensors") + ".t2.spectra.h5"), root)
+            spectrum_path = path.with_name(path.name.removesuffix(".t2.fingerprint.safetensors") + ".t2.spectra.h5")
+            package_path = path.parent / "package.json"
+            if package_path.is_file():
+                package = json.loads(package_path.read_text())
+                if package.get("kind") == "full" and "esd/metrics.h5" in package.get("files", {}):
+                    spectrum_path = path.parent / "esd/metrics.h5"
+            spectra = _relative(spectrum_path, root)
         config, decision = manifest.get("config", {}), manifest.get("decision", {})
         shapes = [tuple(shape) for shape in fp.shape] if fp else []
         model_rows.append(dict(model_key=key, repo_id=manifest["repo_id"], revision=manifest["revision"],
