@@ -36,6 +36,28 @@ def test_scale_tensors_never_matrices():
     reasons = {c["name"]: c["reason"] for c in cov}
     assert reasons["g.k.scales"] == "unsupported_representation"     # module poisoned by qweight
 
+
+@pytest.mark.parametrize("spec,config", [
+    ({"m.weight": ("U8", (2, 16)), "m.weight_scale": ("F8_E4M3", (2, 2)),
+      "m.weight_scale_2": ("F32", ())}, {}),
+    ({"m.weight": ("I8", (2, 16)), "m.scale": ("F8_E8M0", (2, 1))},
+     {"quantization_config": {"expert_dtype": "fp4"}}),
+    ({"m.experts.down_proj_blocks": ("U8", (2, 2, 1, 16)),
+      "m.experts.down_proj_scales": ("U8", (2, 2, 1))},
+     {"model_type": "gpt_oss", "num_experts": 2}),
+])
+def test_packed_planning_preserves_json_manifest_shapes(spec, config):
+    from dataclasses import asdict
+    import json
+    entries = E(**spec)
+    raw = json.loads(json.dumps({name: asdict(entry) for name, entry in entries.items()}))
+    before = json.dumps(raw, sort_keys=True)
+    loaded = {name: TensorEntry(**entry) for name, entry in raw.items()}
+    expected = plan_views(entries, config, all_experts=True)
+    actual = plan_views(loaded, config, all_experts=True)
+    assert actual == expected and actual[0]
+    assert json.dumps(raw, sort_keys=True) == before
+
 def test_fp8_block_size_from_config_and_unknown():
     entries = E(**{"kv_a.weight": ("F8_E4M3", (576, 7168)), "kv_a.weight_scale_inv": ("F32", (5, 56))})
     v, _ = plan_views(entries, {"quantization_config": {"weight_block_size": [128, 128]}})

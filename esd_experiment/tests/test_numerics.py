@@ -26,6 +26,64 @@ def test_svd_driver_is_precision_focused_only_on_cuda(monkeypatch, is_cuda, expe
     assert _svdvals_for_measurement(matrix) is expected
 
 
+@pytest.mark.parametrize("shape", [(12, 3), (3, 12), (2, 12, 3), (2, 3, 12)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_cuda_invalid_rectangular_gesvd_retries_exact_qr(monkeypatch, shape, dtype):
+    from net_esd.core import _svdvals_for_measurement
+    matrix = torch.randn(shape, dtype=dtype, generator=torch.Generator().manual_seed(7))
+    if shape[-2] >= shape[-1]:
+        matrix[..., :, -1] = matrix[..., :, 0]
+    else:
+        matrix[..., -1, :] = matrix[..., 0, :]
+    original_svd, original_qr = torch.linalg.svdvals, torch.linalg.qr
+    expected = original_svd(matrix)
+    calls = []
+
+    def svdvals(tensor, **kwargs):
+        assert kwargs == {"driver": "gesvd"}
+        calls.append(tuple(tensor.shape))
+        if tensor.shape[-2] != tensor.shape[-1]:
+            raise RuntimeError("cusolver error: CUSOLVER_STATUS_INVALID_VALUE in gesvd_bufferSize")
+        assert tensor.dtype == matrix.dtype
+        return original_svd(tensor)
+
+    def qr(tensor, mode):
+        assert mode == "r" and tensor.shape[-2] >= tensor.shape[-1]
+        assert tensor.dtype == matrix.dtype
+        return original_qr(tensor, mode=mode)
+
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+    monkeypatch.setattr(torch.linalg, "svdvals", svdvals)
+    monkeypatch.setattr(torch.linalg, "qr", qr)
+    actual = _svdvals_for_measurement(matrix)
+    assert calls == [shape, (*shape[:-2], min(shape[-2:]), min(shape[-2:]))]
+    assert actual.shape == expected.shape
+    tolerance = 1e-5 if dtype == torch.float32 else 1e-12
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.parametrize("is_cuda,shape,error", [
+    (False, (12, 3), "CUSOLVER_STATUS_INVALID_VALUE"),
+    (True, (3, 3), "CUSOLVER_STATUS_INVALID_VALUE"),
+    (True, (12, 3), "SVD did not converge"),
+])
+def test_svd_does_not_mask_unrelated_failures(monkeypatch, is_cuda, shape, error):
+    from net_esd.core import _svdvals_for_measurement
+    matrix = torch.ones(shape, dtype=torch.float64)
+    monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: is_cuda))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(error)
+
+    def unexpected_qr(*args, **kwargs):
+        pytest.fail("Unrelated SVD failure must not trigger QR retry")
+
+    monkeypatch.setattr(torch.linalg, "svdvals", fail)
+    monkeypatch.setattr(torch.linalg, "qr", unexpected_qr)
+    with pytest.raises(RuntimeError, match=error):
+        _svdvals_for_measurement(matrix)
+
+
 @pytest.mark.parametrize("shape", [(4, 3), (2, 4, 3)])
 def test_failed_gram_uses_the_same_svd_policy(monkeypatch, shape):
     import net_esd.core as core

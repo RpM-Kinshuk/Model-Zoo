@@ -77,11 +77,11 @@ def _fp8_blocks(shape, scale_shape, config):
 
 def _representation(name, entries, config):
     entry = entries[name]
-    shape = entry.shape
+    shape = tuple(entry.shape)
     qc = config.get("quantization_config", {})
     if name.endswith("_blocks") and entry.dtype == "U8":
         scale = name[:-7] + "_scales"
-        if scale in entries and len(shape) >= 3 and entries[scale].shape == shape[:-1]:
+        if scale in entries and len(shape) >= 3 and tuple(entries[scale].shape) == shape[:-1]:
             return "mxfp4", (name, scale), shape[:-2] + (shape[-2] * shape[-1] * 2,), ""
     if name.endswith(".weight") and entry.dtype in ("I8", "U8") and len(shape) >= 2:
         module = name[:-7]

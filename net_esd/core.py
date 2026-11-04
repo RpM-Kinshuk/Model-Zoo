@@ -213,8 +213,20 @@ def _svdvals_for_measurement(matrix: torch.Tensor) -> torch.Tensor:
     Default CUDA Jacobi SVD exceeded the pilot's spectral-error tolerance on
     well-conditioned 768/2048-wide matrices. This also governs Gram fallback.
     """
-    kwargs = {"driver": "gesvd"} if matrix.is_cuda else {}
-    return torch.linalg.svdvals(matrix, **kwargs)
+    if not matrix.is_cuda:
+        return torch.linalg.svdvals(matrix)
+    try:
+        return torch.linalg.svdvals(matrix, driver="gesvd")
+    except RuntimeError as error:
+        if ("CUSOLVER_STATUS_INVALID_VALUE" not in str(error)
+                or matrix.shape[-2] == matrix.shape[-1]):
+            raise
+        # Reduce only the failing rectangular CUDA problem, without forming Q.
+        # A=QR (or A^H=QR) preserves every singular value, including zeros;
+        # the square R avoids the original rectangular solver workspace.
+        tall = matrix if matrix.shape[-2] > matrix.shape[-1] else matrix.mH
+        triangular = torch.linalg.qr(tall, mode="r").R
+        return torch.linalg.svdvals(triangular, driver="gesvd")
 
 
 def squared_singular_values(matrix: torch.Tensor, use_svd: bool = True) -> torch.Tensor:

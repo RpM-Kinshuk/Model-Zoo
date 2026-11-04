@@ -137,3 +137,34 @@ Pass `--data_root` explicitly when ZOO_DATA is unset.
 
 This closes the uncalibrated artifact/query smoke. Full R6 and G0 still need
 complete formal calibration and required measurement coverage.
+
+### Recovery checkpoint (2026-11-04)
+
+The Hub run closed with **284/287 new T2 successes**, six earlier T2 bundles
+reused, and three explicit gaps: one NaN source and two timeout omissions.
+The owner stopped the optional retries; original sample rows and inclusion
+weights remain unchanged. T1 is97/97 complete.
+
+The44-case formal delivery is complete. All87 current formal T2 identities
+have verified manifest/fingerprint headers and HDF5 paths. This includes the
+three earlier Smol360 chain endpoints stored outside the original L12 pool.
+
+The current artifact-only zoo has628 models,129,623 measured views,399 valid
+full-spectrum links,1,500 lineage rows and150 scores. All six CLI queries
+passed; `check` remains uncalibrated. Reports and exact commands are under
+`runs/track-a-r3-r6-20261102.rcsy95ap/recovery-20261104T042716Z/finalization/`.
+`scope-closure.json` records the accepted omissions and stopped retries.
+
+The merged recovery code retains successful CUDA/CPU SVD behavior. Only an
+observed rectangular CUDA INVALID_VALUE error uses reduced QR before the
+same full SVD. Packed shapes loaded from JSON are normalized locally. Larger
+bounded operator caches retain the exact seeded NumPy operators; precision,
+rank rules, stored spectra and artifact schemas remain unchanged. The separate
+pilot runtime's hot-file cache fix is archived with its regression/review in
+the recovery run; it is not a new library cache backend.
+
+Formal calibration remains blocked. The42 external references are pickle-only
+at their frozen pins; they need an explicit safe-source decision. The other37
+formal models are not generated. Safe conversion aliases are separate evidence
+until an approved, recorded source change; never silently credit a new revision
+as an original formal pin.
