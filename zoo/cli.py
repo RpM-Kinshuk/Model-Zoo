@@ -29,6 +29,15 @@ def _parser():
     publish.add_argument("--runs", type=Path, nargs="+", required=True)
     publish.add_argument("--packages_root", type=Path)
     publish.add_argument("--data_root", type=Path)
+    deltas = commands.add_parser("deltas", help="Measure row-block updates for detected candidates")
+    deltas.add_argument("--zoo", type=Path)
+    deltas.add_argument("--packages", type=Path)
+    deltas.add_argument("--data_root", type=Path)
+    deltas.add_argument("--workers", default="auto")
+    deltas.add_argument("--compute_device", default="auto")
+    deltas.add_argument("--parent_cache", type=Path)
+    deltas.add_argument("--no-parent_cache", action="store_true")
+    deltas.add_argument("--parent_cache_gib", type=float, default=64)
     return parser
 
 
@@ -45,6 +54,21 @@ def _score_models(directory):
 def main(argv=None):
     args = _parser().parse_args(argv)
     try:
+        if args.command == "deltas":
+            from .deltas import run_deltas
+            import shlex
+            root = args.data_root or (Path(os.environ["ZOO_DATA"]) if os.environ.get("ZOO_DATA") else None)
+            if root is None:
+                raise ValueError("Set --data_root or ZOO_DATA")
+            if not 0 <= args.parent_cache_gib < float("inf"):
+                raise ValueError("parent_cache_gib must be finite and nonnegative")
+            packages = args.packages or root / "packages"
+            cache = None if args.no_parent_cache else args.parent_cache or root / "cache" / "parent_blocks"
+            result = run_deltas(args.zoo or root / "builds/current", packages, root, workers=args.workers,
+                                compute_device=args.compute_device, parent_cache=cache, parent_cache_gib=args.parent_cache_gib)
+            result["rebuild"] = "python -m zoo.cli build --data_root " + shlex.quote(str(root)) + " --packages " + shlex.quote(str(packages))
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if args.command == "publish":
             root = args.data_root or (Path(os.environ["ZOO_DATA"]) if os.environ.get("ZOO_DATA") else None)
             if root is None:

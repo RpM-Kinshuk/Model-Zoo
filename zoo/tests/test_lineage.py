@@ -194,3 +194,13 @@ def test_complete_retrieval_absence_is_legitimate(tmp_path):
     for path in (tmp_path / "retrieval").iterdir():
         path.unlink()
     assert similarity_edges(tmp_path, models, tmp_path).empty
+
+
+def test_pair_delta_does_not_promote_detected_claim_to_verified():
+    from zoo.lineage import _edge, _table, with_pair_delta_evidence
+    child, parent = dict(repo_id="org/a", revision="a"*40), dict(repo_id="org/b", revision="b"*40)
+    edges = _table([_edge("org/a@"+"a"*40, "org/b@"+"b"*40, "same_root", "detected", "sketch_similarity", score=.8)])
+    result = with_pair_delta_evidence(edges, [(None, dict(child=child, parent=parent))])
+    assert result.iloc[0].evidence == "sketch_similarity+row_block_delta"
+    assert result.iloc[0].evidence_tier == "detected" and not result.iloc[0].calibrated
+    assert result.iloc[0].estimand == "same_root" and result.iloc[0].score == .8

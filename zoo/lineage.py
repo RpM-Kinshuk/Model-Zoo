@@ -171,3 +171,18 @@ def merge_edges(*tables: pd.DataFrame, external: Path | None = None) -> pd.DataF
             raise ValueError("Lineage table does not match LINEAGE_COLUMNS")
         rows.extend(table.to_dict("records"))
     return _table(rows)
+
+
+def with_pair_delta_evidence(edges, supplements):
+    """Tag existing claims with measured pair evidence; preserve their tier.
+
+    An update measurement cannot establish ancestry or calibrate a claim.
+    """
+    from .schema import model_key
+    available = {frozenset((model_key(**meta["child"]), model_key(**meta["parent"])))
+                 for _, meta in supplements}
+    result = edges.copy()
+    for index, row in result.iterrows():
+        if frozenset((row.child_key, row.parent_key)) in available:
+            result.loc[index, "evidence"] = row.evidence + "+row_block_delta"
+    return result

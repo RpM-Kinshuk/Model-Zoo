@@ -123,3 +123,29 @@ def test_build_reports_skipped_conventions(package_run):
     assert main(["build"]) == 0
     meta = json.loads((r.root / "builds/current/zoo.json").read_text())
     assert meta["skipped_conventions"] == 1 and meta["row_counts"]["models"] == 1
+
+
+def test_deltas_defaults_to_current_zoo_and_packages(tmp_path, monkeypatch, capsys):
+    import zoo.deltas
+    monkeypatch.setenv("ZOO_DATA", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(zoo.deltas, "run_deltas", lambda *args, **kw: calls.append((args, kw)) or {"measured": 0})
+    assert main(["deltas"]) == 0
+    assert calls[0][0] == (tmp_path / "builds/current", tmp_path / "packages", tmp_path)
+    assert calls[0][1]["parent_cache"] == tmp_path / "cache/parent_blocks"
+    assert "rebuild" in json.loads(capsys.readouterr().out)
+
+
+def test_build_reads_pair_delta_supplements(package_run):
+    from evidence.pair_delta import pair_deltas
+    from evidence.hub import HubReader
+    from zoo.publish import publish_package
+    from zoo.build import build_zoo
+    r = package_run
+    package = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    core = (package / "package.json").read_bytes()
+    delta = pair_deltas(r.manifest, r.manifest, HubReader(), package)
+    built = build_zoo(packages=r.packages, data_root=r.root, out=r.root / "built")
+    meta = json.loads((built / "zoo.json").read_text())
+    assert any(str(delta.relative_to(r.root)) in str(item) for item in meta["inputs"])
+    assert (package / "package.json").read_bytes() == core
