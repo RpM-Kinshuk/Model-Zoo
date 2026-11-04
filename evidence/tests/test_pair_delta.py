@@ -57,7 +57,7 @@ def test_pair_delta_incompatible_shapes_are_gaps(local_manifest, parent_manifest
     import copy
     other = copy.deepcopy(parent_manifest)
     other["tensors"][0]["shape"] = (4096, 32)
-    other["tensors"][0]["end"] = other["tensors"][0]["start"] + np.prod(other["tensors"][0]["shape"]) * 4
+    other["tensors"][0]["end"] = other["tensors"][0]["start"] + int(np.prod(other["tensors"][0]["shape"])) * 4
     _, tensors = load_pair_delta(pair_deltas(local_manifest, other, HubReader(), tmp_path))
     assert np.isnan(tensors["delta_scalars"][:, :2]).any()
 
@@ -69,3 +69,25 @@ def test_pair_delta_rejects_unknown_format(tmp_path):
     save_file({}, path, metadata={"pair_delta_version": "999"})
     with pytest.raises(ValueError):
         load_pair_delta(path)
+
+
+def test_supplement_opposite_in_run_direction_uses_correct_view_index(local_manifest, tmp_path):
+    from dataclasses import replace
+    from zoo.lineage import _subset
+    from evidence.pair_delta import pair_deltas
+    from evidence.compare import diff_fingerprints
+    a = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "a"))
+    b = _subset(a, [1])
+    b.meta = dict(b.meta, repo_id="org/subset", revision="a"*40, parent={key: a.meta[key] for key in ("repo_id", "revision")})
+    b.path = None
+    b.delta = dict(b.delta, status=np.array(["ok"]), frac_identical=np.array([.5]), rel_update_norm=np.array([.25]))
+    other = dict(local_manifest, repo_id=b.meta["repo_id"], revision=b.meta["revision"], source=dict(zoo_data_path="unused"))
+    # A distinct identity points to the same local weight bytes in this fixture.
+    other["source"] = {}
+    from unittest.mock import patch
+    import evidence.fingerprint as module
+    original = module._source
+    with patch.object(module, "_source", side_effect=lambda m: local_manifest["repo_id"] if m is other else original(m)):
+        pair_deltas(local_manifest, other, HubReader(), tmp_path / "a")
+    result = diff_fingerprints(a, b)
+    assert result["views"][a.names[1]]["rel_update_norm"] == 0

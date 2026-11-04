@@ -16,6 +16,7 @@ import argparse
 import importlib
 import importlib.util
 import itertools
+import getpass
 import json
 import math
 import os
@@ -122,9 +123,19 @@ def _completed_models_from_artifacts(output_dir: Path, expected_config=None, evi
             if not artifact_compatibility(csv_file, metrics_file, expected_config)[0]:
                 continue
             model_id = csv_file.stem.replace("--", "/").replace("__", "@")
-            if evidence and not evidence_complete(output_dir, model_id, measurement=expected_config, options=evidence_options):
+            pinned_id = model_id
+            revision = ""
+            if evidence or evidence_options is not None:
+                import h5py
+                with h5py.File(metrics_file) as handle:
+                    config = json.loads(handle.attrs.get("measurement_config_json", "{}"))
+                revision = config.get("requested_revision", "")
+                repo = config.get("repo_id", "")
+                if repo and (is_commit_sha(revision) or revision.startswith("local:")):
+                    pinned_id = f"{repo}@{revision}"
+            if evidence and not evidence_complete(output_dir, model_id, revision, measurement=expected_config, options=evidence_options):
                 continue
-            if evidence_options is not None and not publication_complete(evidence_options, output_dir, model_id):
+            if evidence_options is not None and not publication_complete(evidence_options, output_dir, pinned_id):
                 continue
             completed.add(model_id)
 
@@ -342,11 +353,11 @@ def parse_args():
     # GPU configuration
     parser.add_argument("--cpu_threads_per_gpu", type=lambda value: value if value == "auto" else int(value), default="auto")
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
-    parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
+    parser.add_argument("--num_gpus_per_job", type=lambda v: v if v == "auto" else int(v), default="auto", help="GPUs per job: auto from selected weight bytes, or an explicit count")
     parser.add_argument("--max_concurrent_jobs", type=int, default=1, help="Maximum model workers at once (default: 1; increase explicitly after reviewing resource costs)")
-    parser.add_argument("--max_worker_ram_gib", type=float, default=16, help="Sampled worker-tree RSS limit in GiB (default: 16; 0 disables)")
-    parser.add_argument("--max_worker_cache_gib", type=float, default=12, help="Sampled private worker cache limit in GiB (default: 12; 0 disables)")
-    parser.add_argument("--max_weight_gib", type=float, default=6, help="Preparation budget for selected model weights plus adapter base in GiB (default: 6; 0 disables size cap, not file/access checks)")
+    parser.add_argument("--max_worker_ram_gib", type=lambda v: v if v == "auto" else float(v), default="auto", help="Worker-tree RSS limit in GiB: auto per model; 0 disables")
+    parser.add_argument("--max_worker_cache_gib", type=lambda v: v if v == "auto" else float(v), default="auto", help="Private cache GiB: auto per model; 0 disables")
+    parser.add_argument("--max_weight_gib", type=lambda v: v if v == "auto" else float(v), default="auto", help="Selected weight GiB budget: auto from GPU pool; 0 disables only size cap")
     parser.add_argument("--gpu_memory_threshold", type=int, default=500, help="GPU memory threshold in MB for considering GPU as free (default: 500)")
     parser.add_argument("--max_check", type=int, default=2, help="Consecutive idle checks, five seconds apart (default: 2)")
     parser.add_argument("--stale_process_action", type=str, default="terminate", choices=["log", "terminate"], help="Action when a heartbeat/stage timeout expires (default: terminate; log keeps waiting)")
@@ -355,8 +366,8 @@ def parse_args():
     parser.add_argument(
         "--stage_timeout_seconds",
         type=str,
-        default="load=7200,analyze=28800,save=1800,default=14400",
-        help="Comma-separated stage=seconds limits for stale stages; use 0 to disable a stage (default: load=7200,analyze=28800,save=1800,default=14400)",
+        default="auto",
+        help="Stage timeouts: auto per model or comma-separated stage=seconds; 0 disables a stage",
     )
     
     # ESD configuration
@@ -377,15 +388,18 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None, help="Limit this preparation/run to the first N input rows")
     parser.add_argument("--skip_failed", action="store_true", default=False, help="Skip models that previously failed (default: False)")
     parser.add_argument("--log_dir", type=str, default=None, help="Directory for logs (default: output_dir/logs)")
-    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", "/scratch/kinshuk/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/kinshuk/hf_worker_cache)")
+    parser.add_argument("--worker_cache_root", type=str, default=os.environ.get("MODEL_ZOO_WORKER_CACHE_ROOT", f"/scratch/{os.environ.get('USER') or getpass.getuser()}/hf_worker_cache"), help="Root for per-worker ephemeral Hugging Face caches (default: /scratch/$USER/hf_worker_cache)")
     
+    parser.add_argument("--prefetch_models", type=lambda v: v if v == "auto" else int(v), default="auto", help="Models to download ahead; auto uses GPU pool size, 0 disables")
+    parser.add_argument("--prefetch_max_gib", type=float, default=64)
+    parser.add_argument("--oversized_t1", action=argparse.BooleanOptionalAction, default=True)
     add_evidence_arguments(parser)
     args = parser.parse_args()
     validate_evidence_arguments(args, parser)
     if args.cpu_threads_per_gpu != "auto" and args.cpu_threads_per_gpu < 0:
         parser.error("--cpu_threads_per_gpu must be auto or nonnegative")
     for key in ("max_worker_ram_gib", "max_worker_cache_gib", "max_weight_gib"):
-        if not math.isfinite(getattr(args, key)) or getattr(args, key) < 0:
+        if getattr(args, key) != "auto" and (not math.isfinite(getattr(args, key)) or getattr(args, key) < 0):
             parser.error(f"--{key} must be finite and >= 0")
     if args.max_worker_cache_gib and not args.worker_cache_root:
         parser.error("A cache limit requires --worker_cache_root; use --max_worker_cache_gib 0 to disable it")
@@ -393,11 +407,11 @@ def parse_args():
         measurement_config(args)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.analysis_source == "checkpoint" and args.num_gpus_per_job != 1:
+    if args.analysis_source == "checkpoint" and args.num_gpus_per_job not in (1, "auto"):
         parser.error("Checkpoint mode uses one device per worker; use --num_gpus_per_job 1")
     if any(gpu < 0 for gpu in args.gpus) or len(set(args.gpus)) != len(args.gpus):
         parser.error("--gpus must contain distinct nonnegative indices")
-    if not 1 <= args.num_gpus_per_job <= len(args.gpus):
+    if args.num_gpus_per_job != "auto" and not 1 <= args.num_gpus_per_job <= len(args.gpus):
         parser.error("--num_gpus_per_job must be between 1 and the number of selected GPUs")
     if args.max_check < 1 or args.gpu_memory_threshold < 1:
         parser.error("--max_check and --gpu_memory_threshold must be >= 1")
@@ -408,9 +422,14 @@ def parse_args():
     if args.termination_grace_seconds < 1:
         parser.error("--termination_grace_seconds must be >= 1")
     try:
-        args.stage_timeout_seconds = parse_stage_timeout_seconds(args.stage_timeout_seconds)
+        if args.stage_timeout_seconds != "auto":
+            args.stage_timeout_seconds = parse_stage_timeout_seconds(args.stage_timeout_seconds)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.prefetch_models == "auto":
+        args.prefetch_models = len(args.gpus)
+    if args.prefetch_models < 0 or not math.isfinite(args.prefetch_max_gib) or args.prefetch_max_gib < 0:
+        parser.error("Prefetch count and byte budget must be nonnegative and finite")
     return args
 
 
@@ -561,6 +580,8 @@ def pin_model_revisions(model_df, max_weight_gib=None):
     """
     from huggingface_hub import HfApi, hf_hub_download
 
+    if max_weight_gib == "auto":
+        max_weight_gib = 0  # Review metadata/access now; pool capacity is known only at launch.
     token = get_hf_token()
     api = HfApi(token=token)
     resolved = {}
@@ -817,6 +838,8 @@ def generate_worker_jobs(model_df: pd.DataFrame, output_dir: Path, args) -> list
                 label=model_id,
                 model_id=model_id,
                 terminal_status_path=str(output_dir / "logs" / "terminal_status" / f"{file_name}.json"),
+                **(row.get("_job_resources") if isinstance(row.get("_job_resources"), dict) else {}),
+                prefetch_files=prefetch_files(row),
             )
         )
     return jobs
@@ -923,6 +946,7 @@ def create_runtime_config(args, config_path):
     This allows the script to start with CLI args, but allows the user 
     to modify this file during runtime to change behavior.
     """
+    from sizing import BASE_TIMEOUTS
     config = {
         "available_gpus": args.gpus,
         "cpu_threads_per_gpu": getattr(args, "cpu_threads_per_gpu", "auto"),
@@ -931,14 +955,174 @@ def create_runtime_config(args, config_path):
         "max_concurrent_jobs": args.max_concurrent_jobs,
         "stale_process_action": getattr(args, "stale_process_action", "terminate"),
         "heartbeat_timeout_seconds": getattr(args, "heartbeat_timeout_seconds", 3600),
-        "stage_timeout_seconds": getattr(args, "stage_timeout_seconds", {}),
+        "stage_timeout_seconds": dict(BASE_TIMEOUTS) if getattr(args, "stage_timeout_seconds", {}) == "auto" else getattr(args, "stage_timeout_seconds", {}),
         "termination_grace_seconds": getattr(args, "termination_grace_seconds", 60),
-        "max_worker_ram_gib": getattr(args, "max_worker_ram_gib", 16),
-        "max_worker_cache_gib": getattr(args, "max_worker_cache_gib", 12),
+        "max_worker_ram_gib": 0 if getattr(args, "max_worker_ram_gib", 16) == "auto" else getattr(args, "max_worker_ram_gib", 16),
+        "max_worker_cache_gib": 0 if getattr(args, "max_worker_cache_gib", 12) == "auto" else getattr(args, "max_worker_cache_gib", 12),
     }
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
     print(f"Initialized runtime config at: {config_path}")
+
+
+def release_size_holds(models, budget):
+    """Reconsider only old size holds; keep access/layout review failures held."""
+    if "preparation_reason" not in models or "download_bytes" not in models:
+        return models
+    result = models.copy()
+    weights = pd.to_numeric(result.download_bytes, errors="coerce")
+    mask = result.preparation_reason.fillna("").str.startswith("Selected weights exceed ") & weights.gt(0)
+    if budget != "auto" and budget:
+        mask &= weights.le(budget * 1024**3)
+    result.loc[mask, "preparation_status"] = "ready"
+    result.loc[mask, "preparation_reason"] = ""
+    return result
+
+
+def prefetch_files(row):
+    """Download selected pinned weights plus small loader metadata, never extras."""
+    result = []
+    repo, revision = identity(_normalize_text(row["model_id"]), _normalize_text(row.get("revision_norm", "")))
+    if not is_commit_sha(revision):
+        return ()
+    adapter = _normalize_text(row.get("base_model_relation", "")) in ("adapter", "lora", "peft")
+    targets = [(repo, revision, row.get("weight_files", ""), adapter)]
+    if adapter:
+        base_repo, base_revision = identity(_normalize_text(row.get("source_model", "")))
+        if not is_commit_sha(base_revision):
+            return ()
+        targets.append((base_repo, base_revision, row.get("base_weight_files", ""), False))
+    for repo, revision, raw, is_adapter in targets:
+        try:
+            weights = json.loads(raw)
+            if not isinstance(weights, dict) or not weights:
+                return ()
+            if any(not isinstance(name, str) or not re.fullmatch(r"[\w.-]+\.(safetensors|bin)", name) or type(size) is not int or size < 1 for name, size in weights.items()):
+                return ()
+        except (TypeError, ValueError):
+            return ()
+        result.extend((repo, revision, name, size) for name, size in sorted(weights.items()))
+        for name in (("adapter_config.json",) if is_adapter else ("config.json",)):
+            result.append((repo, revision, name, 0))
+        if len(weights) > 1:
+            index = "model.safetensors.index.json" if all(name.endswith(".safetensors") for name in weights) else "pytorch_model.bin.index.json"
+            result.append((repo, revision, index, 0))
+    return tuple(result)
+
+
+def size_models(models, args):
+    from sizing import job_resources, GIB
+    if models.empty:
+        return models, models.copy()
+    gpu_setting = getattr(args, "num_gpus_per_job", 1)
+    weight_cap = getattr(args, "max_weight_gib", 0)
+    auto = any(getattr(args, key, 0) == "auto" for key in ("num_gpus_per_job", "max_weight_gib", "max_worker_ram_gib", "max_worker_cache_gib", "stage_timeout_seconds"))
+    gpu_bytes = None
+    checkpoint = args.analysis_source == "checkpoint"
+    if not checkpoint and (gpu_setting == "auto" or weight_cap == "auto"):
+        try:
+            import gpustat
+            stats = gpustat.GPUStatCollection.new_query().gpus
+            gpu_bytes = min(int(stats[index]["memory.total"]) * 1024**2 for index in args.gpus)
+        except Exception as exc:
+            raise RuntimeError("Cannot read selected GPUs' total memory; set explicit sizing controls or restore GPU visibility") from exc
+        if gpu_bytes <= 0:
+            raise ValueError("Selected GPU memory must be positive")
+    ready, oversized = [], []
+    for _, row in models.iterrows():
+        record = row.to_dict()
+        try:
+            weight = int(float(row.get("download_bytes", 0)))
+        except (ValueError, TypeError, OverflowError):
+            weight = 0
+        if auto and weight < 1:
+            raise ValueError(f"{row['model_id']}: automatic sizing needs reviewed download_bytes; run --prepare_only first")
+        pool = 1 if args.analysis_source == "checkpoint" else (len(args.gpus) if gpu_setting == "auto" else gpu_setting)
+        resources = job_resources(weight, gpu_bytes or max(1, 2*weight), pool, int(getattr(args, "evidence_max_inflight_gib", 2)*GIB)) if weight else {}
+        cap = (pool * gpu_bytes / 1.5 if gpu_bytes else 0) if weight_cap == "auto" else weight_cap * GIB
+        if (gpu_bytes and resources.get("oversized")) or (cap and weight > cap):
+            record.update(reason="too_large_for_full_mode", t1_status="pending")
+            oversized.append(record)
+            continue
+        resources.pop("oversized", None)
+        resources["num_gpus"] = 1 if args.analysis_source == "checkpoint" else (resources.get("num_gpus", 1) if gpu_setting == "auto" else gpu_setting)
+        # Explicit caps continue to use live global config; automatic caps are per job.
+        for key, flag in (("ram_limit_gib", "max_worker_ram_gib"), ("cache_limit_gib", "max_worker_cache_gib")):
+            if getattr(args, flag, 0) != "auto":
+                resources[key] = 0
+        if getattr(args, "stage_timeout_seconds", {}) != "auto":
+            resources["stage_timeout_seconds"] = None
+        record["_job_resources"] = resources
+        ready.append(record)
+    return pd.DataFrame(ready, columns=list(models.columns) + (["_job_resources"] if "_job_resources" not in models else [])), pd.DataFrame(oversized)
+
+
+def measure_oversized(models, output_dir, args, logger, stopped=lambda: False):
+    if models.empty:
+        return
+    if stopped():
+        models.assign(t1_status="interrupted").to_csv(output_dir / "oversized_models.csv", index=False)
+        return
+    if not getattr(args, "oversized_t1", True) or not getattr(args, "evidence", True):
+        models = models.assign(t1_status="disabled")
+        models.to_csv(output_dir / "oversized_models.csv", index=False)
+        return
+    from types import SimpleNamespace
+    from evidence_bridge import create_sidecar, evidence_settings
+    from evidence.fingerprint import fingerprint_model, load_fingerprint
+    from evidence.hub import HubReader
+    from evidence.manifest import write_manifest
+    from evidence.cli import _complete
+    import torch
+    class InterruptibleReader(HubReader):
+        def read(self, *read_args):
+            if stopped():
+                raise InterruptedError("Oversized T1 interrupted")
+            return super().read(*read_args)
+
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(min(8, previous_threads))
+    try:
+        for index, row in models.iterrows():
+            if stopped():
+                break
+            try:
+                options = SimpleNamespace(**vars(args))
+                options.cache_self = False
+                options.source_model = _normalize_text(row.get("source_model", ""))
+                options.stratum = _normalize_text(row.get("stratum", ""))
+                repo, revision = identity(row["model_id"], _normalize_text(row.get("revision_norm", "")))
+                sidecar = create_sidecar(options, output_dir, repo, revision)
+                write_manifest(sidecar.manifest, sidecar.out_dir)
+                path = sidecar.out_dir / (safe_filename(f"{repo}@{revision}") + ".t1.fingerprint.safetensors")
+                parent_identity = {key: sidecar.parent[key] for key in ("repo_id", "revision")} if sidecar.parent else None
+                complete = _complete(path, sidecar.manifest, "t1", sidecar.sketch_k, parent=parent_identity)
+                if complete:
+                    fp = load_fingerprint(path)
+                    sampled = any(item.get("reason") == "expert_not_sampled" for item in fp.coverage)
+                    complete = not (sidecar.all_experts and sampled)
+                if not complete:
+                    fingerprint_model(sidecar.manifest, InterruptibleReader(local_cache=True), "t1", sidecar.out_dir,
+                                      parent=sidecar.parent, parent_cache=sidecar.block_cache,
+                                      sketch_k=sidecar.sketch_k, all_experts=sidecar.all_experts,
+                                      cache_self=sidecar.cache_self, compute_device="cpu")
+                if stopped():
+                    raise InterruptedError("Oversized T1 interrupted")
+                (sidecar.out_dir / "evidence.json").write_text(json.dumps(dict(settings=evidence_settings(options), stratum=options.stratum, gaps=0)))
+                publish_model(options, output_dir, row["model_id"], revision)
+                models.loc[index, "t1_status"] = "published" if getattr(args, "publish", False) else "measured"
+                logger.info(f"Oversized T1 ready: {repo}@{revision}")
+            except InterruptedError:
+                models.loc[index, "t1_status"] = "interrupted"
+                models.to_csv(output_dir / "oversized_models.csv", index=False)
+                return
+            except Exception as exc:
+                models.loc[index, "t1_status"] = "failed"
+                models.loc[index, "t1_error"] = f"{type(exc).__name__}: {exc}"
+                logger.warning(f"Oversized T1 failed: {row['model_id']}: {type(exc).__name__}")
+            models.to_csv(output_dir / "oversized_models.csv", index=False)
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 def main():
@@ -972,6 +1156,7 @@ def main():
             if errors:
                 raise SystemExit(1)
             return
+        model_df = release_size_holds(model_df, args.max_weight_gib)
         model_df, held_models = split_prepared_models(model_df)
         validate_model_list_pins(model_df)
         if getattr(args, "evidence", False):
@@ -1046,7 +1231,15 @@ def main():
         logger.error(str(exc))
         raise SystemExit(2) from exc
     
+    try:
+        model_df, oversized = size_models(model_df, args)
+        if not oversized.empty:
+            oversized.to_csv(output_dir / "oversized_models.csv", index=False)
+            logger.info(f"{len(oversized)} oversized models queued for row-block T1 after GPU jobs")
+    except (ValueError, RuntimeError) as exc:
+        raise SystemExit(f"Cannot size workers; no jobs started: {exc}") from exc
     if len(model_df) == 0:
+        measure_oversized(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set())
         logger.info("No models to process (all completed, skipped, or blocked by preflight)")
         outcomes = collect_run_outcomes(output_dir, measurement_config(args), evidence=args.evidence, evidence_options=args)
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
@@ -1071,7 +1264,9 @@ def main():
         logger=logger,
         dispatcher=dispatcher,
         config_path=config_path,
-        num_gpus_needed=args.num_gpus_per_job,
+        num_gpus_needed=1 if args.num_gpus_per_job == "auto" else args.num_gpus_per_job,
+        prefetch_models=args.prefetch_models,
+        prefetch_max_gib=args.prefetch_max_gib,
         max_concurrent_jobs=args.max_concurrent_jobs,
         state_dir=log_dir,
         cache_root=args.worker_cache_root or None,
@@ -1089,6 +1284,9 @@ def main():
         raise SystemExit(1)
     
     logger.info("=" * 80)
+    measure_oversized(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set())
+    if dispatcher.shutdown_event.is_set():
+        raise SystemExit(1)
     logger.info("Experiment completed!")
     logger.info("=" * 80)
     

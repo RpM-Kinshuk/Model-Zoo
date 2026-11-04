@@ -28,8 +28,10 @@ def conventions(settings=None):
     settings = dict(settings)
     settings.setdefault("evidence_tier", "full")
     settings.setdefault("evidence", dict(sketch_k="auto", all_experts="auto", with_parent=True, device="cpu"))
-    return dict({key: value for key, value in settings.items() if key not in _IDENTITY},
-                numerics_version=NUMERICS_VERSION, format_version=FORMAT_VERSION, evidence_version=EVIDENCE_VERSION)
+    result = {key: value for key, value in settings.items() if key not in _IDENTITY}
+    for key, value in dict(numerics_version=NUMERICS_VERSION, format_version=FORMAT_VERSION, evidence_version=EVIDENCE_VERSION).items():
+        result.setdefault(key, value)
+    return result
 
 
 def conventions_id(settings=None):
@@ -252,14 +254,15 @@ def publish_package(run_dir: Path, model_id: str, packages_root: Path, data_root
 
 
 def publish_packages(runs: list[Path], packages_root: Path, data_root: Path) -> list[Path]:
-    published = []
+    published, seen = [], set()
     for run in runs:
         keys = sorted({model_key(m["repo_id"], m["revision"]) for path in _manifest_files(run)
                        for m in [json.loads(path.read_text())]})
         for key in keys:
             path = publish_package(run, key, packages_root, data_root)
-            if path is not None and path not in published:
+            if path is not None and path not in seen:
                 published.append(path)
+                seen.add(path)
     return published
 
 

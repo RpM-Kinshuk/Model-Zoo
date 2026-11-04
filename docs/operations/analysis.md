@@ -57,8 +57,9 @@ selected `weight_format`, `weight_files` (JSON byte sizes), `weight_bytes` and
 together; ordinary finetune lineage hints do not add a second model to the
 budget. Standard safetensors files are preferred over PyTorch files. Sharded
 checkpoints use their small index JSON, not all similarly named files in the
-repository. The default `--max_weight_gib 6` holds oversized jobs; zero disables
-the size cap, not missing-file/size/access checks. Gated/private repositories
+repository. The default `--max_weight_gib auto` reviews sizes/access during preparation and
+uses pool capacity at launch. Oversized jobs get a later CPU T1 pass; zero
+disables the size cap, not missing-file/size/access checks. Gated/private repositories
 need verified read access. These checks do not validate tensor layouts, predict
 RAM/VRAM requirements, or establish quantization support. Runtime integrity and
 coverage checks still apply. JSON downloads are deleted immediately after use;
@@ -642,8 +643,9 @@ reported as successful.
   explicitly to observe expired timeouts without stopping workers.
 - The default is one worker. Increase `--max_concurrent_jobs` explicitly after
   reviewing memory/storage costs; per-worker caps are not an aggregate host cap.
-- `--max_worker_ram_gib 16` samples summed worker-tree RSS and
-  `--max_worker_cache_gib 12` samples allocated private-cache bytes every five
+- RAM/cache caps default to per-job `auto`; explicit numbers override them.
+  `--max_worker_ram_gib` samples summed worker-tree RSS and
+  `--max_worker_cache_gib` samples allocated private-cache bytes every five
   seconds in the existing supervisor. Zero disables each cap. These are sampled
   safety stops, not hard OS quotas: fast allocation spikes can overshoot, and
   slow filesystem reads can delay a sample. Monitoring errors stop the affected
@@ -728,8 +730,8 @@ Use the ordinary workflow: **prepare → review → run → index → query**.
   authoritative; spectra are read by exact name, one layer at a time.
   No database service, extra observer or separate cache manager is required.
 
-Current defaults are a 6 GiB selected-weight budget, 16 GiB worker-tree RSS and
-12 GiB private cache. Limits are configurable sampled safeguards, not OS quotas
+Current budgets are automatic from reviewed weight bytes and the selected GPU
+pool; see README's resource table for the initial sizing rules. Limits are configurable sampled safeguards, not OS quotas
 or predictions of GPU memory. Keep cache ownership, bounded disk and shared-HPC
 availability checks even when optimizing overhead.
 

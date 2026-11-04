@@ -106,8 +106,10 @@ Inspect `preparation_status` and `preparation_reason` before starting.
 
 Config labels are trusted for routing only at their recorded revision.
 Preparation preserves an existing `models.csv`; resume with it or prepare a
-fresh directory for new pins. The default selected-weight budget is 6 GiB,
-including adapter bases; `--max_weight_gib 0` disables its size cap.
+fresh directory for new pins. Preparation reviews selected file sizes and access
+without probing GPUs. At launch, `--max_weight_gib auto` uses the selected pool's
+capacity, including adapter bases; `0` disables its size cap. Old size-only holds
+are reconsidered when the new budget permits; access/layout holds remain held.
 
 For larger collections, start from `data/curated/model_zoo_phase2.csv`.
 Imported family labels and old ready subsets have known
@@ -183,7 +185,7 @@ use `--no-publish` to retain only run-folder outputs.
 | `--gpus 0 1 2 3` | `--num_gpus_per_job 2` | `--max_concurrent_jobs 2` |
 
 > [!TIP]
-> **Start small** · The launch default is **one worker, one GPU per model**.
+> **Start small** · The launch default is **one worker**, with **automatic GPUs per model**.
 > The figure shows a larger configuration. Admission requires two idle checks,
 > five seconds apart: no GPU processes and memory below 500 MB.
 
@@ -244,9 +246,9 @@ on one selected device. Explicit `--analysis_source checkpoint` requires
 
 <table width="100%">
 <tr>
-<td width="33%" align="center"><img src="docs/assets/cue-weights.svg" width="80" alt=""><br><sub>SELECTED WEIGHTS</sub><br><strong>6 GiB</strong><br><sub>Includes adapter-base weights</sub></td>
-<td width="33%" align="center"><img src="docs/assets/cue-ram.svg" width="80" alt=""><br><sub>WORKER RAM</sub><br><strong>16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
-<td width="33%" align="center"><img src="docs/assets/cue-cache.svg" width="80" alt=""><br><sub>PRIVATE CACHE</sub><br><strong>12 GiB</strong><br><sub>Sampled allocated disk usage</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-weights.svg" width="80" alt=""><br><sub>SELECTED WEIGHTS</sub><br><strong>Pool capacity</strong><br><sub>Includes adapter-base weights</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-ram.svg" width="80" alt=""><br><sub>WORKER RAM</sub><br><strong>Auto, ≥16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
+<td width="33%" align="center"><img src="docs/assets/cue-cache.svg" width="80" alt=""><br><sub>PRIVATE CACHE</sub><br><strong>Auto</strong><br><sub>Sampled allocated disk usage</sub></td>
 </tr>
 </table>
 
@@ -264,11 +266,11 @@ groups, heartbeat data and cache/log paths.
 
 | Control | Default |
 | --- | --- |
-| `--max_weight_gib` | 6 GiB; preparation includes adapter-base weights |
-| `--max_worker_ram_gib` | 16 GiB sampled worker-tree RSS |
-| `--max_worker_cache_gib` | 12 GiB sampled private-cache usage |
+| `--max_weight_gib` | `auto`: selected GPU pool capacity / 1.5; includes adapter base |
+| `--max_worker_ram_gib` | `auto`: max(16, 0.5 × weight GiB + 4), plus any evidence buffer above 2 GiB |
+| `--max_worker_cache_gib` | `auto`: 1.1 × selected weight GiB + 2 |
 | `--heartbeat_timeout_seconds` | 3600 s without a heartbeat |
-| `--stage_timeout_seconds` | `load=7200,analyze=28800,save=1800,default=14400` |
+| `--stage_timeout_seconds` | `auto`: analyze/fingerprint max(28800, 600 × weight GiB); load 7200, save 1800, default 14400 |
 | `--stale_process_action` | `terminate`; `log` marks stale workers and keeps waiting |
 | `--termination_grace_seconds` | 30 s after TERM before KILL |
 
@@ -281,7 +283,25 @@ that is stuck while its reporter remains alive.
 Edit `gpu_config.json` and send `SIGHUP` to reload at a safe point. Invalid
 reloads retain the previous settings. Live fields include `available_gpus`,
 `max_concurrent_jobs`, `memory_threshold_mb`, `max_checks`, resource limits
-and timeout policy. Removing a GPU from the pool does not evict its worker.
+and timeout policy. Positive per-job automatic limits take precedence over global
+caps; explicit CLI caps use the live globals. Removing a GPU from the pool does not evict its worker.
+
+Automatic GPU allocation is ceil(1.5 × selected weight bytes / the smallest
+selected GPU's total memory), within the supplied pool. Use
+`--num_gpus_per_job N` to fix the allocation. Checkpoint mode keeps one GPU.
+Sizing requires reviewed `download_bytes`; reprepare old lists missing it.
+These are initial heuristics, pending live throughput validation.
+
+Download-ahead stages up to one model per pool GPU, bounded by
+`--prefetch_max_gib 64`, before reserving GPUs. Only pinned selected weights and
+loader metadata enter future workers' private caches. Failed prefetch falls
+back to worker downloads. Set `--prefetch_models 0` to disable it. The default
+cache root is `$MODEL_ZOO_WORKER_CACHE_ROOT`, else `/scratch/$USER/hf_worker_cache`.
+
+Models exceeding full-mode capacity are listed in `oversized_models.csv` and
+receive CPU row-block T1-only packages after GPU jobs finish. `t1_status` records
+success/failure; these are separate from completed full ESD models. Disable with
+`--no-oversized_t1` (also disabled by `--no-evidence`).
 
 Each private cache lives at `<worker_cache_root>/<run_id>/<worker_id>/`.
 Hub and legacy Transformers downloads share revision-addressed storage;

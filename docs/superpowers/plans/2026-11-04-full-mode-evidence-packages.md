@@ -2,13 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-11-04):** Owner authorized incremental execution. Tasks 1–3
-are committed through `4fec3a3`; Tasks 4 and 6 are implemented and reviewed,
-uncommitted. Full suite: 1378 passed, 1 skipped (esd_ind). Task 6 includes
-atomic model packages, worker publishing, package-driven builds and the layers
-table. Preliminary/full tiers use distinct immutable convention IDs; the default
-build accepts both current tiers and prefers full evidence. Tasks 5, 7–9 pending;
-Task 7 still requires XF approval. Next: Task 5 before Task 8 sizing/prefetch.
+**Status (2026-11-04):** Tasks1–8 implemented. Owner commits through `bcbcea0`
+include the CPU budget and initial pair pass; final pair fixes and Task8 remain
+uncommitted. One final batch review/fix pass; focused integration264PASS,
+final edge checks23PASS. XF approved following the practical-purpose audit below.
+Task9 real GPU validation remains pending: sandbox NVML is unavailable;
+outside-sandbox access works, but a90s-bounded smoke yielded no completion result
+as the initially idle slots became busy. Preparation regression48PASS.
+No full-scale performance claims or numeric-core changes.
 Progress ledger: `.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
 
 **Agents: never run commit steps.** Leave changes uncommitted and record each
@@ -101,6 +102,39 @@ and `--filter_zeros` (on); `--fix_fingers xmin_mid`; `--load_dtype auto`;
 Deliberately unchanged (owner decision, 2026-11-04): `--gpus [0]` and
 `--max_concurrent_jobs 1`. GPU nodes are shared, so the pool and concurrency
 are always passed explicitly.
+
+## XF practical-purpose audit (2026-11-04)
+
+Owner approved XF subject to checking fit with the practical 50k–100k+ model zoo
+and querying goal. Keep the frozen identities, stored-dtype hashes, nested
+sketches, reproducible row coordinates, explicit coverage and separate measured
+scores/predictions. Accept additive packages, layers and pair-delta addenda.
+Bump evidence1→2 and zoo0→1; numerical algorithms, tensor layouts and existing
+table columns stay unchanged. New pair files have their own version1 marker.
+Legacy readers remain available; current query clients require a rebuilt zoo1.
+
+This is a suitable evidence foundation, not proof of 100k query scalability or
+performance prediction. [Model Zoos (NeurIPS2022)](https://arxiv.org/abs/2209.14764)
+already released50,360 models; [modelDNA](https://arxiv.org/abs/2607.10617) already
+uses sampled weight fingerprints for lineage. Our research target should be
+measured practical utility on heterogeneous checkpoints: model-selection quality
+under hardware/license/task constraints, lineage error and abstention, score
+prediction error on held-out families, and cost per successful query. Use exact
+commit joins, family-separated evaluation and explicitly labeled predictions;
+no venue/novelty claim follows from artifact count alone.
+
+The present exact retrieval and shared-tensor lineage construction still have
+quadratic work within large groups, and dense pair outputs can themselves be
+quadratic. Before a50k/100k launch, benchmark build memory/time, query p50/p95,
+bytes/model, candidate recall, and held-out calibration. A candidate/index
+optimization belongs to a follow-up driven by those measurements. This pass
+removes repeated whole-run manifest scans during pinned package publication;
+it does not introduce an unvalidated learned index or new inference claims.
+
+Owner-requested workflow amendment: consolidate equivalent tests and use one
+focused regression run per substantial batch. One final batch review, no
+per-task review loop or repeated full-suite runs. Task8 uses the existing
+fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 
 ## Global Constraints
 
@@ -412,17 +446,17 @@ are always passed explicitly.
   `NUMEXPR_NUM_THREADS` to `value × len(cuda_devices)`. With `0`, the
   environment is untouched, as today.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   `test_cpu_thread_budget_auto_divides_cores_by_physical_gpus`,
   `test_cpu_thread_budget_env_scales_with_assigned_gpus`,
   `test_cpu_thread_budget_zero_leaves_env_unchanged`,
   `test_reload_changes_budget_for_new_jobs_only` and
   `test_invalid_budget_on_reload_keeps_previous`.
-- [ ] **Step 2:** Run `python -m pytest esd_experiment/tests/test_gputracker_scheduler.py -q`.
+- [x] **Step 2:** Run `python -m pytest esd_experiment/tests/test_gputracker_scheduler.py -q`.
   Expected: the new tests FAIL.
-- [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run `python -m pytest esd_experiment/tests -q`. Expected: all PASS.
-- [ ] **Step 5:** Document the setting. Record the suggested message
+- [x] **Step 3:** Implement.
+- [x] **Step 4:** Run `python -m pytest esd_experiment/tests -q`. Expected: all PASS.
+- [x] **Step 5:** Document the setting. Record the suggested message
   `feat(gputracker): automatic CPU thread budget per job`.
 
 ### Task 6: Model packages, automatic publishing and the `layers` table
@@ -491,7 +525,7 @@ are always passed explicitly.
 
 ### Task 7: Delta pass for parents found by similarity
 
-**Gate:** start only after XF approves the per-pair delta file.
+**Gate cleared (2026-11-04):** owner approval plus practical-purpose audit above.
 
 **Files:**
 - Create: `evidence/pair_delta.py`
@@ -514,7 +548,7 @@ are always passed explicitly.
   them with `--workers` and `--compute_device` (same rules as Task 2), and
   prints the rebuild command.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   `test_pair_delta_equals_in_run_delta_for_same_parent`,
   `test_pair_delta_reads_only_row_blocks`,
   `test_siblings_read_parent_once_through_cache`,
@@ -522,12 +556,12 @@ are always passed explicitly.
   `test_deltas_without_arguments_uses_default_zoo_and_packages`,
   `test_build_reads_pair_deltas` and
   `test_diff_uses_pair_delta_for_requested_parent`.
-- [ ] **Step 2:** Run `python -m pytest evidence/tests zoo/tests -q`. Expected:
+- [x] **Step 2:** Run `python -m pytest evidence/tests zoo/tests -q`. Expected:
   the new tests FAIL.
-- [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run `python -m pytest evidence/tests zoo/tests -q`. Expected:
+- [x] **Step 3:** Implement.
+- [x] **Step 4:** Run `python -m pytest evidence/tests zoo/tests -q`. Expected:
   all PASS.
-- [ ] **Step 5:** Update the zoo guide. Record the suggested message
+- [x] **Step 5:** Update the zoo guide. Record the suggested message
   `feat(zoo): delta pass for found parents`.
 
 ### Task 8: Automatic sizing, caps and download-ahead for full-scale runs
@@ -567,7 +601,7 @@ are always passed explicitly.
   measured with `evidence.cli batch --tier t1` and published with Task 6's
   `publish_package` as `t1_only` packages, unless `--no-oversized_t1`.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   `test_job_resources_auto_from_weight_bytes`,
   `test_explicit_limits_apply_to_every_job`,
   `test_checkpoint_mode_sized_to_one_gpu`,
@@ -578,11 +612,11 @@ are always passed explicitly.
   `test_prefetched_cache_owned_and_removed_after_exit`,
   `test_failed_prefetch_falls_back_to_worker_download` and
   `test_worker_cache_root_defaults_to_user_scratch`.
-- [ ] **Step 2:** Run `python -m pytest esd_experiment/tests -q`. Expected: the
+- [x] **Step 2:** Run `python -m pytest esd_experiment/tests -q`. Expected: the
   new tests FAIL.
-- [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run `python -m pytest esd_experiment/tests -q`. Expected: all PASS.
-- [ ] **Step 5:** Update the README: the plain command, what `auto` resolves to
+- [x] **Step 3:** Implement.
+- [x] **Step 4:** Run `python -m pytest esd_experiment/tests -q`. Expected: all PASS.
+- [x] **Step 5:** Update the README: the plain command, what `auto` resolves to
   and how to set explicit values. Record the suggested message
   `feat(runner): automatic sizing, limits and download-ahead`.
 

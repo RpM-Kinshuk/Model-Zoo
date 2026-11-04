@@ -143,31 +143,24 @@ def diff_fingerprints(a: Fingerprint, b: Fingerprint, null: dict | None = None) 
             reason = _settings_reason(a, b) or _view_reason(a, i, b, j)
             if reason:
                 record["reason"] = reason
+            supplement = pair_a.get(name) or pair_b.get(name)
             child, index = (a, i) if a.meta.get("parent") == _identity(b) else (
                 (b, j) if b.meta.get("parent") == _identity(a) else (None, None))
-            if child is not None and child.delta["status"][index] != "no_parent":
+            if supplement is not None:
+                record.update(supplement)
+                record["frac_identical"] = _finite(record["frac_identical"])
+                record["rel_update_norm"] = _finite(record["rel_update_norm"])
+                record["rank"] = record["rank"] if record["rank"] >= 0 else None
+                child, index = (a, i) if name in pair_a else (b, j)
+            elif child is not None and child.delta["status"][index] != "no_parent":
                 record.update({key: _finite(child.delta[key][index])
                                for key in ("frac_identical", "rel_update_norm")})
                 rank = int(child.delta["rank"][index])
                 record.update(rank=rank if rank >= 0 else None,
                               rank_confidence=str(child.delta["confidence"][index]),
                               delta_status=str(child.delta["status"][index]))
-                if record["rel_update_norm"] is not None:
-                    updates[child.component[index]].append(record["rel_update_norm"])
-        supplement = pair_a.get(name) or pair_b.get(name)
-        if supplement is not None and i is not None and j is not None:
-            record.update(supplement)
-            record["frac_identical"] = _finite(record["frac_identical"])
-            record["rel_update_norm"] = _finite(record["rel_update_norm"])
-            record["rank"] = record["rank"] if record["rank"] >= 0 else None
-            if record["rel_update_norm"] is not None:
-                fp, index = (a, i) if name in pair_a else (b, j)
-                # Replace the in-run entry if present instead of counting it twice.
-                if child is not None and child.delta["status"][index] != "no_parent":
-                    values = updates[child.component[index]]
-                    if values:
-                        values.pop()
-                updates[fp.component[index]].append(record["rel_update_norm"])
+            if "rel_update_norm" in record and record["rel_update_norm"] is not None:
+                updates[child.component[index]].append(record["rel_update_norm"])
         fp, index = (a, i) if i is not None else (b, j)
         if fp.geometry[index] == "head" and status in ("added", "changed", "reshaped"):
             heads.append(name)

@@ -4,6 +4,7 @@
 # This script assume exclusive usage of the GPUs. 
 # If you have limited usage of GPUs, you can limit the range of gpu indices you are using.
 
+from dataclasses import replace
 from typing import Optional
 import json
 import logging
@@ -263,6 +264,8 @@ class DispatchThread(threading.Thread):
         state_dir=None,
         run_id=None,
         cache_root=None,
+        prefetch_models=0,
+        prefetch_max_gib=64,
     ):
         threading.Thread.__init__(self)
         self.name = name
@@ -274,6 +277,8 @@ class DispatchThread(threading.Thread):
         self.max_concurrent_jobs = max_concurrent_jobs
         self.state_tracker = None
         self.state_options = dict(log_dir=state_dir, run_id=run_id, logger=logger, cache_root=cache_root) if state_dir else None
+        self.prefetch_models, self.prefetch_max_gib = prefetch_models, prefetch_max_gib
+        self.prefetcher = None
         self.workers = []
         self.last_progress = time.monotonic()
 
@@ -371,14 +376,8 @@ class DispatchThread(threading.Thread):
 
     def _coerce_job(self, item, index: int) -> WorkerJob:
         if isinstance(item, WorkerJob):
-            worker_id = item.worker_id or f"{index:06d}-{safe_worker_name(item.label or item.model_id or item.command)}"
-            return WorkerJob(
-                command=item.command,
-                worker_id=worker_id,
-                label=item.label or item.model_id or worker_id,
-                model_id=item.model_id,
-                terminal_status_path=item.terminal_status_path,
-            )
+            worker_id = safe_worker_name(item.worker_id) if item.worker_id else f"{index:06d}-{safe_worker_name(item.label or item.model_id or item.command)}"
+            return replace(item, worker_id=worker_id, label=item.label or item.model_id or worker_id)
         command = str(item)
         return WorkerJob(command=command, worker_id=f"{index:06d}-{safe_worker_name(command)[:80]}", label=command[:120])
 
@@ -387,6 +386,11 @@ class DispatchThread(threading.Thread):
             self._progress()
             if self.state_options:
                 self.state_tracker = WorkerStateTracker(**self.state_options, on_failure=self.dispatcher.fail)
+            if self.prefetch_models and self.state_tracker:
+                from prefetch import Prefetcher
+                self.prefetcher = Prefetcher([self._coerce_job(item, i) for i, item in enumerate(self.bash_command_list)],
+                                            self.state_tracker, max_models=self.prefetch_models,
+                                            max_bytes=int(self.prefetch_max_gib * 1024**3))
             self.logger.info(f"Starting PID: {os.getpid()}: {self.name}")
             self.logger.info("Controls: SIGHUP=Reload Config, SIGUSR1=Drain, SIGINT/SIGTERM=Stop and clean up")
             for i, item in enumerate(self.bash_command_list):
@@ -396,7 +400,11 @@ class DispatchThread(threading.Thread):
                 if not self._wait_for_job_slot(self.workers):
                     break
                 job = self._coerce_job(item, i)
-                cuda_devices = self.dispatcher.get_free_gpus(self.num_gpus_needed, progress=self._progress)
+                if self.prefetcher:
+                    job = self.prefetcher.claim(job, self._progress, lambda: self.dispatcher.shutdown_event.is_set() or self.dispatcher.drain_event.is_set())
+                if self.dispatcher.shutdown_event.is_set() or self.dispatcher.drain_event.is_set():
+                    break
+                cuda_devices = self.dispatcher.get_free_gpus(job.num_gpus or self.num_gpus_needed, progress=self._progress)
                 if cuda_devices is None:
                     break
                 try:
@@ -404,6 +412,8 @@ class DispatchThread(threading.Thread):
                                          self.logger, self.dispatcher, self.state_tracker)
                     worker.start()
                     self.workers.append(worker)
+                    if self.prefetcher:
+                        self.prefetcher.launched(job)
                 except Exception:
                     with self.dispatcher.lock:
                         self.dispatcher.occupied_gpus.difference_update(cuda_devices)
@@ -412,6 +422,8 @@ class DispatchThread(threading.Thread):
         except Exception as exc:
             self.dispatcher.fail(f"Dispatch failed: {exc}")
         finally:
+            if self.prefetcher:
+                self.prefetcher.stop.set()
             for worker in self.workers:
                 while worker.is_alive():
                     self._progress()
@@ -420,6 +432,8 @@ class DispatchThread(threading.Thread):
                         self.dispatcher.load_config()
                     worker.join(timeout=0.5)
             self._progress()
+            if self.prefetcher:
+                self.prefetcher.close()
             if self.state_tracker:
                 try:
                     self.state_tracker.close()
@@ -462,7 +476,7 @@ class ChildThread(threading.Thread):
         return (
             config.get("stale_process_action", "log"),
             int(config.get("heartbeat_timeout_seconds", 3600)),
-            dict(config.get("stage_timeout_seconds", {})),
+            dict(self.job.stage_timeout_seconds if self.job.stage_timeout_seconds is not None else config.get("stage_timeout_seconds", {})),
             int(config.get("termination_grace_seconds", 60)),
         )
 
@@ -536,8 +550,8 @@ class ChildThread(threading.Thread):
     def _resource_limit_reason(self, proc, record):
         """Sample only this worker tree and its private cache; never shared caches."""
         with self.dispatcher.lock:
-            ram_limit = self.dispatcher.config.get("max_worker_ram_gib", 0) * 1024 ** 3
-            cache_limit = self.dispatcher.config.get("max_worker_cache_gib", 0) * 1024 ** 3
+            ram_limit = (self.job.ram_limit_gib or self.dispatcher.config.get("max_worker_ram_gib", 0)) * 1024 ** 3
+            cache_limit = (self.job.cache_limit_gib or self.dispatcher.config.get("max_worker_cache_gib", 0)) * 1024 ** 3
         try:
             if ram_limit:
                 process = psutil.Process(proc.pid)

@@ -1,6 +1,6 @@
 """Worker supervision primitives used by the GPU dispatcher."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -128,6 +128,12 @@ class WorkerJob:
     label: str = ""
     model_id: str = ""
     terminal_status_path: str = ""
+    num_gpus: int = 0
+    cache_path: str = ""
+    ram_limit_gib: float = 0
+    cache_limit_gib: float = 0
+    stage_timeout_seconds: dict[str, int] | None = None
+    prefetch_files: tuple = ()
 
 
 @dataclass
@@ -177,12 +183,13 @@ class WorkerStateTracker:
         on_failure: Optional[Callable[[str], None]] = None,
     ):
         self.log_dir = Path(log_dir)
-        self.run_id = run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
+        self.run_id = safe_worker_name(run_id) if run_id else f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}"
         self.runner_pid = os.getpid() if runner_pid is None else runner_pid
         self.logger = logger or logging.getLogger(__name__)
         self.active_dir = self.log_dir / "active_workers" / self.run_id
         self.current_state_path = self.log_dir / "current_state.json"
         self.records: dict[str, WorkerRecord] = {}
+        self.adopted_cache_ids = set()
         self.lock = threading.Lock()
         self._state_write_lock = threading.Lock()
         self.error: Optional[str] = None
@@ -252,18 +259,18 @@ class WorkerStateTracker:
     def _cache_path_for(self, worker_id: str) -> Optional[Path]:
         if self.cache_root is None:
             return None
-        return self.cache_root / self.run_id / worker_id
+        run_root = (self.cache_root / self.run_id).resolve()
+        path = self.cache_root / self.run_id / safe_worker_name(worker_id)
+        if not run_root.is_relative_to(self.cache_root.resolve()) or not path.resolve().is_relative_to(run_root):
+            raise ValueError("Worker cache escapes its owned run directory")
+        return path
 
     def start_worker(self, job: WorkerJob, cuda_devices: list[int], pid: Optional[int] = None, pgid: Optional[int] = None) -> WorkerRecord:
         worker_id = self._worker_id_for(job)
-        normalized_job = WorkerJob(
-            command=job.command,
-            worker_id=worker_id,
-            label=job.label or worker_id,
-            model_id=job.model_id,
-            terminal_status_path=job.terminal_status_path,
-        )
+        normalized_job = replace(job, worker_id=worker_id, label=job.label or worker_id)
         cache_path = self._cache_path_for(worker_id)
+        if job.cache_path and (cache_path is None or Path(job.cache_path).resolve() != cache_path.resolve()):
+            raise ValueError("Pre-staged cache must be this worker's owned private path")
         record = WorkerRecord(
             job=normalized_job,
             cuda_devices=list(cuda_devices),
@@ -276,6 +283,7 @@ class WorkerStateTracker:
         )
         with self.lock:
             self.records[worker_id] = record
+            self.adopted_cache_ids.add(worker_id)
         try:
             record.terminal_status_mtime_ns = self._terminal_status_mtime_ns(normalized_job.terminal_status_path)
             if cache_path is not None:

@@ -132,7 +132,7 @@ def test_deltas_defaults_to_current_zoo_and_packages(tmp_path, monkeypatch, caps
     monkeypatch.setattr(zoo.deltas, "run_deltas", lambda *args, **kw: calls.append((args, kw)) or {"measured": 0})
     assert main(["deltas"]) == 0
     assert calls[0][0] == (tmp_path / "builds/current", tmp_path / "packages", tmp_path)
-    assert calls[0][1]["parent_cache"] == tmp_path / "cache/parent_blocks"
+    assert calls[0][1]["parent_cache"] == tmp_path / "cache/parent-blocks"
     assert "rebuild" in json.loads(capsys.readouterr().out)
 
 
@@ -149,3 +149,29 @@ def test_build_reads_pair_delta_supplements(package_run):
     meta = json.loads((built / "zoo.json").read_text())
     assert any(str(delta.relative_to(r.root)) in str(item) for item in meta["inputs"])
     assert (package / "package.json").read_bytes() == core
+
+
+def test_deltas_measures_detected_package_pair_and_resumes(package_run, capsys):
+    from zoo.publish import publish_package
+    from zoo.build import build_zoo, open_tables
+    from evidence.fingerprint import fingerprint_model
+    from evidence.hub import HubReader
+    from evidence.manifest import write_manifest
+    from measurement_config import safe_filename
+    r = package_run
+    publish_package(r.run, "lab/tiny", r.packages, r.root)
+    parent = dict(r.manifest, repo_id="lab/other")
+    folder = r.run / "evidence" / safe_filename(parent["repo_id"] + "@" + parent["revision"])
+    write_manifest(parent, folder)
+    fingerprint_model(parent, HubReader(), "t1", folder)
+    publish_package(r.run, "lab/other", r.packages, r.root)
+    built = build_zoo(packages=r.packages, data_root=r.root, out=r.root / "builds/current")
+    capsys.readouterr()
+    assert main(["deltas", "--workers", "1", "--compute_device", "cpu"]) == 0
+    assert json.loads(capsys.readouterr().out)["measured"] == 1
+    assert main(["deltas", "--workers", "1", "--compute_device", "cpu"]) == 0
+    assert json.loads(capsys.readouterr().out)["measured"] == 0
+    build_zoo(packages=r.packages, data_root=r.root, out=built)
+    lineage = open_tables(built)["lineage"]
+    assert lineage.evidence.str.contains("row_block_delta").any()
+    assert not lineage.calibrated.any()

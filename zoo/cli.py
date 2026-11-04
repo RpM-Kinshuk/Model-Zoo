@@ -63,7 +63,7 @@ def main(argv=None):
             if not 0 <= args.parent_cache_gib < float("inf"):
                 raise ValueError("parent_cache_gib must be finite and nonnegative")
             packages = args.packages or root / "packages"
-            cache = None if args.no_parent_cache else args.parent_cache or root / "cache" / "parent_blocks"
+            cache = None if args.no_parent_cache else args.parent_cache or root / "cache" / "parent-blocks"
             result = run_deltas(args.zoo or root / "builds/current", packages, root, workers=args.workers,
                                 compute_device=args.compute_device, parent_cache=cache, parent_cache_gib=args.parent_cache_gib)
             result["rebuild"] = "python -m zoo.cli build --data_root " + shlex.quote(str(root)) + " --packages " + shlex.quote(str(packages))

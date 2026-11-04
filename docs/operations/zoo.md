@@ -213,3 +213,38 @@ at their frozen pins; they need an explicit safe-source decision. The other37
 formal models are not generated. Safe conversion aliases are separate evidence
 until an approved, recorded source change; never silently credit a new revision
 as an original formal pin.
+
+
+### Candidate-pair delta pass
+
+After building, measure row-block updates for detected candidates and rebuild:
+
+```bash
+python -m zoo.cli deltas --workers auto --compute_device cpu
+python -m zoo.cli build
+```
+
+Both commands default to `$ZOO_DATA`; the delta command prints an explicit rebuild
+command. CUDA follows the evidence CLI's assigned-device policy. Parent blocks
+share `$ZOO_DATA/cache/parent-blocks`; `--no-parent_cache` disables this cache.
+
+Each child package gets append-only `deltas/<parent safe>.delta.safetensors`
+addenda (`pair_delta_version=1`, evidence version 2). Tensors are `rows[n,2]`,
+`delta_scalars[n,3]` (identical fraction, relative update norm, rank) and
+`delta_top_sv[n,16]`. Metadata pins both identities and records per-view names,
+block heights, statuses and confidence. Missing/incompatible views remain gaps.
+The API also accepts lab block heights; default is 256. Rank is limited by block
+height. Existing addenda are reused, never silently overwritten; settings
+conflicts raise an error. Package core hashes and files stay unchanged; rebuild
+provenance hashes the addenda separately.
+
+`diff` uses an available matching pair measurement at the requested T1 block
+height. Rebuilds tag existing lineage evidence with `+row_block_delta`, retaining
+its estimand, direction, tier, score and calibration status. A measured update
+does not verify ancestry or predict skill changes.
+
+New artifacts use `EVIDENCE_VERSION=2` and builds `ZOO_VERSION=1`; numerical
+conventions remain NUMERICS7/FORMAT2.0. Model-Zoo reads evidence1 and old six-table
+builds (empty layers). Current default packages use evidence2; old conventions
+must be selected explicitly or evidence regenerated. Rebuild old zoo0 generations
+before using query clients that require the current ZOO_VERSION.

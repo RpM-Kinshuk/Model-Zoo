@@ -260,3 +260,9 @@ remove new outputs and restore any files from an earlier incomplete attempt.
 A completed bundle is never replaced. Use one sidecar per model output directory.
 Runner/worker integration is the next implementation step; this API alone does
 not enable evidence in existing worker commands.
+
+
+Full-mode evidence now writes version2, adding explicit unrequested/unavailable
+parent-delta statuses without changing sketch, block-hash or spectrum numerics.
+Version1 fingerprints remain readable. Candidate-pair deltas and their CLI are
+covered in the [zoo guide](zoo.md#candidate-pair-delta-pass).
