@@ -203,7 +203,7 @@ def test_unnamed_local_checkpoint_fallback_with_explicit_out(tmp_path, monkeypat
 
 def test_manifest_retry_denied_rebuilds_selected_manifest(run_dir, models_csv_with_denied,
                                                           denying_reader, fake_reader, fake_api):
-    args = ["manifest", "--models", str(models_csv_with_denied), "--out", str(run_dir / "retry-manifests")]
+    args = ["manifest", "--models", str(models_csv_with_denied), "--out", str(run_dir / "retry-manifests"), "--workers", "1"]
     assert main(args, reader_factory=lambda: denying_reader, api=fake_api) == 2
     assert main(args + ["--retry_denied"], reader_factory=lambda: fake_reader, api=fake_api) == 0
     manifest = json.loads(next((run_dir / "retry-manifests").glob("*.manifest.json")).read_text())
@@ -230,7 +230,7 @@ def test_batch_denied_retry_keeps_resolved_pin(run_dir, tmp_path, denying_reader
                 info.sha = "b" * 40
             return info
     args = ["batch", "--models", str(models), "--manifests", str(directory), "--tier", "t1",
-            "--out", str(run_dir / "pinned-output"), "--retry_denied"]
+            "--out", str(run_dir / "pinned-output"), "--retry_denied", "--workers", "1"]
     assert main(args, reader_factory=lambda: fake_reader, api=MovingApi()) == 0
     assert calls == [SHA]
     manifest = json.loads(next(directory.glob("*.manifest.json")).read_text())
@@ -247,7 +247,7 @@ def test_batch_extraction_denial_is_skipped_until_retry(run_dir, models_csv):
             raise AccessDenied("Access revoked after metadata collection")
     reader = LaterDeniedReader()
     args = ["batch", "--models", str(models_csv), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t1", "--out", str(run_dir / "revoked")]
+            "--tier", "t1", "--out", str(run_dir / "revoked"), "--workers", "1"]
     assert main(args, reader_factory=lambda: reader) == 2
     attempts = reader.attempts
     assert attempts == 2
@@ -322,6 +322,9 @@ def test_cli_forwards_spectrum_compute_device(command, tiny_checkpoint, tmp_path
         return original(*args, **kwargs)
 
     monkeypatch.setattr(module, "fingerprint_model", cpu_fixture_run)
+    import torch
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     args = [command, "--tier", "t2", "--out", str(tmp_path / "device-out"),
             "--compute_device", "cuda:1"]
     if command == "fingerprint":
@@ -335,3 +338,112 @@ def test_cli_forwards_spectrum_compute_device(command, tiny_checkpoint, tmp_path
         args += ["--models", str(models), "--manifests", str(directory), "--workers", "1"]
     assert main(args) == 0
     assert devices and set(devices) == {"cuda:1"}
+
+
+def test_batch_defaults_match_target(tmp_path, monkeypatch):
+    import evidence.cli as cli
+    monkeypatch.setenv("ZOO_DATA", str(tmp_path / "data"))
+    captured = []
+    monkeypatch.setattr(cli, "_run_many", lambda args, *unused: captured.append(args) or 0)
+    common = ["batch", "--models", "models.csv", "--manifests", "manifests", "--out", str(tmp_path)]
+    assert main(common + ["--tier", "t2"]) == 0
+    args = captured[-1]
+    assert args.with_parent and args.delta_blocks == (256,)
+    assert args.parent_cache == tmp_path / "data/cache/parent-blocks"
+    assert args.parent_cache_max_gib == 64
+    assert args.also_t1_blocks == (128, 256, 512)
+    assert main(common + ["--tier", "t1"]) == 0
+    assert captured[-1].also_t1_blocks == ()
+
+
+@pytest.mark.parametrize("stratum,k,experts", [("lab", 128, True), ("anchor", 128, True), ("census", 64, False), ("", 64, False)])
+def test_batch_auto_sketch_k_and_experts_follow_stratum(local_manifest, tmp_path, stratum, k, experts):
+    from evidence.cli import _batch_options, _parser
+    args = _parser().parse_args(["batch", "--models", "unused", "--manifests", "unused",
+                                "--tier", "t2", "--out", str(tmp_path)])
+    options = _batch_options(args, dict(repo_id=local_manifest["repo_id"], stratum=stratum), set())
+    assert options["sketch_k"] == k
+    assert options["all_experts"] is experts
+    assert options["cache_self"] is experts
+
+
+def test_opt_outs_reproduce_previous_batch_outputs(local_manifest, tmp_path, monkeypatch):
+    import evidence.cli as cli
+    import evidence.fingerprint as fp
+    from safetensors import safe_open
+    from evidence.hub import HubReader
+    from evidence.manifest import write_manifest
+    monkeypatch.setattr(fp.time, "monotonic", lambda: 0.)
+    manifests = tmp_path / "manifests"
+    write_manifest(local_manifest, manifests)
+    models = tmp_path / "models.csv"
+    models.write_text("repo_id,revision\n" + local_manifest["repo_id"] + "," + local_manifest["revision"] + "\n")
+    baseline = fp.fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "old")
+    assert main(["batch", "--models", str(models), "--manifests", str(manifests),
+                 "--tier", "t2", "--out", str(tmp_path / "new"), "--no-with_parent",
+                 "--no-parent_cache", "--sketch_k", "64", "--also_t1_blocks", "none", "--workers", "1"]) == 0
+    result = next((tmp_path / "new").glob("*.safetensors"))
+    # Safetensors header map ordering is not stable; payload bytes and metadata are.
+    with safe_open(baseline, framework="numpy") as a, safe_open(result, framework="numpy") as b:
+        assert a.metadata() == b.metadata()
+        assert a.keys() == b.keys()
+        for key in a.keys():
+            assert a.get_tensor(key).tobytes() == b.get_tensor(key).tobytes()
+    assert len(list((tmp_path / "new").glob("*.safetensors"))) == 1
+
+
+def test_workers_auto_spreads_over_assigned_gpus(monkeypatch):
+    import torch
+    from evidence.cli import _execution_policy, _init_worker
+    import evidence.cli as cli
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    assert _execution_policy("auto", "auto") == (["cuda:0", "cuda:1"], 2)
+    devices, workers = _execution_policy("auto", "4")
+    assert workers == 4
+    assigned = []
+    monkeypatch.setattr(cli, "_DEVICE", None)
+    import multiprocessing
+    counter = multiprocessing.Value("i", 0)
+    for _ in range(workers):
+        _init_worker(lambda: object(), None, devices, counter)
+        assigned.append(cli._DEVICE)
+    assert assigned == ["cuda:0", "cuda:1", "cuda:0", "cuda:1"]
+
+
+
+def test_workers_auto_on_cpu(monkeypatch):
+    from evidence.cli import _execution_policy
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 96)
+    assert _execution_policy("auto", "auto") == (["cpu"], 8)
+    monkeypatch.setattr("os.cpu_count", lambda: 4)
+    assert _execution_policy("auto", "auto") == (["cpu"], 1)
+
+
+def test_batch_resume_respects_delta_policy(local_manifest, tmp_path):
+    from evidence.manifest import write_manifest
+    from evidence.fingerprint import load_fingerprint
+    manifest = dict(local_manifest, declared_bases=[local_manifest["repo_id"]])
+    write_manifest(manifest, tmp_path / "manifests")
+    models = tmp_path / "models.csv"
+    models.write_text("repo_id,revision\n" + manifest["repo_id"] + "," + manifest["revision"] + "\n")
+    args = ["batch", "--models", str(models), "--manifests", str(tmp_path / "manifests"),
+            "--tier", "t2", "--out", str(tmp_path / "out"), "--workers", "1"]
+    assert main(args) == 0
+    path = next((tmp_path / "out").glob("*.t2.fingerprint.safetensors"))
+    assert set(load_fingerprint(path).delta["status"]) == {"not_computed"}
+    assert main(args + ["--full_delta"]) == 0
+    assert set(load_fingerprint(path).delta["status"]) == {"identical"}
+    assert main(args) == 0
+    assert set(load_fingerprint(path).delta["status"]) == {"not_computed"}
+
+
+def test_batch_accepts_existing_maximum_sketch_override(monkeypatch, tmp_path):
+    import evidence.cli as cli
+    captured = []
+    monkeypatch.setattr(cli, "_run_many", lambda args, *unused: captured.append(args) or 0)
+    assert main(["batch", "--models", "unused", "--manifests", "unused", "--tier", "t1",
+                 "--out", str(tmp_path), "--sketch_k", "256"]) == 0
+    assert captured[0].sketch_k == "256"

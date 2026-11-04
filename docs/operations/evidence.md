@@ -154,14 +154,29 @@ spectral cohort. Free T1 companions are written beside T2 outputs.
 
 ```bash
 python -m evidence.cli batch --models "$RUN/t2-models.csv" \
-  --manifests "$RUN/manifests" --tier t2 --out "$RUN/t2" --workers 2 \
-  --sketch_k 64 --also_t1_blocks 128,256,512 --with_parent \
-  --parent_cache "$ZOO_DATA/cache/parent-blocks"
+  --manifests "$RUN/manifests" --tier t2 --out "$RUN/t2" --workers 2
 
 python -m evidence.cli batch --models "$RUN/t1-models.csv" \
   --manifests "$RUN/manifests" --tier t1 --out "$RUN/t1" --workers 2 \
   --sketch_k 64
 ```
+
+Batch runs compute declared-parent deltas on 256-row blocks by default. T2 also
+writes T1 companions at 128, 256 and 512 rows; full-matrix delta status is
+`not_computed`. Use `--delta_blocks 256,512` for additional measured heights,
+or `--full_delta` for lab validation (full deltas are never cached).
+
+The private parent cache defaults to `$ZOO_DATA/cache/parent-blocks`, or
+`<out>/cache/parent-blocks`, with a 64 GiB LRU budget. Blocks keep their stored
+dtype; decoded and LoRA blocks use fp32. Declared bases, lab and anchor rows are
+cached, plus rows added by `--cache_models CSV`. Parent blocks are never published.
+Set `--parent_cache PATH`, `--parent_cache_max_gib N`, or `--no-parent_cache`.
+Lab and anchor rows automatically use k=128 and all experts; other rows use k=64
+and eight seeded experts per layer. Explicit `--sketch_k`, `--all_experts` and
+`--no-all_experts` override this choice.
+
+To restore the former batch behavior, pass `--no-with_parent --no-parent_cache
+--sketch_k 64 --no-all_experts --also_t1_blocks none`.
 
 Resume with the same inputs, settings and output directories. Compatible outputs
 are skipped; temporary files are cleaned up. Denied identities stay skipped
@@ -209,3 +224,24 @@ python evidence/scripts/day_one_checks.py
 
 The network smoke reads a pinned header. The last command reports HTTPS/Xet
 access, CPU SVD time and free data space; it requires `HF_TOKEN` and `ZOO_DATA`.
+
+### Evidence compute devices and worker counts
+
+`--compute_device auto` uses only GPUs assigned through `CUDA_VISIBLE_DEVICES`;
+with no assignment (or an empty assignment), it uses CPU. Explicit `cpu`, `cuda`
+and `cuda:<i>` override this. Assigned or explicitly requested CUDA that does not
+work is an error, never a silent CPU fallback. Device indices are relative to
+the visible assignment.
+
+`--workers auto` starts one process per assigned GPU, or on CPU
+`min(8, max(1, cpu_count // 8))`. An explicit worker count is distributed
+round-robin over the selected GPUs. `cuda:<i>` selects one GPU; `cuda` uses all
+visible GPUs. T1 moves sketches, block spectra and parent deltas to the selected
+device while hashes retain the original host bytes. CUDA row-block reads use a
+two-group prefetch window, bounded by the prefetch byte budget.
+
+For T2, the source loader also fetches the next group's requested parent row
+blocks, including cache hits, while the current group's spectra are measured.
+The per-group admission budget includes child sources and parent read/decode
+workspaces. Groups exceeding that budget use on-demand reads. Explicit lab
+full-matrix deltas stay on demand and are never cached.

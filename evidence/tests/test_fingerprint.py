@@ -139,12 +139,12 @@ def test_named_local_parent_cache_is_portable_and_reused(child_with_extended_voc
     child = dict(child_with_extended_vocab, repo_id="lab/child", source={"zoo_data_path": "child"})
     parent = dict(parent_manifest, repo_id="lab/parent", source={"zoo_data_path": "parent"})
     cache = tmp_path / "cache"
-    first = load_fingerprint(fingerprint_model(child, HubReader(), "t1", tmp_path / "first", parent=parent, parent_cache=cache))
+    first = load_fingerprint(fingerprint_model(child, HubReader(), "t1", tmp_path / "first", parent=parent, parent_cache=cache, cache_self=True))
     assert first.delta["status"].tolist() == ["ok"]
     assert first.rows.tolist() == [[1920, 2176]]
     assert first.meta["bytes_read"] == 2 * 256 * 64 * 4
     assert len(list(cache.glob("*.bin"))) == 2
-    second = load_fingerprint(fingerprint_model(child, HubReader(), "t1", tmp_path / "second", parent=parent, parent_cache=cache))
+    second = load_fingerprint(fingerprint_model(child, HubReader(), "t1", tmp_path / "second", parent=parent, parent_cache=cache, cache_self=True))
     assert second.meta["bytes_read"] == 256 * 64 * 4
     np.testing.assert_array_equal(first.delta["top_sv"], second.delta["top_sv"])
     assert str(tmp_path) not in str(second.meta)
@@ -308,7 +308,7 @@ def test_parent_delta_cuda_forwarded_to_full_and_all_companion_blocks(
     monkeypatch.setattr(module, "_to_compute", lambda tensor, device: tensor)
     fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
                       parent=local_manifest, compute_device="cuda:1",
-                      also_t1_blocks=(128, 256, 512))
+                      also_t1_blocks=(128, 256, 512), delta_blocks=(128, 256, 512), full_delta=True)
     assert seen
     assert all(torch.device(device) == torch.device("cuda:1") for _, device in seen)
     assert {128, 256, 512} <= {rows for rows, _ in seen}
@@ -413,3 +413,230 @@ def test_full_cpu_workspace_fallback_keeps_small_companions_on_cuda(
     companions = [(rows, device) for tier, rows, device in measured if tier != "t2"]
     assert {rows for rows, _ in companions} == {128, 256, 512}
     assert all(device == torch.device("cuda:0") for _, device in companions)
+
+
+@pytest.mark.parametrize("prefetch_groups", [0, 2])
+def test_t2_with_parent_has_no_full_matrix_delta(local_manifest, tmp_path, prefetch_groups):
+    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
+                             parent=local_manifest, also_t1_blocks=(256,),
+                             prefetch_groups=prefetch_groups)
+    assert set(load_fingerprint(path).delta["status"]) == {"not_computed"}
+    t1 = load_fingerprint(path.with_name(path.name.replace(".t2.", ".t1.")))
+    assert set(t1.delta["status"]) == {"identical"}
+
+
+@pytest.mark.parametrize("prefetch_groups", [0, 2])
+def test_t2_parent_reads_only_row_blocks(local_manifest, tmp_path, monkeypatch, prefetch_groups):
+    from evidence.fingerprint import _Sources
+    reads = []
+    original = _Sources.fetch
+    parent = dict(local_manifest)
+    def fetch(self, requests):
+        requests = list(requests)
+        if self.manifest is parent:
+            reads.extend(requests)
+        return original(self, requests)
+    monkeypatch.setattr(_Sources, "fetch", fetch)
+    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path, parent=parent,
+                      also_t1_blocks=(256,), prefetch_groups=prefetch_groups)
+    assert reads
+    assert all(rows is not None and rows.stop - rows.start <= 256
+               for _, _, _, rows in reads)
+
+
+def test_parent_cache_holds_stored_dtype_row_blocks_only(local_manifest, tmp_path):
+    cache = tmp_path / "cache"
+    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "out",
+                      parent=local_manifest, parent_cache=cache, also_t1_blocks=(256,))
+    # Two 256-by-64 blocks: one bf16 and one fp32.
+    assert sum(p.stat().st_size for p in cache.glob("*.bin")) == (
+        256 * 64 * 2 + 256 * 64 * 4)
+
+
+def test_stored_dtype_cache_gives_identical_delta(local_manifest, tmp_path):
+    cache = tmp_path / "cache"
+    a = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "a",
+                                          parent=local_manifest, parent_cache=cache))
+    b = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "b",
+                                          parent=local_manifest, parent_cache=cache))
+    for key in a.delta:
+        np.testing.assert_equal(a.delta[key], b.delta[key])
+    assert b.meta["bytes_read"] < a.meta["bytes_read"]
+
+
+def test_delta_blocks_512_adds_512_row_deltas(local_manifest, tmp_path):
+    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
+                             parent=local_manifest, also_t1_blocks=(256, 512), delta_blocks=(256, 512))
+    fp = load_fingerprint(path.with_name(path.name.replace(".t2.", ".t1b512.")))
+    assert set(fp.delta["status"]) == {"identical"}
+
+
+@pytest.mark.parametrize("prefetch_groups", [0, 2])
+def test_full_delta_is_computed_but_never_cached(local_manifest, tmp_path, prefetch_groups):
+    cache = tmp_path / "cache"
+    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "out",
+                             parent=local_manifest, parent_cache=cache,
+                             full_delta=True, prefetch_groups=prefetch_groups)
+    assert set(load_fingerprint(path).delta["status"]) == {"identical"}
+    assert not list(cache.glob("*.bin"))
+
+
+def test_t1_cuda_moves_sketch_spectrum_and_delta_to_device(local_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+    transfers, deltas = [], []
+    original_delta = module.block_delta
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    def transfer(tensor, device):
+        transfers.append(str(device))
+        return tensor
+    def delta(child, parent, dtype, **kwargs):
+        deltas.append(str(kwargs["compute_device"]))
+        return original_delta(child, parent, dtype)
+    monkeypatch.setattr(module, "_to_compute", transfer)
+    monkeypatch.setattr(module, "block_delta", delta)
+    fp = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path,
+                                            parent=local_manifest, compute_device="cuda:0"))
+    assert transfers == ["cuda:0"] * len(fp.names)
+    assert deltas == ["cuda:0"] * len(fp.names)
+    assert set(fp.delta["status"]) == {"identical"}
+
+
+def test_t1_cpu_is_byte_identical(local_manifest, tmp_path, monkeypatch):
+    import evidence.fingerprint as module
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.)
+    a = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "a"))
+    b = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "b", compute_device="cpu"))
+    # Payload digests independently generated by pre-change HEAD, seed 600.
+    import hashlib
+    assert hashlib.sha256(b.sketch.tobytes()).hexdigest() == "513270877427a4f67c5a602179d683dfafc3984ca4b04ce7f72323480b2f1cd5"
+    assert hashlib.sha256(b"".join(s.tobytes() for s in b.spectra)).hexdigest() == "9dbd26302a9d2fb08a967e01c4614b74e3339fc994f483b6684c47fdafbc9b4a"
+    assert a.meta == b.meta
+    assert a.sha256 == b.sha256
+    assert a.sketch.tobytes() == b.sketch.tobytes()
+    assert [x.tobytes() for x in a.spectra] == [x.tobytes() for x in b.spectra]
+
+
+def test_t1_prefetch_never_holds_more_than_window_groups(tmp_path, monkeypatch):
+    import weakref
+    from safetensors.torch import save_file
+    from evidence.manifest import build_manifest
+    import evidence.fingerprint as module
+    source = tmp_path / "source"
+    source.mkdir()
+    save_file({f"layer{i}.weight": torch.randn(32, 16) for i in range(6)}, source / "model.safetensors")
+    manifest = build_manifest(str(source), "main", HubReader(), None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(module, "_to_compute", lambda tensor, device: tensor)
+    original, alive, counts = module._Sources.block, [], []
+    def read(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        alive.append(weakref.ref(result[0]))
+        counts.append(sum(ref() is not None for ref in alive))
+        return result
+    monkeypatch.setattr(module._Sources, "block", read)
+    result = load_fingerprint(fingerprint_model(manifest, HubReader(), "t1", tmp_path / "out",
+                                               compute_device="cuda:0", prefetch_bytes=65536))
+    assert len(result.names) == 6
+    assert max(counts) <= 2
+
+
+def test_t1_prefetch_does_not_admit_transposed_full_expert_reads(tmp_path, monkeypatch):
+    import json
+    import threading
+    from safetensors.torch import save_file
+    from evidence.manifest import build_manifest
+    import evidence.fingerprint as module
+    source = tmp_path / "source"
+    source.mkdir()
+    save_file({f"layers.{i}.mlp.experts.up_proj": torch.randn(2, 16, 4096)
+               for i in range(2)}, source / "model.safetensors")
+    (source / "config.json").write_text(json.dumps(dict(hidden_size=16)))
+    manifest = build_manifest(str(source), "main", HubReader(), None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(module, "_to_compute", lambda tensor, device: tensor)
+    calls = []
+    original = module._Sources.block
+    def read_block(self, *args, **kwargs):
+        calls.append(threading.current_thread().name)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(module._Sources, "block", read_block)
+    fp = load_fingerprint(fingerprint_model(manifest, HubReader(), "t1", tmp_path / "out",
+                                            compute_device="cuda:0", prefetch_bytes=100000))
+    assert len(fp.names) == 4
+    assert len(calls) == 4
+    assert all("fingerprint-loader" not in thread for thread in calls)
+
+
+@pytest.mark.parametrize("cache_state", ["none", "cold", "warm"])
+def test_t2_prefetches_parent_blocks_while_spectrum_computes(local_manifest, tmp_path, monkeypatch, cache_state):
+    from threading import Event, current_thread
+    import evidence.fingerprint as module
+    from evidence.block_cache import BlockCache
+    parent = dict(local_manifest)
+    cache = BlockCache(tmp_path / "cache") if cache_state != "none" else None
+    if cache_state == "warm":
+        fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "warm",
+                          parent=parent, parent_cache=cache)
+    baseline = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "baseline",
+                                                  parent=parent, also_t1_blocks=(256,)))
+    next_parent_ready = Event()
+    parent_reads = []
+    original_block, original_get = module._Sources.block, BlockCache.get
+    def observe(name):
+        if "q_proj" in name and current_thread().name.startswith("fingerprint-loader"):
+            next_parent_ready.set()
+    def block(self, view, bounds, *args, **kwargs):
+        result = original_block(self, view, bounds, *args, **kwargs)
+        if self.manifest is parent:
+            parent_reads.append(bounds)
+            observe(view.name)
+        return result
+    def get(self, manifest, name, *args, **kwargs):
+        result = original_get(self, manifest, name, *args, **kwargs)
+        if manifest is parent and result is not None:
+            observe(name)
+        return result
+    original_spectrum = module._Spectra.add
+    first = True
+    def spectrum(self, name, tensor):
+        nonlocal first
+        if first:
+            first = False
+            assert next_parent_ready.wait(3), "next parent's block did not overlap the current spectrum"
+        return original_spectrum(self, name, tensor)
+    monkeypatch.setattr(module._Sources, "block", block)
+    monkeypatch.setattr(BlockCache, "get", get)
+    monkeypatch.setattr(module._Spectra, "add", spectrum)
+    result = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "prefetched",
+                                                parent=parent, parent_cache=cache, also_t1_blocks=(256,),
+                                                prefetch_groups=2, prefetch_bytes=1024**2))
+    assert all(last - first <= 256 for first, last in parent_reads)
+    assert len(parent_reads) == (0 if cache_state == "warm" else 2)
+    assert result.names == baseline.names and result.sha256 == baseline.sha256
+    np.testing.assert_array_equal(result.sketch, baseline.sketch)
+    for actual, expected in zip(result.spectra, baseline.spectra):
+        np.testing.assert_array_equal(actual, expected)
+    companion = next((tmp_path / "prefetched").glob("*.t1.fingerprint.safetensors"))
+    expected = load_fingerprint(next((tmp_path / "baseline").glob("*.t1.fingerprint.safetensors")))
+    for key, actual in load_fingerprint(companion).delta.items():
+        np.testing.assert_equal(actual, expected.delta[key])
+
+
+def test_t2_prefetch_budget_includes_parent_blocks(local_manifest, tmp_path, monkeypatch):
+    from threading import current_thread
+    import evidence.fingerprint as module
+    parent, calls = dict(local_manifest), []
+    original = module._Sources.block
+    def block(self, *args, **kwargs):
+        if self.manifest is parent:
+            calls.append(current_thread().name)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(module._Sources, "block", block)
+    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "out", parent=parent,
+                      also_t1_blocks=(256,), prefetch_groups=2, prefetch_bytes=70000)
+    # q_proj's stored child (65536 bytes) alone fits; child + parent does not.
+    assert len(calls) == 2
+    assert all(not name.startswith("fingerprint-loader") for name in calls)

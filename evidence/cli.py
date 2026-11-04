@@ -5,6 +5,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 import csv
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import re
@@ -14,15 +15,18 @@ import time
 from measurement_config import is_commit_sha, safe_filename
 
 from . import EVIDENCE_VERSION
+from .block_cache import BlockCache
+from .delta import _compute_device
 from .compare import check_verdict, diff_fingerprints
 from .fingerprint import fingerprint_model, load_fingerprint, _atomic_path
 from .frame import PILOT_HUB_PLAN, build_frame, draw_stratified, load_hub_stats
 from .hub import AccessDenied, HubReader
 from .manifest import build_manifest, pin_revision, write_manifest, _local_files
-from .sketch import ROW_BLOCK, SKETCH_K_DEFAULT, SKETCH_SEED
+from .sketch import ROW_BLOCK, SKETCH_K_DEFAULT, SKETCH_K_MAX, SKETCH_SEED
 
 _READER = None
 _API = None
+_DEVICE = None
 
 
 def _write(path, value):
@@ -113,7 +117,7 @@ def _artifact(manifest, out, tier):
     return Path(out) / f"{safe}.{tier}.fingerprint.safetensors"
 
 
-def _complete(path, manifest, tier, k, height=ROW_BLOCK, parent=None):
+def _complete(path, manifest, tier, k, height=ROW_BLOCK, parent=None, *, delta_blocks=(ROW_BLOCK,), full_delta=False):
     if not path.is_file():
         return False
     try:
@@ -121,6 +125,12 @@ def _complete(path, manifest, tier, k, height=ROW_BLOCK, parent=None):
         expected = dict(repo_id=manifest["repo_id"], revision=manifest["revision"], tier=tier,
                         sketch_k=k, row_block=height, sketch_seed=SKETCH_SEED, parent=parent,
                         evidence_version=EVIDENCE_VERSION)
+        if parent:
+            should_compute = full_delta if tier == "t2" else height in delta_blocks
+            if should_compute and "not_computed" in fp.delta["status"]:
+                return False
+            if not should_compute and any(status != "not_computed" for status in fp.delta["status"]):
+                return False
         return all(fp.meta.get(key) == value for key, value in expected.items())
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return False
@@ -133,10 +143,32 @@ def _base(manifest):
     return bases[0]
 
 
-def _init_worker(factory, api):
-    global _READER, _API
+def _execution_policy(device, workers):
+    resolved = _compute_device(device)
+    if resolved.type == "cpu":
+        devices = ["cpu"]
+        automatic = min(8, max(1, (os.cpu_count() or 1) // 8))
+    else:
+        import torch
+        devices = ([f"cuda:{i}" for i in range(torch.cuda.device_count())]
+                   if device in ("auto", "cuda") else [str(resolved)])
+        automatic = len(devices)
+    count = automatic if workers == "auto" else int(workers)
+    if count < 1:
+        raise ValueError("workers must be positive")
+    return devices, count
+
+
+def _init_worker(factory, api, devices=(), counter=None):
+    global _READER, _API, _DEVICE
     _READER = (factory or HubReader)()
     _API = api
+    index = 0
+    if counter is not None:
+        with counter.get_lock():
+            index = counter.value
+            counter.value += 1
+    _DEVICE = devices[index % len(devices)] if devices else None
 
 
 def _stats(reader):
@@ -190,6 +222,8 @@ def _batch_job(job):
             parent = _select_manifest(manifests, target, "")
             if parent is None:
                 parent = _make_manifest(target, "", _READER, _API)
+            if parent["access"] == "no_access" and options.get("retry_denied"):
+                parent = _make_manifest(target, parent["revision"], _READER, _API)
             if parent["access"] != "granted":
                 raise AccessDenied("Declared parent weights unavailable")
         parent_id = {key: parent[key] for key in ("repo_id", "revision")} if parent else None
@@ -199,7 +233,8 @@ def _batch_job(job):
         if tier == "t2":
             companions += [(_artifact(manifest, out, "t1" if h == ROW_BLOCK else f"t1b{h}"),
                             "t1" if h == ROW_BLOCK else f"t1b{h}", h) for h in options["also_t1_blocks"]]
-        complete = all(_complete(p, manifest, t, k, h, parent_id) for p, t, h in companions)
+        complete = all(_complete(p, manifest, t, k, h, parent_id,
+                                 delta_blocks=options["delta_blocks"], full_delta=options["full_delta"]) for p, t, h in companions)
         # Expert selection is stored in coverage, not in the frozen metadata.
         if complete:
             fp = load_fingerprint(path)
@@ -216,10 +251,13 @@ def _batch_job(job):
                 complete = expected == actual
         if not complete:
             path = fingerprint_model(manifest, _READER, tier, out, parent=parent,
-                                     parent_cache=options["parent_cache"], sketch_k=k,
+                                     parent_cache=(BlockCache(options["parent_cache"], int(options["parent_cache_max_gib"] * 1024**3))
+                                                   if options["parent_cache"] is not None else None), sketch_k=k,
+                                     delta_blocks=options["delta_blocks"], full_delta=options["full_delta"],
+                                     cache_self=options["cache_self"],
                                      all_experts=options["all_experts"],
                                      also_t1_blocks=tuple(options["also_t1_blocks"]),
-                                     compute_device=options.get("compute_device", "cpu"))
+                                     compute_device=_DEVICE or options.get("compute_device", "cpu"))
         fp = load_fingerprint(path)
         result = _record(row, "batch", _READER, started, before)
         result.update(status="skipped" if complete else "complete", reason="already_complete" if complete else "",
@@ -290,12 +328,24 @@ def _reports(out, records, stage):
     return 2 if any(r["status"] == "failed" for r in records) else 0
 
 
+def _batch_options(args, row, likely_parents):
+    options = dict(vars(args))
+    special = row.get("stratum") in ("lab", "anchor")
+    options["sketch_k"] = (128 if special else 64) if args.sketch_k == "auto" else int(args.sketch_k)
+    options["all_experts"] = special if args.all_experts == "auto" else args.all_experts
+    options["cache_self"] = special or row["repo_id"] in likely_parents
+    return options
+
+
 def _run_many(args, factory, api):
     out = Path(args.out)
     _clean(out)
     rows = _read_models(args.models)
     manifests = _manifests(args.out if args.command == "manifest" else args.manifests)
     records, jobs = [], []
+    likely_parents = {base for manifest in manifests for base in manifest.get("declared_bases", []) if isinstance(base, str)}
+    if args.command == "batch" and args.cache_models:
+        likely_parents.update(row["repo_id"] for row in _read_models(args.cache_models))
     for row in rows:
         try:
             manifest = _select_manifest(manifests, row["repo_id"], row.get("revision", ""))
@@ -324,19 +374,22 @@ def _run_many(args, factory, api):
         else:
             if manifest["access"] == "no_access" and args.retry_denied:
                 # Retry metadata first; retain the original identity pin.
-                jobs.append((row, manifest, dict(vars(args), retry_manifest=True), manifests))
+                jobs.append((row, manifest, dict(_batch_options(args, row, likely_parents), retry_manifest=True), manifests))
             else:
-                jobs.append((row, manifest, vars(args), manifests))
+                jobs.append((row, manifest, _batch_options(args, row, likely_parents), manifests))
     function = _manifest_job if args.command == "manifest" else _batch_with_retry
     if args.workers == 1:
-        _init_worker(factory, api)
+        _init_worker(factory, api, args.devices)
         results = map(function, jobs)
         for record, manifest in results:
             records.append(record)
             if manifest:
                 write_manifest(manifest, out if args.command == "manifest" else Path(args.manifests))
     else:
-        with ProcessPoolExecutor(max_workers=args.workers, initializer=_init_worker, initargs=(factory, api)) as pool:
+        context = multiprocessing.get_context("spawn" if args.devices[0].startswith("cuda") else "fork")
+        counter = context.Value("i", 0)
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=context, initializer=_init_worker,
+                                 initargs=(factory, api, args.devices, counter)) as pool:
             for record, manifest in pool.map(function, jobs):
                 records.append(record)
                 if manifest:
@@ -481,7 +534,7 @@ def _parser():
     single.add_argument("--out")
     single.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
     single.add_argument("--all_experts", action="store_true")
-    single.add_argument("--compute_device", default="cpu", help="Spectrum and parent-delta device: cpu or cuda:<index>")
+    single.add_argument("--compute_device", default="auto", help="Spectrum and parent-delta device: cpu or cuda:<index>")
     single.add_argument("--json", action="store_true")
     for name in ("diff", "check"):
         command = commands.add_parser(name)
@@ -507,19 +560,24 @@ def _parser():
         command = commands.add_parser(name)
         command.add_argument("--models", required=True)
         command.add_argument("--out", required=True)
-        command.add_argument("--workers", type=int, default=1)
+        command.add_argument("--workers", default="auto")
         command.add_argument("--retry_denied", action="store_true")
         if name == "manifest":
             command.add_argument("--include_declared_bases", action="store_true")
         else:
             command.add_argument("--manifests", required=True)
             command.add_argument("--tier", choices=("t1", "t2"), required=True)
-            command.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
-            command.add_argument("--all_experts", action="store_true")
-            command.add_argument("--compute_device", default="cpu", help="Spectrum and parent-delta device: cpu or cuda:<index>")
-            command.add_argument("--also_t1_blocks", default="")
-            command.add_argument("--with_parent", action="store_true")
+            command.add_argument("--sketch_k", default="auto")
+            command.add_argument("--all_experts", action=argparse.BooleanOptionalAction, default="auto")
+            command.add_argument("--compute_device", default="auto", help="Spectrum and parent-delta device: cpu or cuda:<index>")
+            command.add_argument("--also_t1_blocks", default=None)
+            command.add_argument("--delta_blocks", default="256")
+            command.add_argument("--full_delta", action="store_true")
+            command.add_argument("--with_parent", action=argparse.BooleanOptionalAction, default=True)
             command.add_argument("--parent_cache", type=Path)
+            command.add_argument("--no-parent_cache", action="store_true")
+            command.add_argument("--parent_cache_max_gib", type=float, default=64)
+            command.add_argument("--cache_models", type=Path)
     return parser
 
 
@@ -527,10 +585,23 @@ def main(argv: list[str], *, reader_factory=None, api=None) -> int:
     try:
         args = _parser().parse_args(argv)
         if args.command in ("manifest", "batch"):
-            if args.workers < 1:
-                raise ValueError("workers must be positive")
+            args.devices, args.workers = _execution_policy(getattr(args, "compute_device", "cpu"), args.workers)
             if args.command == "batch":
-                args.also_t1_blocks = sorted(set(int(h) for h in args.also_t1_blocks.split(",") if h))
+                raw = args.also_t1_blocks
+                if raw is None:
+                    raw = "128,256,512" if args.tier == "t2" else "none"
+                args.also_t1_blocks = tuple(sorted(set(int(h) for h in raw.split(",") if h and h != "none")))
+                args.delta_blocks = tuple(sorted(set(int(h) for h in args.delta_blocks.split(",") if h)))
+                if any(h < 1 for h in args.delta_blocks):
+                    raise ValueError("Delta block heights must be positive")
+                if args.sketch_k != "auto" and not 1 <= int(args.sketch_k) <= SKETCH_K_MAX:
+                    raise ValueError("Invalid sketch size")
+                if not 0 <= args.parent_cache_max_gib < float("inf"):
+                    raise ValueError("Parent cache budget must be finite and nonnegative")
+                if args.no_parent_cache:
+                    args.parent_cache = None
+                elif args.parent_cache is None:
+                    args.parent_cache = Path(os.environ.get("ZOO_DATA", args.out)) / "cache/parent-blocks"
                 if args.tier == "t1" and args.also_t1_blocks:
                     raise ValueError("Additional T1 block outputs require tier t2")
                 if any(h < 1 for h in args.also_t1_blocks):

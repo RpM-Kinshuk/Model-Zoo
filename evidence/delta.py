@@ -1,5 +1,6 @@
 """Block update statistics with abstention at the storage noise floor."""
 import math
+import os
 
 import numpy as np
 import torch
@@ -18,6 +19,9 @@ _STORAGE_PRECISION = {
 
 
 def _compute_device(value):
+    if value == "auto":
+        assigned = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        value = "cuda:0" if assigned and assigned != "-1" else "cpu"
     try:
         device = torch.device(value)
     except (TypeError, RuntimeError):

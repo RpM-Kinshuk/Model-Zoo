@@ -25,6 +25,7 @@ from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION,
 from net_esd.core import compute_esd_for_weight, _svdvals_for_measurement
 
 from . import EVIDENCE_VERSION
+from .block_cache import BlockCache
 from .delta import block_delta, _compute_device
 from .hub import HubReader
 from .safetensors_header import TensorEntry, _DTYPE_BYTES, _numel, decode_plain
@@ -245,18 +246,23 @@ def _no_delta():
                 top_singular_values=np.full(16, np.nan, np.float32))
 
 
-def _cache_path(cache, manifest, name, bounds):
-    text = f"{manifest['repo_id']}@{manifest['revision']}|{name}|{bounds[0]}|{bounds[1]}"
-    return Path(cache) / (hashlib.sha256(text.encode()).hexdigest() + ".bin")
+def _parent_storage_dtype(sources, view):
+    if view.decode != "plain" or view.geometry == "lora_product":
+        return torch.float32
+    return _TORCH_DTYPES_REVERSE.get(sources.entries[view.sources[0]].dtype, torch.float32)
 
 
-def _cache_write(path, block):
-    temporary = _atomic_path(path)
-    try:
-        temporary.write_bytes(_bytes(block.float()))
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def _read_parent_block(sources, view, bounds, cache, full=None):
+    plain = view.decode == "plain" and view.geometry != "lora_product"
+    shape = (bounds[1] - bounds[0], view.matrix_shape[1])
+    stored = cache.get(sources.manifest, view.name, bounds,
+                       _parent_storage_dtype(sources, view), shape) if cache else None
+    if stored is not None:
+        return stored.float() * view.scale if plain else stored
+    block, stored, _ = sources.block(view, bounds, full)
+    if cache:
+        cache.put(sources.manifest, view.name, bounds, stored if plain else block.float())
+    return block
 
 
 def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, height,
@@ -269,24 +275,22 @@ def _parent_delta(block, view, bounds, parent_sources, parent_views, cache, heig
         result = _no_delta()
         result["status"] = "incompatible_shape"
         return result
-    path = _cache_path(cache, parent_sources.manifest, view.name, bounds) if cache is not None else None
-    if parent_block is not None:
-        pass
-    elif path is not None and path.exists():
-        raw = path.read_bytes()
-        if len(raw) != block.numel() * 4:
-            raise ValueError("Invalid cached parent block size")
-        parent_block = torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(block.shape)
-    else:
-        parent_block, _, _ = parent_sources.block(other, bounds, full)
-        if path is not None:
-            _cache_write(path, parent_block)
-    dtype = _TORCH_DTYPES_REVERSE.get(parent_sources.entries[other.sources[0]].dtype, torch.float32)
-    if other.decode != "plain" or other.geometry == "lora_product":
-        dtype = torch.float32
+    dtype = _parent_storage_dtype(parent_sources, other)
+    if parent_block is None:
+        parent_block = _read_parent_block(parent_sources, other, bounds, cache if height is not None else None, full)
     if torch.device(compute_device).type == "cpu":
         return block_delta(block, parent_block, dtype)
     return block_delta(block, parent_block, dtype, compute_device=compute_device)
+
+
+def _selected_delta(block, view, bounds, parent_sources, parent_views, cache, height,
+                    device, delta_blocks, full_delta, *, parent_block=None):
+    if parent_sources is None:
+        return _no_delta()
+    if (height is None and full_delta) or height in delta_blocks:
+        return _parent_delta(block, view, bounds, parent_sources, parent_views, cache, height, device,
+                             parent_block=parent_block)
+    return dict(_no_delta(), status="not_computed")
 
 
 _TORCH_DTYPES_REVERSE = {name: dtype for dtype, name in _TORCH_DTYPES.items()}
@@ -428,28 +432,48 @@ def _metadata(identity, parent, k, height, stats, elapsed):
 
 
 def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
-                        heights, records, spectra, manifest, device, window, max_bytes):
+                        heights, records, spectra, manifest, device, window, max_bytes,
+                        delta_blocks, full_delta, cache_self):
     groups = [list(group) for _, group in groupby(
         sorted(views, key=lambda view: (view.sources, view.name)), key=lambda view: view.sources)]
 
-    def parent_groups(group):
-        result = {}
-        if parent_sources is not None and parent_cache is None:
-            for view in group:
-                other = parent_views.get(view.name)
-                if other is not None and other.matrix_shape == view.matrix_shape:
-                    result.setdefault(other.sources, other)
-        return result
+    def parent_requests(group):
+        if parent_sources is None:
+            return
+        for view in group:
+            other = parent_views.get(view.name)
+            if other is None or other.matrix_shape[1] != view.matrix_shape[1]:
+                continue
+            for height in heights:
+                # Full-matrix lab deltas remain uncached and on demand.
+                if height is None or height not in delta_blocks:
+                    continue
+                bounds = row_block_bounds(view.matrix_shape[0], height)
+                if row_block_bounds(other.matrix_shape[0], height) == bounds:
+                    yield view.name, height, other, bounds
 
     def estimate(group):
         total = sum(sources.entries[name].end-sources.entries[name].start for name in group[0].sources)
-        for names in parent_groups(group):
-            total += sum(parent_sources.entries[name].end-parent_sources.entries[name].start for name in names)
+        for _, _, other, bounds in parent_requests(group):
+            entry = parent_sources.entries[other.sources[0]]
+            plain = other.decode == "plain" and other.geometry != "lora_product"
+            transposed = other.slice_index is not None and _expert_transpose(
+                other.sources[0], entry.shape[1:], parent_sources.manifest.get("config", {}))
+            if plain and not transposed:
+                # Stored bytes, conversion and decoded fp32 block workspaces.
+                total += (bounds[1] - bounds[0]) * other.matrix_shape[1] * (2 * _DTYPE_BYTES[entry.dtype] + 8)
+            else:
+                # Existing packed/adapter/transposed decoders may read full
+                # sources. Include those reads and full decode workspaces.
+                total += 2 * sum(parent_sources.entries[name].end-parent_sources.entries[name].start
+                                 for name in other.sources)
+                total += math.prod(other.matrix_shape) * 16
         return total
 
     def load(group):
         child = sources.full(group[0])
-        parents = {names: parent_sources.full(other) for names, other in parent_groups(group).items()}
+        parents = {(name, height): _read_parent_block(parent_sources, other, bounds, parent_cache)
+                   for name, height, other, bounds in parent_requests(group)}
         return child, parents
 
     def measure_view(view, full, parents):
@@ -458,15 +482,6 @@ def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cac
         current_device = _view_device(cpu_full, device)
         gpu_full = _to_compute(cpu_full, current_device)
         gpu_factors = tuple(_to_compute(factor, current_device) for factor in factors_full) if factors_full is not None else None
-        other = parent_views.get(view.name)
-        parent_full = parents.get(other.sources) if other is not None else None
-        parent_gpu = None
-        if (parent_sources is not None and parent_cache is None and other is not None
-                and other.matrix_shape == view.matrix_shape and other.decode == "plain"
-                and other.geometry != "lora_product"):
-            cpu_parent = parent_sources.block(other, (0, other.matrix_shape[0]), parent_full)[0]
-            parent_gpu = _to_compute(cpu_parent, current_device)
-            del cpu_parent
         for height, result in records.items():
             bounds = (0, view.matrix_shape[0]) if height is None else row_block_bounds(view.matrix_shape[0], height)
             # A full-matrix workspace fallback must not move its small,
@@ -488,14 +503,13 @@ def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cac
                 block = _to_compute(cpu_block, block_device)
             if gpu_factors is not None:
                 factors = (gpu_factors[0][bounds[0]:bounds[1]], gpu_factors[1])
-            override = parent_gpu[bounds[0]:bounds[1]] if parent_gpu is not None else None
-            delta = _parent_delta(block, view, bounds, parent_sources, parent_views,
-                                  parent_cache, height, block_device, full=parent_full,
-                                  parent_block=override) if parent_sources else _no_delta()
+            delta = _selected_delta(block, view, bounds, parent_sources, parent_views,
+                                    parent_cache, height, block_device, delta_blocks, full_delta,
+                                    parent_block=parents.get((view.name, height)))
             kept = result.add(view, bounds, block, stored, factors,
                               sources.entries[view.sources[0]].dtype, delta, host_block=cpu_block)
-            if parent_cache is not None:
-                _cache_write(_cache_path(parent_cache, manifest, view.name, bounds), cpu_block)
+            if parent_cache is not None and cache_self and height in delta_blocks:
+                parent_cache.put(manifest, view.name, bounds, stored if plain else cpu_block.float())
             if kept and height is None:
                 if view.geometry == "conv_flat":
                     # Collector conv normalization needs the original 4D
@@ -525,19 +539,66 @@ def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cac
         loader.close()
 
 
+def _measure_t1(views, sources, parent_sources, parent_views, cache, records, manifest,
+                device, window, max_bytes, delta_blocks, full_delta, cache_self):
+    groups = [list(group) for _, group in groupby(
+        sorted(views, key=lambda view: (view.sources, view.name)), key=lambda view: view.sources)]
+
+    def load(group):
+        return [sources.block(view, row_block_bounds(view.matrix_shape[0])) for view in group]
+
+    def estimate(group):
+        # Conservative upper bound includes decoded and stored host blocks.
+        # Exotic decoded layouts may require whole sources; do not prefetch those.
+        if any(view.decode != "plain" or view.geometry == "lora_product"
+               or (view.slice_index is not None and _expert_transpose(
+                   view.sources[0], sources.entries[view.sources[0]].shape[1:],
+                   sources.manifest.get("config", {}))) for view in group):
+            return max_bytes + 1
+        return sum(min(ROW_BLOCK, view.matrix_shape[0]) * view.matrix_shape[1] * 12 for view in group)
+
+    loader = SourcePrefetch(groups, load, estimate, window=window, max_bytes=max_bytes)
+    try:
+        while True:
+            try:
+                group, payload = loader.next()
+            except StopIteration:
+                break
+            if payload is None:
+                payload = (sources.block(view, row_block_bounds(view.matrix_shape[0])) for view in group)
+            for view, (host, stored, factors) in zip(group, payload):
+                bounds = row_block_bounds(view.matrix_shape[0])
+                block = _to_compute(host, device) if device.type == "cuda" else host
+                delta = _selected_delta(block, view, bounds, parent_sources, parent_views,
+                                        cache, ROW_BLOCK, device, delta_blocks, full_delta)
+                records[ROW_BLOCK].add(view, bounds, block, stored, factors,
+                                       sources.entries[view.sources[0]].dtype, delta, host_block=host)
+                if cache is not None and cache_self and ROW_BLOCK in delta_blocks:
+                    cache.put(manifest, view.name, bounds, stored if stored is not None else host.float())
+            del group, payload, host, stored, factors, block
+    finally:
+        loader.close()
+
+
 def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Path,
-                      parent: dict | None = None, parent_cache: Path | None = None,
+                      parent: dict | None = None, parent_cache: BlockCache | Path | None = None,
                       sketch_k: int = SKETCH_K_DEFAULT, all_experts: bool = False,
                       also_t1_blocks: tuple[int, ...] = (), read_threads: int = 8,
                       compute_device: str = "cpu", prefetch_groups: int | None = None,
-                      prefetch_bytes: int = 512*1024**2) -> Path:
+                      prefetch_bytes: int = 512*1024**2,
+                      delta_blocks: tuple[int, ...] = (ROW_BLOCK,), full_delta: bool = False,
+                      cache_self: bool = False) -> Path:
     """Measure one pinned manifest, publishing the final T2 marker last."""
     if tier not in ("t1", "t2") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
         raise ValueError("Invalid tier, sketch size, or read thread count")
     if any(type(height) is not int or height <= 0 for height in also_t1_blocks):
         raise ValueError("Block heights must be positive integers")
+    if any(type(height) is not int or height <= 0 for height in delta_blocks):
+        raise ValueError("Delta block heights must be positive integers")
+    if parent_cache is not None and not isinstance(parent_cache, BlockCache):
+        parent_cache = BlockCache(parent_cache)
     device = _compute_device(compute_device)
-    window = (2 if device.type == "cuda" and tier == "t2" else 0) if prefetch_groups is None else prefetch_groups
+    window = (2 if device.type == "cuda" else 0) if prefetch_groups is None else prefetch_groups
     if type(window) is not int or window not in (0, 1, 2):
         raise ValueError("prefetch_groups must be 0, 1 or 2")
     if type(prefetch_bytes) is not int or prefetch_bytes < 1:
@@ -564,7 +625,12 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
             records = {height: _Records(coverage, sketch_k, "t2" if height is None else ("t1" if height == ROW_BLOCK else f"t1b{height}")) for height in heights}
             if tier == "t2" and (device.type == "cuda" or window):
                 _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
-                                    heights, records, spectra, manifest, device, window, prefetch_bytes)
+                                    heights, records, spectra, manifest, device, window, prefetch_bytes,
+                                    delta_blocks, full_delta, cache_self)
+                views = []
+            if tier == "t1":
+                _measure_t1(views, sources, parent_sources, parent_views, parent_cache, records,
+                            manifest, device, window, prefetch_bytes, delta_blocks, full_delta, cache_self)
                 views = []
             previous_sources, full = None, None
             # Grouping bounds the full-source cache to one weight/factor group.
@@ -576,11 +642,11 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 for height, result in records.items():
                     bounds = (0, view.matrix_shape[0]) if height is None else row_block_bounds(view.matrix_shape[0], height)
                     block, stored, factors = sources.block(view, bounds, full)
-                    delta = _parent_delta(block, view, bounds, parent_sources, parent_views,
-                                          parent_cache, height, device) if parent_sources else _no_delta()
+                    delta = _selected_delta(block, view, bounds, parent_sources, parent_views,
+                                            parent_cache, height, device, delta_blocks, full_delta)
                     kept = result.add(view, bounds, block, stored, factors, sources.entries[view.sources[0]].dtype, delta)
-                    if parent_cache is not None:
-                        _cache_write(_cache_path(parent_cache, manifest, view.name, bounds), block)
+                    if parent_cache is not None and cache_self and height in delta_blocks:
+                        parent_cache.put(manifest, view.name, bounds, stored if stored is not None else block.float())
                     if kept and height is None:
                         weight = full[view.sources[0]] if view.geometry == "conv_flat" else block
                         spectra.add(view.name, weight)

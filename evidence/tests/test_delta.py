@@ -149,3 +149,26 @@ def test_cuda_prepares_stored_inputs_on_requested_device(monkeypatch, rho):
             np.testing.assert_array_equal(actual[key], expected[key])
         else:
             assert actual[key] == expected[key]
+
+
+def test_auto_without_visible_devices_uses_cpu(monkeypatch):
+    from evidence.delta import _compute_device
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert str(_compute_device("auto")) == "cpu"
+
+
+def test_auto_uses_assigned_gpus_only(monkeypatch):
+    from evidence.delta import _compute_device
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,7")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    assert str(_compute_device("auto")) == "cuda:0"
+
+
+def test_assigned_devices_without_working_cuda_is_an_error(monkeypatch):
+    from evidence.delta import _compute_device
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="CUDA"):
+        _compute_device("auto")
