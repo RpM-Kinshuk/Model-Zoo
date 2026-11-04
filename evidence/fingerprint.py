@@ -381,14 +381,14 @@ class _Records:
 
 
 class _Spectra:
-    def __init__(self, path, compute_device):
+    def __init__(self, path, compute_device, measurement=None):
         self.path, self.temporary = path, _atomic_path(path)
         self.compute_device = compute_device
         self.handle = h5py.File(self.temporary, "w")
         self.layers = self.handle.create_group("layers")
         self.layers.create_dataset("longname", (0,), maxshape=(None,), dtype=h5py.string_dtype())
         self.eigs = self.handle.create_dataset("eigs", (0,), maxshape=(None,), dtype=h5py.vlen_dtype(np.dtype("float32")))
-        self.config = measurement_config(SimpleNamespace(analysis_source="checkpoint"))
+        self.config = dict(measurement) if measurement is not None else measurement_config(SimpleNamespace(analysis_source="checkpoint"))
         self.handle.attrs.update(format_version=FORMAT_VERSION, numerics_version=NUMERICS_VERSION,
                                  measurement_config_json=json.dumps(self.config, sort_keys=True),
                                  compute_device=str(compute_device))
@@ -403,14 +403,26 @@ class _Spectra:
             raise ValueError(f"No collector spectrum for view {name}")
         if result.get("compute_device") != str(self.compute_device):
             raise ValueError("Collector spectrum used an unexpected compute device")
+        self.add_result(name, result)
+
+    def add_result(self, name, result):
         index = len(self.eigs)
-        for key, value in result.items():
-            if key not in ("eigs", "longname") and isinstance(value, (int, float, bool, np.number)):
-                if key not in self.layers:
-                    self.layers.create_dataset(key, (0,), maxshape=(None,), dtype="f8")
-                dataset = self.layers[key]
-                dataset.resize(index + 1, axis=0)
-                dataset[index] = value
+        values = {key: value for key, value in result.items()
+                  if key not in ("eigs", "longname") and isinstance(value, (str, int, float, bool, np.number))}
+        for key, value in values.items():
+            if "/" in key or not key:
+                raise ValueError("Invalid spectrum metric name")
+            if key not in self.layers:
+                string = isinstance(value, str)
+                dataset = self.layers.create_dataset(key, (index,), maxshape=(None,),
+                                                     dtype=h5py.string_dtype() if string else "f8")
+                if index:
+                    dataset[:] = "" if string else np.nan
+        for key, dataset in self.layers.items():
+            if key == "longname":
+                continue
+            dataset.resize(index + 1, axis=0)
+            dataset[index] = values.get(key, "" if h5py.check_string_dtype(dataset.dtype) else np.nan)
         names = self.layers["longname"]
         names.resize(index + 1, axis=0)
         names[index] = name
@@ -510,7 +522,7 @@ def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cac
                               sources.entries[view.sources[0]].dtype, delta, host_block=cpu_block)
             if parent_cache is not None and cache_self and height in delta_blocks:
                 parent_cache.put(manifest, view.name, bounds, stored if plain else cpu_block.float())
-            if kept and height is None:
+            if kept and height is None and spectra is not None:
                 if view.geometry == "conv_flat":
                     # Collector conv normalization needs the original 4D
                     # stored weight, not the flattened view used by hashes.
@@ -587,7 +599,7 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                       compute_device: str = "cpu", prefetch_groups: int | None = None,
                       prefetch_bytes: int = 512*1024**2,
                       delta_blocks: tuple[int, ...] = (ROW_BLOCK,), full_delta: bool = False,
-                      cache_self: bool = False) -> Path:
+                      cache_self: bool = False, write_spectra: bool = True) -> Path:
     """Measure one pinned manifest, publishing the final T2 marker last."""
     if tier not in ("t1", "t2") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
         raise ValueError("Invalid tier, sketch size, or read thread count")
@@ -621,7 +633,8 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
             heights = [None] if tier == "t2" else [ROW_BLOCK]
             if tier == "t2":
                 heights += sorted(set(also_t1_blocks))
-                spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5", device)
+                if write_spectra:
+                    spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5", device)
             records = {height: _Records(coverage, sketch_k, "t2" if height is None else ("t1" if height == ROW_BLOCK else f"t1b{height}")) for height in heights}
             if tier == "t2" and (device.type == "cuda" or window):
                 _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
@@ -647,7 +660,7 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                     kept = result.add(view, bounds, block, stored, factors, sources.entries[view.sources[0]].dtype, delta)
                     if parent_cache is not None and cache_self and height in delta_blocks:
                         parent_cache.put(manifest, view.name, bounds, stored if stored is not None else block.float())
-                    if kept and height is None:
+                    if kept and height is None and spectra is not None:
                         weight = full[view.sources[0]] if view.geometry == "conv_flat" else block
                         spectra.add(view.name, weight)
             stats = dict(bytes_read=sources.bytes_read + (parent_sources.bytes_read if parent_sources else 0),
@@ -660,8 +673,11 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 path = out_dir / f"{safe}.{result.tier}.fingerprint.safetensors"
                 result.write(path, _metadata(manifest, parent, sketch_k, height, stats, time.monotonic() - started))
             if tier == "t2":
-                spectra.close(publish=True)
-                spectra = None
+                if write_spectra:
+                    spectra.close(publish=True)
+                    spectra = None
+                else:
+                    out = out.with_name(out.name + ".staged")
                 records[None].write(out, _metadata(manifest, parent, sketch_k, ROW_BLOCK, stats, time.monotonic() - started))
             return out
     finally:

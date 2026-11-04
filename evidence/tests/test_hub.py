@@ -435,3 +435,36 @@ def test_network_smoke():
                             "93efa2f097d58c2a74874c7e644dbc9b0cee75a2")
     assert "model.embed_tokens.weight" in reader.read_header(remote)
     assert reader.stats["resolves"] == 1 and reader.stats["range_reads"] == 2
+
+
+def test_local_cache_reads_make_no_network_calls(tmp_path, monkeypatch):
+    path = tmp_path / "cached"
+    path.write_bytes(b"checkpoint-bytes")
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda *args, **kwargs: str(path))
+    reader = HubReader(token="t", local_cache=True, transport=Mock(side_effect=AssertionError("network")))
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert remote.revision == SHA and remote.local_path == str(path)
+    assert reader.read(remote, 2, 9) == b"eckpoin"
+    assert reader.stats["resolves"] == 0
+
+
+def test_local_cache_hit_needs_no_token(tmp_path, monkeypatch):
+    path = tmp_path / "cached"
+    path.write_bytes(b"local")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda *args, **kwargs: str(path))
+    reader = HubReader(local_cache=True)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert reader.read(remote, 0, 5) == b"local"
+    with pytest.raises(ValueError, match="pinned"):
+        reader.resolve("org/m", "model.safetensors", "main")
+
+
+def test_local_cache_falls_back_to_http_for_missing_files(fake_transport, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda *args, **kwargs: None)
+    reader = HubReader(token="t", transport=fake_transport, local_cache=True)
+    remote = reader.resolve("org/m", "model.safetensors", SHA)
+    assert remote.local_path is None
+    assert reader.read(remote, 0, 8) == fake_transport.blob[:8]
+    assert reader.stats["resolves"] == 1

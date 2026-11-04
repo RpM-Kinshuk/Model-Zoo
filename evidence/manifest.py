@@ -55,6 +55,22 @@ def _model_info(api, repo_id, revision):
         raise
 
 
+def _cached_model_info(repo_id, revision):
+    """Inspect an existing pinned HF snapshot without metadata/network access."""
+    from huggingface_hub import ModelCard, snapshot_download
+    root = Path(snapshot_download(repo_id, revision=revision, local_files_only=True))
+    card = ModelCard.load(root / "README.md").data.to_dict() if (root / "README.md").is_file() else {}
+    siblings = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name == ".env":
+            continue
+        blob = path.resolve().name
+        digest = blob if re.fullmatch(r"[0-9a-f]{64}", blob) else None
+        siblings.append(dict(rfilename=path.relative_to(root).as_posix(), size=path.stat().st_size,
+                             lfs=dict(sha256=digest), xet_hash=None))
+    return dict(sha=revision, siblings=siblings, card_data=card, tags=[], gated=False)
+
+
 def pin_revision(api, repo_id: str, revision: str = "main") -> str:
     """Resolve a branch once; already pinned commits need no API call."""
     if is_commit_sha(revision):
@@ -269,7 +285,15 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
                         if locator != manifest["repo_id"]:
                             manifest["source"] = dict(zoo_data_path=locator)
         else:
-            info = _model_info(api, repo_id, revision)
+            if (api is None and reader.local_cache
+                    and (not os.environ.get("HF_TOKEN") or os.environ.get("HF_HUB_OFFLINE") == "1")):
+                from huggingface_hub.errors import LocalEntryNotFoundError
+                try:
+                    info = _cached_model_info(repo_id, revision)
+                except LocalEntryNotFoundError:
+                    info = _model_info(api, repo_id, revision)
+            else:
+                info = _model_info(api, repo_id, revision)
             card = _mapping(_get(info, "card_data", _get(info, "cardData")))
             bases = card.get("base_model", [])
             manifest.update(gated=_get(info, "gated", False), license=card.get("license"),
@@ -340,7 +364,9 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
                 continue
             remote = reader.resolve(source, name, revision)
             if not local:
-                by_name[name].update(size=remote.size, sha256=remote.sha256, xet_hash=remote.xet_hash)
+                by_name[name].update(size=remote.size,
+                                     sha256=remote.sha256 or by_name[name].get("sha256"),
+                                     xet_hash=remote.xet_hash or by_name[name].get("xet_hash"))
             header = reader.read_header(remote)
             folder = str(PurePosixPath(name).parent)
             if "model_index.json" in names and folder != ".":

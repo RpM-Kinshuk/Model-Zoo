@@ -32,6 +32,7 @@ class RemoteFile:
     size: int
     sha256: str | None
     xet_hash: str | None
+    local_path: str | None = None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -91,10 +92,11 @@ def _transport(method, url, headers):
 
 
 class HubReader:
-    def __init__(self, token: str | None = None, transport: Callable | None = None):
+    def __init__(self, token: str | None = None, transport: Callable | None = None, local_cache: bool = False):
         self._token = token if token is not None else os.environ.get("HF_TOKEN")
         self._transport = transport if transport is not None else _transport
         self._endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+        self.local_cache = local_cache
         self._files = {}
         self.stats = dict(resolves=0, range_reads=0, bytes_read=0, refreshes=0, retries=0)
 
@@ -200,9 +202,19 @@ class HubReader:
         key = (repo_id, filename, revision)
         local = Path(repo_id).is_dir()
         if not local:
-            self._online()
             if not is_commit_sha(revision):
                 raise ValueError("Hub reads require a pinned 40-character commit SHA")
+            if key not in self._files and self.local_cache:
+                from huggingface_hub import try_to_load_from_cache
+                cached = try_to_load_from_cache(repo_id, filename, revision=revision)
+                if isinstance(cached, str) and Path(cached).is_file():
+                    path = Path(cached)
+                    blob_name = path.resolve().name
+                    digest = blob_name if re.fullmatch(r"[0-9a-f]{64}", blob_name) else None
+                    self._files[key] = RemoteFile(repo_id, filename, revision, "",
+                                                  path.stat().st_size, digest, None, str(path))
+            if key not in self._files or self._files[key].local_path is None:
+                self._online()
         if key not in self._files:
             if local:
                 root = Path(repo_id).resolve()
@@ -220,8 +232,9 @@ class HubReader:
     def read(self, remote: RemoteFile, start: int, end: int) -> bytes:
         if type(start) is not int or type(end) is not int or not 0 <= start <= end <= remote.size:
             raise ValueError("Read range is outside file bounds")
-        if Path(remote.repo_id).is_dir():
-            with open(remote.url, "rb") as stream:
+        local_path = remote.local_path or (remote.url if Path(remote.repo_id).is_dir() else None)
+        if local_path is not None:
+            with open(local_path, "rb") as stream:
                 stream.seek(start)
                 body = stream.read(end - start)
             self.stats["bytes_read"] += len(body)
@@ -246,7 +259,7 @@ class HubReader:
                 raise ValueError("Hub Content-Range does not match the requested bytes")
         if len(body) != end - start:
             raise ValueError("File read returned an unexpected byte count")
-        if not Path(remote.repo_id).is_dir() and current.url != target:
+        if local_path is None and current.url != target:
             self._files[key] = replace(current, url=target)
         return body
 

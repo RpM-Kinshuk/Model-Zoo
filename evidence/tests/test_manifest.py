@@ -391,3 +391,34 @@ def test_canonical_index_requires_explicit_auxiliary_head_membership(tmp_path, a
     else:
         with pytest.raises(ValueError, match="auxiliary.*ambiguous"):
             build_manifest(str(tmp_path), "local", HubReader(), None)
+
+
+def test_manifest_from_local_download_matches_remote_manifest(fake_reader, fake_api, manifest_repositories, tmp_path, monkeypatch):
+    files, _ = manifest_repositories
+    paths = {}
+    for filename, blob in files["org/m"].items():
+        path = tmp_path / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(blob)
+        paths[filename] = str(path)
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda repo, filename, **kwargs: paths.get(filename))
+    expected = build_manifest("org/m", SHA, fake_reader, fake_api)
+    reader = HubReader(local_cache=True, transport=lambda *args: pytest.fail("network read"))
+    actual = build_manifest("org/m", SHA, reader, fake_api)
+    assert actual == expected
+
+
+@pytest.mark.parametrize("token", [None, "hf_secret_marker"])
+def test_manifest_local_snapshot_without_token_keeps_hub_pin(tiny_checkpoint, monkeypatch, token):
+    if token:
+        monkeypatch.setenv("HF_TOKEN", token)
+    else:
+        monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda *args, **kwargs: str(tiny_checkpoint))
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda repo, filename, **kwargs: str(tiny_checkpoint / filename))
+    reader = HubReader(local_cache=True, transport=lambda *args: pytest.fail("network"))
+    manifest = build_manifest("org/m", SHA, reader, None)
+    assert manifest["access"] == "granted"
+    assert manifest["repo_id"] == "org/m" and manifest["revision"] == SHA
+    assert manifest["params_by_dtype"]["BF16"] > 0 and manifest["tensors"]

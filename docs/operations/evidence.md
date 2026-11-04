@@ -245,3 +245,18 @@ blocks, including cache hits, while the current group's spectra are measured.
 The per-group admission budget includes child sources and parent read/decode
 workspaces. Groups exceeding that budget use on-demand reads. Explicit lab
 full-matrix deltas stay on demand and are never cached.
+
+### Full-mode sidecar API
+
+`evidence.sidecar.EvidenceSidecar` measures evidence in a background thread using
+the worker's local Hub cache. `finish` reuses a runner spectrum only for an
+unambiguous whole matrix with the same stored key, shape, dtype and exact
+256-row block bytes. Other views are measured in a bounded second round.
+The spectra file records `runner` or `second_round` for every layer.
+
+All outputs remain in a private staging directory until completion. Spectra
+publish before the T2 completion marker; cancellation and failed promotion
+remove new outputs and restore any files from an earlier incomplete attempt.
+A completed bundle is never replaced. Use one sidecar per model output directory.
+Runner/worker integration is the next implementation step; this API alone does
+not enable evidence in existing worker commands.

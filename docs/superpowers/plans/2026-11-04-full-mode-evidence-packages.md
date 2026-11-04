@@ -2,11 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-11-04):** Owner authorized execution. First incremental batch:
-Tasks 1–2 implemented and reviewed, uncommitted. T2 parent-block prefetch
-completed on follow-up, including cache hits and combined memory admission;
-over-budget groups and explicit full-matrix lab deltas stay on demand.
-Full-suite follow-up: 1314 passed, 1 skipped (esd_ind). Tasks 3–9 pending; Task 7 still
+**Status (2026-11-04):** Owner authorized incremental execution. Tasks 1–2,
+including bounded parent-block prefetch, are committed by the owner at
+`375f427`. Task 3 (sidecar API) is implemented and reviewed, uncommitted.
+Full suite: 1336 passed, 1 skipped (esd_ind). Tasks 4–9 pending; Task 7 still
 requires XF approval. Progress ledger:
 `.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
 
@@ -309,7 +308,7 @@ are always passed explicitly.
     `publish_t2`, and returns the counts `reused`, `measured` and `gaps`.
   - `cancel() -> None` stops the pass and removes staged files.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `test_local_cache_reads_make_no_network_calls`,
     `test_local_cache_hit_needs_no_token` and
     `test_local_cache_falls_back_to_http_for_missing_files`.
@@ -321,12 +320,12 @@ are always passed explicitly.
     number of views and `measure` is not called.
   - `test_finish_remeasures_views_whose_loaded_block_differs` (Review Focus 1).
   - `test_t2_marker_published_after_spectra` and `test_cancel_publishes_nothing`.
-- [ ] **Step 2:** Run `python -m pytest evidence/tests -q`. Expected: the new
+- [x] **Step 2:** Run `python -m pytest evidence/tests -q`. Expected: the new
   tests FAIL.
-- [ ] **Step 3:** Implement `evidence/sidecar.py` and the reader, manifest and
+- [x] **Step 3:** Implement `evidence/sidecar.py` and the reader, manifest and
   spectra options.
-- [ ] **Step 4:** Run `python -m pytest evidence/tests -q`. Expected: all PASS.
-- [ ] **Step 5:** Record the suggested message
+- [x] **Step 4:** Run `python -m pytest evidence/tests -q`. Expected: all PASS.
+- [x] **Step 5:** Record the suggested message
   `feat(evidence): sidecar API for full-mode workers`.
 
 ### Task 4: Worker and runner integration, evidence on by default
