@@ -123,6 +123,8 @@ def diff_fingerprints(a: Fingerprint, b: Fingerprint, null: dict | None = None) 
     compatible = _settings_reason(a, b) is None
     k = min(a.meta["sketch_k"], b.meta["sketch_k"])
     scores = _scores(a, b, k) if compatible else {}
+    from .pair_delta import for_fingerprints
+    pair_a, pair_b = for_fingerprints(a, b), for_fingerprints(b, a)
     views, counts, updates, heads = {}, Counter(), defaultdict(list), []
     for name in sorted(left.keys() | right.keys()):
         i, j = left.get(name), right.get(name)
@@ -152,6 +154,20 @@ def diff_fingerprints(a: Fingerprint, b: Fingerprint, null: dict | None = None) 
                               delta_status=str(child.delta["status"][index]))
                 if record["rel_update_norm"] is not None:
                     updates[child.component[index]].append(record["rel_update_norm"])
+        supplement = pair_a.get(name) or pair_b.get(name)
+        if supplement is not None and i is not None and j is not None:
+            record.update(supplement)
+            record["frac_identical"] = _finite(record["frac_identical"])
+            record["rel_update_norm"] = _finite(record["rel_update_norm"])
+            record["rank"] = record["rank"] if record["rank"] >= 0 else None
+            if record["rel_update_norm"] is not None:
+                fp, index = (a, i) if name in pair_a else (b, j)
+                # Replace the in-run entry if present instead of counting it twice.
+                if child is not None and child.delta["status"][index] != "no_parent":
+                    values = updates[child.component[index]]
+                    if values:
+                        values.pop()
+                updates[fp.component[index]].append(record["rel_update_norm"])
         fp, index = (a, i) if i is not None else (b, j)
         if fp.geometry[index] == "head" and status in ("added", "changed", "reshaped"):
             heads.append(name)

@@ -48,6 +48,7 @@ class Fingerprint:
     delta: dict[str, np.ndarray]
     coverage: list[dict]
     meta: dict
+    path: Path | None = None
 
 
 _TORCH_DTYPES = {
@@ -758,4 +759,4 @@ def load_fingerprint(path: Path) -> Fingerprint:
     delta.update(top_sv=tensors["delta_top_sv"], status=np.asarray(meta["delta_status"]),
                  confidence=np.asarray(meta["delta_confidence"]))
     return Fingerprint(names, meta["geometry"], meta["component"], tensors["rows"], tensors["shape"],
-                       tensors["sketch"], meta["sha256"], spectra, delta, meta["coverage"], meta)
+                       tensors["sketch"], meta["sha256"], spectra, delta, meta["coverage"], meta, path)

@@ -8,4 +8,5 @@ for _path in (_ROOT, _ROOT / "esd_experiment" / "src"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-EVIDENCE_VERSION = "1"
+EVIDENCE_VERSION = "2"
+READABLE_EVIDENCE_VERSIONS = frozenset({"1", EVIDENCE_VERSION})

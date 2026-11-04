@@ -8,7 +8,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from evidence import EVIDENCE_VERSION
+from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
 from evidence.fingerprint import load_fingerprint
 from evidence.sketch import ROW_BLOCK, SKETCH_SEED
 from .schema import model_key
@@ -59,7 +59,7 @@ def _fingerprint(row, root):
     fp = load_fingerprint(path)
     if model_key(fp.meta["repo_id"], fp.meta["revision"]) != row.model_key:
         raise ValueError(f"Fingerprint identity does not match model: {row.model_key}")
-    if (fp.meta.get("tier") != "t1" or fp.meta.get("evidence_version") != EVIDENCE_VERSION
+    if (fp.meta.get("tier") != "t1" or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS
             or fp.meta.get("sketch_seed") != SKETCH_SEED or fp.meta.get("row_block") != ROW_BLOCK
             or fp.meta.get("sketch_k", 0) < _SKETCH_SIZE
             or fp.sketch.shape != (len(fp.names), fp.meta["sketch_k"], fp.meta["sketch_k"])):
@@ -173,7 +173,7 @@ def nearest(zoo_dir: Path, key: str, sig: str, k: int) -> list[tuple[str, float]
     if key not in keys:
         raise ValueError(f"Model has no comparable T1 retrieval row: {key}")
     if (metadata.get("sketch_seed") != SKETCH_SEED or metadata.get("row_block") != ROW_BLOCK
-            or metadata.get("evidence_version") != EVIDENCE_VERSION):
+            or metadata.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS):
         raise ValueError("Incompatible retrieval settings")
     n_views = len(names)
     presence = np.asarray(metadata["presence"], dtype=bool)

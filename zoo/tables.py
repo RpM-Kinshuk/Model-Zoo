@@ -8,7 +8,7 @@ from typing import Sequence
 
 import pandas as pd
 
-from evidence import EVIDENCE_VERSION
+from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
 from evidence.fingerprint import load_fingerprint
 from .schema import (COVERAGE_COLUMNS, MODELS_COLUMNS, PREDICTIONS_COLUMNS,
                      SCORES_COLUMNS, VIEWS_COLUMNS, arch_signature, empty_table,
@@ -167,7 +167,7 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
         fp = load_fingerprint(path)
         key = model_key(fp.meta["repo_id"], fp.meta["revision"])
         tier = fp.meta["tier"]
-        if tier not in ("t1", "t2") or fp.meta.get("evidence_version") != EVIDENCE_VERSION:
+        if tier not in ("t1", "t2") or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS:
             raise ValueError(f"Unsupported fingerprint settings: {path}")
         if key not in records:
             raise ValueError(f"Fingerprint identity has no manifest: {key}: {path}")
@@ -227,3 +227,24 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
     return dict(models=_rows(model_rows, MODELS_COLUMNS, ["model_key"]), views=views,
                 coverage=_rows(coverage_rows, COVERAGE_COLUMNS, ["model_key", "tensor_name"]),
                 scores=_score_tables(score_tables, records), predictions=empty_table(PREDICTIONS_COLUMNS))
+
+
+def pair_delta_files(models, data_root):
+    """Validate supplemental identities without changing frozen view columns."""
+    from evidence.pair_delta import load_pair_delta
+    root = Path(data_root).resolve()
+    result = []
+    for row in models.itertuples():
+        if not row.fingerprint_t1:
+            continue
+        folder = (root / row.fingerprint_t1).resolve().parent
+        if not folder.is_relative_to(root):
+            raise ValueError("Pair delta input escapes data_root")
+        for path in sorted((folder / "deltas").glob("*.delta.safetensors")):
+            if not path.resolve().is_relative_to(root):
+                raise ValueError("Pair delta escapes data_root")
+            meta, _ = load_pair_delta(path)
+            if model_key(**meta["child"]) != row.model_key:
+                raise ValueError("Pair delta child disagrees with its package")
+            result.append((path, meta))
+    return result

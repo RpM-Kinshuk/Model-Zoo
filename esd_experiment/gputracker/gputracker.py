@@ -33,6 +33,16 @@ GPU_MEMORY_THRESHOLD = 500 # MB?
 STALE_PROCESS_ACTIONS = {"log", "terminate"}
 
 
+def cpu_thread_budget(value):
+    if value != "auto":
+        return int(value)
+    try:
+        physical = len(gpustat.GPUStatCollection.new_query().gpus)
+    except Exception:
+        physical = 1
+    return max(1, (os.cpu_count() or 1) // max(1, physical))
+
+
 class GPUDispatcher:
     _instance = None
 
@@ -69,6 +79,7 @@ class GPUDispatcher:
                 "default": 14400,
             },
             "termination_grace_seconds": 60,
+            "cpu_threads_per_gpu": "auto",
             "max_worker_ram_gib": 16,
             "max_worker_cache_gib": 12,
         }
@@ -129,6 +140,12 @@ class GPUDispatcher:
             if not math.isfinite(limit) or limit < 0:
                 raise ValueError(f"{key} must be finite and >= 0")
             merged_config[key] = limit
+        budget = merged_config.get("cpu_threads_per_gpu", "auto")
+        if budget != "auto":
+            if isinstance(budget, bool) or not isinstance(budget, (int, str)) or int(budget) < 0:
+                raise ValueError("cpu_threads_per_gpu must be auto or a nonnegative integer")
+            budget = int(budget)
+        merged_config["cpu_threads_per_gpu"] = budget
         return merged_config
 
     def load_config(self):
@@ -587,6 +604,12 @@ class ChildThread(threading.Thread):
     def run(self):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.cuda_devices))
+        with self.dispatcher.lock:
+            budget = self.dispatcher.config.get("cpu_threads_per_gpu", "auto")
+        threads = cpu_thread_budget(budget)
+        if threads:
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                env[name] = str(threads * len(self.cuda_devices))
         proc = None
         record = None
         log_handle = None

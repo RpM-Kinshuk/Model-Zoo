@@ -23,12 +23,12 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import ZOO_VERSION
-from .lineage import declared_edges, merge_edges, shared_tensor_edges, similarity_edges
+from . import ZOO_VERSION, READABLE_ZOO_VERSIONS
+from .lineage import declared_edges, merge_edges, shared_tensor_edges, similarity_edges, with_pair_delta_evidence
 from .retrieval import build_retrieval
 from .schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
                      PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS, LAYERS_COLUMNS, empty_table)
-from .tables import _fingerprint_files, _manifest_files, build_tables, duplicate_groups
+from .tables import _fingerprint_files, _manifest_files, build_tables, duplicate_groups, pair_delta_files
 from .publish import package_inputs, current_conventions_id
 from .layers import build_layers
 from measurement_config import safe_filename
@@ -114,7 +114,7 @@ def _check_output(out):
     try:
         metadata = json.loads((generation / "zoo.json").read_text())
         if (generation.is_symlink() or metadata.get("publication_protocol") != _PROTOCOL
-                or metadata.get("zoo_version") != ZOO_VERSION):
+                or metadata.get("zoo_version") not in READABLE_ZOO_VERSIONS):
             raise ValueError("Unowned generation")
     except (OSError, ValueError) as error:
         raise ValueError("Output does not point to an owned complete generation") from error
@@ -197,6 +197,9 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
             shared_tensor_edges(tables["views"], duplicate_groups(tables["views"])),
             similarity_edges(stage, tables["models"], root, null=calibration),
             external=lineage_edges)
+        supplements = pair_delta_files(tables["models"], root)
+        inputs.extend(path for path, _ in supplements)
+        tables["lineage"] = with_pair_delta_evidence(tables["lineage"], supplements)
         for name in _COLUMNS:
             pq.write_table(_arrow(name, tables[name]), stage / f"{name}.parquet")
         metadata = dict(zoo_version=ZOO_VERSION, build_time=datetime.now(timezone.utc).isoformat(),

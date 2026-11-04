@@ -17,7 +17,7 @@ from safetensors import safe_open
 from evidence import EVIDENCE_VERSION
 from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
                                 measurement_config, safe_filename)
-from .schema import model_key
+from .schema import model_key, split_key
 
 
 _IDENTITY = {"repo_id", "requested_revision", "source_model", "base_model_relation", "loader_scenario", "runtime"}
@@ -168,8 +168,16 @@ def _link_or_copy(source, destination):
 
 
 def _select_candidate(run, model_id):
+    try:
+        split_key(model_id)
+    except ValueError:
+        paths = _manifest_files(run)
+    else:
+        safe = safe_filename(model_id)
+        path = Path(run) / "evidence" / safe / (safe + ".manifest.json")
+        paths = [path] if path.is_file() else []
     found = []
-    for path in _manifest_files(run):
+    for path in paths:
         manifest = json.loads(path.read_text())
         key = model_key(manifest["repo_id"], manifest["revision"])
         if model_id in (manifest["repo_id"], key):

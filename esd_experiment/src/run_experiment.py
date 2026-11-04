@@ -340,6 +340,7 @@ def parse_args():
     parser.add_argument("--trust_remote_code", action="store_true", help="Allow reviewed repository Python code to execute in workers (off by default)")
     
     # GPU configuration
+    parser.add_argument("--cpu_threads_per_gpu", type=lambda value: value if value == "auto" else int(value), default="auto")
     parser.add_argument("--gpus", nargs="+", type=int, default=[0], help="List of GPU indices to use (default: [0])")
     parser.add_argument("--num_gpus_per_job", type=int, default=1, help="Number of GPUs needed per model analysis job (default: 1)")
     parser.add_argument("--max_concurrent_jobs", type=int, default=1, help="Maximum model workers at once (default: 1; increase explicitly after reviewing resource costs)")
@@ -381,6 +382,8 @@ def parse_args():
     add_evidence_arguments(parser)
     args = parser.parse_args()
     validate_evidence_arguments(args, parser)
+    if args.cpu_threads_per_gpu != "auto" and args.cpu_threads_per_gpu < 0:
+        parser.error("--cpu_threads_per_gpu must be auto or nonnegative")
     for key in ("max_worker_ram_gib", "max_worker_cache_gib", "max_weight_gib"):
         if not math.isfinite(getattr(args, key)) or getattr(args, key) < 0:
             parser.error(f"--{key} must be finite and >= 0")
@@ -922,6 +925,7 @@ def create_runtime_config(args, config_path):
     """
     config = {
         "available_gpus": args.gpus,
+        "cpu_threads_per_gpu": getattr(args, "cpu_threads_per_gpu", "auto"),
         "max_checks": args.max_check,
         "memory_threshold_mb": args.gpu_memory_threshold,
         "max_concurrent_jobs": args.max_concurrent_jobs,

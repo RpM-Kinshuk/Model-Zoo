@@ -194,6 +194,12 @@ Physical GPU IDs become local CUDA IDs through `CUDA_VISIBLE_DEVICES`.
 The dispatcher reserves devices within this run. Idle checks are cooperative;
 another user's job can start afterward.
 
+`--cpu_threads_per_gpu auto` divides CPU cores by the physical GPU count and
+multiplies that budget by the GPUs assigned to each worker. The dispatcher sets
+OMP, MKL, OpenBLAS and NumExpr thread limits before launching the worker. Set an
+integer to override, or `0` to preserve the inherited environment. Editing this
+field in `gpu_config.json` affects subsequent workers.
+
 `--gpu_memory_threshold` changes the used-memory threshold and `--max_check`
 changes the number of consecutive checks. Model mode cost-sorts matrices and
 uses one fixed-device thread per compute GPU. It prefers visible devices not

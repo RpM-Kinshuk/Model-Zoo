@@ -22,7 +22,7 @@ COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COL
 def test_build_writes_all_tables(built_zoo):
     t = open_tables(built_zoo)
     assert set(t) == {"models", "views", "coverage", "lineage", "scores", "predictions", "layers"}
-    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "0"
+    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "1"
     assert list((built_zoo / "retrieval").glob("*.npy"))
 
 

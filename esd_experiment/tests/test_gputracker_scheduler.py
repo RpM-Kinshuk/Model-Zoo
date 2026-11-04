@@ -674,3 +674,32 @@ def test_gpu_idle_checks_restart_after_query_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(gputracker_module.time, "sleep", lambda _: None)
     assert dispatcher.get_free_gpus(1) == [0]
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("budget,want", [("auto", "48"), (3, "6"), (0, "kept")])
+def test_cpu_thread_budget_applied_once_per_worker(tmp_path, monkeypatch, budget, want):
+    dispatcher = _dispatcher(tmp_path, monkeypatch)
+    dispatcher.config["cpu_threads_per_gpu"] = budget
+    monkeypatch.setattr(os, "cpu_count", lambda: 96)
+    monkeypatch.setattr(gputracker_module.gpustat.GPUStatCollection, "new_query", lambda: SimpleNamespace(gpus=[None] * 4))
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        monkeypatch.setenv(name, "kept")
+    captured = []
+    process = SimpleNamespace(pid=123456, poll=lambda: 0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: captured.append(kwargs["env"]) or process)
+    thread = ChildThread("budget", 1, [0, 1], WorkerJob("true"), _Logger(), dispatcher)
+    monkeypatch.setattr(thread, "_wait_for_process", lambda *args: (0, None, None))
+    monkeypatch.setattr(thread, "_group_running", lambda *args: False)
+    thread.run()
+    assert len(captured) == 1
+    assert all(captured[0][name] == want for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"))
+
+
+def test_invalid_thread_budget_reload_retains_previous(tmp_path, monkeypatch):
+    dispatcher = _dispatcher(tmp_path, monkeypatch)
+    Path(dispatcher.config_path).write_text(json.dumps(dict(cpu_threads_per_gpu=3)))
+    assert dispatcher.load_config()
+    previous = dispatcher.config.copy()
+    Path(dispatcher.config_path).write_text(json.dumps(dict(cpu_threads_per_gpu=-1)))
+    assert not dispatcher.load_config()
+    assert dispatcher.config == previous

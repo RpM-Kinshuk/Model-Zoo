@@ -151,3 +151,10 @@ def test_atomic_replacement_during_publish_cannot_mislabel_settings(package_run,
     with pytest.raises(ValueError, match="changed|inconsistent"):
         publish_package(r.run, "lab/tiny", r.packages, r.root)
     assert not list(r.packages.rglob("package.json"))
+
+
+def test_pinned_publication_does_not_scan_other_models(package_run, monkeypatch):
+    import zoo.publish as module
+    r = package_run
+    monkeypatch.setattr(module, "_manifest_files", lambda run: pytest.fail("global manifest scan for a pinned key"))
+    assert publish_package(r.run, "lab/tiny@" + r.manifest["revision"], r.packages, r.root).is_dir()
