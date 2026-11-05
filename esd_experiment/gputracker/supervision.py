@@ -134,6 +134,7 @@ class WorkerJob:
     cache_limit_gib: float = 0
     stage_timeout_seconds: dict[str, int] | None = None
     prefetch_files: tuple = ()
+    cpu_only: bool = False
 
 
 @dataclass

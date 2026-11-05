@@ -981,21 +981,18 @@ def _main():
             if evidence_enabled and checkpoint is None:
                 current_stage = "fingerprint"
                 heartbeat.update(stage=current_stage)
-                try:
-                    if evidence_error is not None:
-                        raise evidence_error
-                    if sidecar is not None:
-                        if not sidecar_started:
-                            sidecar.start()
-                        counts = sidecar.finish(metrics_results(metrics), loaded_block(model),
-                                                lambda items: measure_tensors(items, measurement), measurement)
-                        folder = evidence_dir(output_dir, repo_id, revision)
-                        _write_json_atomic(folder / "evidence.json", dict(counts, settings=evidence_settings(args), stratum=args.stratum))
-                        coverage["evidence"] = counts
-                        _write_json_atomic(output_dir / "logs/coverage" / f"{safe_filename(display_name)}.json", coverage)
-                        evidence_finished = True
-                except BaseException:
-                    raise
+                if evidence_error is not None:
+                    raise evidence_error
+                if sidecar is not None:
+                    if not sidecar_started:
+                        sidecar.start()
+                    counts = sidecar.finish(metrics_results(metrics), loaded_block(model),
+                                            lambda items: measure_tensors(items, measurement), measurement)
+                    folder = evidence_dir(output_dir, repo_id, revision)
+                    _write_json_atomic(folder / "evidence.json", dict(counts, settings=evidence_settings(args), stratum=args.stratum))
+                    coverage["evidence"] = counts
+                    _write_json_atomic(output_dir / "logs/coverage" / f"{safe_filename(display_name)}.json", coverage)
+                    evidence_finished = True
 
             current_stage = "save"
             heartbeat.update(stage=current_stage)

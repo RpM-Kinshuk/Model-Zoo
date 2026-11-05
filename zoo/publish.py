@@ -275,6 +275,10 @@ def package_inputs(packages, selected=None):
         t1 = conventions()
         t1["evidence_tier"] = "t1_only"
         accepted.add(conventions_id(t1))
+        # Streaming T1 may use a supervisor-assigned GPU even when full-mode
+        # evidence defaults to CPU. Keep this policy explicit in its package.
+        t1["evidence"] = dict(t1["evidence"], device="gpu")
+        accepted.add(conventions_id(t1))
     for path in sorted(Path(packages).rglob("package.json")):
         # Private publication stages are invisible to readers.
         if any(part.startswith(".") for part in path.relative_to(packages).parts):
@@ -308,7 +312,13 @@ def package_inputs(packages, selected=None):
             index = identities[key]
             previous = rows[index][1]
             if previous["kind"] == meta["kind"]:
-                raise ValueError("Duplicate package identity and tier")
+                old_device = previous["conventions"]["evidence"]["device"]
+                new_device = meta["conventions"]["evidence"]["device"]
+                if meta["kind"] != "t1_only" or old_device == new_device:
+                    raise ValueError("Duplicate package identity and tier")
+                if new_device == "cpu":
+                    rows[index] = (path.parent, meta)
+                continue
             if meta["kind"] == "full":
                 rows[index] = (path.parent, meta)
         else:

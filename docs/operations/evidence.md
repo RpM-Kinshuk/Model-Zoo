@@ -266,3 +266,13 @@ Full-mode evidence now writes version2, adding explicit unrequested/unavailable
 parent-delta statuses without changing sketch, block-hash or spectrum numerics.
 Version1 fingerprints remain readable. Candidate-pair deltas and their CLI are
 covered in the [zoo guide](zoo.md#candidate-pair-delta-pass).
+
+
+Parent cache operations publish complete files atomically. Hot reads do not
+wait for the eviction writer; unavailable/stale cache files are misses. Writers
+still serialize eviction and scan the cache directory, so insertion remains
+linear in the entry count. Use a local scratch parent-cache path for throughput;
+large shared caches need a further indexing/sharding change before a census.
+The Nov5 audit measured same-host cross-process locking on the actual NFS4 mount;
+cross-node locking remains unverified. See the
+[gap audit](../../analysis_runs/validation/gap_audit_20261105/REPORT.md).

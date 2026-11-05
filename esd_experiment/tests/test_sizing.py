@@ -124,6 +124,8 @@ def test_oversized_models_get_real_t1_package(tmp_path, monkeypatch):
     monkeypatch.setenv("ZOO_DATA", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path)])
     args = runner.parse_args()
+    args.oversized_device = "cpu"
+    args.evidence_device = "gpu"  # T1 device must override the full-mode sidecar setting.
     folder = tmp_path / "evidence" / runner.safe_filename(manifest["repo_id"] + "@" + manifest["revision"])
     from evidence.manifest import write_manifest
     write_manifest(manifest, folder)
@@ -132,14 +134,15 @@ def test_oversized_models_get_real_t1_package(tmp_path, monkeypatch):
     parent_folder = tmp_path / "evidence" / runner.safe_filename(parent["repo_id"] + "@" + parent["revision"])
     write_manifest(parent, parent_folder)
     models = pd.DataFrame([dict(model_id=manifest["repo_id"], revision_norm=manifest["revision"], reason="too_large_for_full_mode", source_model=parent["repo_id"] + "@" + parent["revision"])])
-    runner.measure_oversized(models, tmp_path, args, logging.getLogger(__name__))
+    runner.extract_row_block_evidence(models, tmp_path, args, logging.getLogger(__name__))
     result = pd.read_csv(tmp_path / "oversized_models.csv")
     assert result.t1_status.tolist() == ["published"]
     packages = list((tmp_path / "packages").rglob("package.json"))
     assert len(packages) == 1 and json.loads(packages[0].read_text())["kind"] == "t1_only"
+    assert json.loads(packages[0].read_text())["conventions"]["evidence"]["device"] == "cpu"
     # Resume uses the compatible block fingerprint; it does not reread weights.
     monkeypatch.setattr("evidence.fingerprint.fingerprint_model", lambda *args, **kw: pytest.fail("repeated T1 measurement"))
-    runner.measure_oversized(models, tmp_path, args, logging.getLogger(__name__))
+    runner.extract_row_block_evidence(models, tmp_path, args, logging.getLogger(__name__))
     assert pd.read_csv(tmp_path / "oversized_models.csv").t1_status.tolist() == ["published"]
 
 
@@ -174,7 +177,7 @@ def test_oversized_stop_does_not_start_evidence(tmp_path, monkeypatch):
     import run_experiment as runner
     import evidence_bridge
     monkeypatch.setattr(evidence_bridge, "create_sidecar", lambda *args: pytest.fail("started after stop"))
-    runner.measure_oversized(pd.DataFrame([dict(model_id="org/a")]), tmp_path, SimpleNamespace(),
+    runner.run_oversized_evidence_jobs(pd.DataFrame([dict(model_id="org/a")]), tmp_path, SimpleNamespace(),
                              logging.getLogger(__name__), stopped=lambda: True)
     assert pd.read_csv(tmp_path / "oversized_models.csv").t1_status.tolist() == ["interrupted"]
 
@@ -204,3 +207,69 @@ def test_prefetch_load_timeout_zero_preserves_disabled_limit(tmp_path, monkeypat
     monkeypatch.setattr(prefetch.subprocess, "Popen", lambda *args, **kw: Process())
     job = WorkerJob("true", prefetch_files=(("org/m", "a"*40, "model.safetensors", 10),), stage_timeout_seconds={"load": 0})
     prefetch._download(job, tmp_path / "cache", threading.Event())
+
+
+def test_oversized_jobs_use_supervision_without_prefetch(tmp_path, monkeypatch):
+    import pandas as pd
+    import run_experiment as runner
+    calls = []
+    class Dispatch:
+        def __init__(self, **kw):
+            calls.append(kw)
+            for job in kw['bash_command_list']:
+                assert job.cpu_only and job.ram_limit_gib >= 16
+                assert 'row_block_worker.py' in job.command and not job.prefetch_files
+        def start(self):
+            pass
+        def wait_for_completion(self):
+            for job in calls[0]['bash_command_list']:
+                Path(job.terminal_status_path).write_text('{"status":"success","t1_status":"published"}')
+    monkeypatch.setattr(runner, 'DispatchThread', Dispatch)
+    args = SimpleNamespace(oversized_t1=True, evidence=True, oversized_device='cpu', max_concurrent_jobs=2,
+                           worker_cache_root=str(tmp_path/'cache'), max_worker_ram_gib='auto', max_worker_cache_gib='auto', stage_timeout_seconds='auto')
+    dispatcher = SimpleNamespace(error=None, shutdown_event=threading.Event(), drain_event=threading.Event())
+    rows = pd.DataFrame([dict(model_id='org/a', revision_norm='a'*40), dict(model_id='org/b', revision_norm='b'*40)])
+    runner.run_oversized_evidence_jobs(rows, tmp_path, args, logging.getLogger(__name__), dispatcher=dispatcher)
+    assert len(calls[0]['bash_command_list']) == 2
+    assert calls[0]['prefetch_models'] == 0
+    assert pd.read_csv(tmp_path/'oversized_models.csv').t1_status.tolist() == ['published','published']
+
+
+def test_oversized_cpu_workers_publish_through_real_supervisor(tmp_path, monkeypatch):
+    import pandas as pd
+    import torch
+    from safetensors.torch import save_file
+    from evidence.hub import HubReader
+    from evidence.manifest import build_manifest, write_manifest
+    import run_experiment as runner
+    from gputracker.gputracker import GPUDispatcher
+    monkeypatch.setattr(GPUDispatcher, '_instance', None)
+    monkeypatch.setenv('ZOO_DATA', str(tmp_path))
+    monkeypatch.setenv('HF_HUB_OFFLINE', '1')
+    monkeypatch.setattr(sys, 'argv', ['runner','--model_list','unused.csv','--output_dir',str(tmp_path),
+                                    '--oversized_device','cpu','--max_concurrent_jobs','2','--cpu_threads_per_gpu','1',
+                                    '--worker_cache_root',str(tmp_path/'cache')])
+    args = runner.parse_args()
+    rows = []
+    for index in range(2):
+        source = tmp_path / f'source{index}'
+        source.mkdir()
+        save_file({'linear.weight': torch.randn(32, 16)}, source/'model.safetensors')
+        manifest = build_manifest(str(source), 'main', HubReader(), None)
+        folder = tmp_path/'evidence'/runner.safe_filename(manifest['repo_id']+'@'+manifest['revision'])
+        write_manifest(manifest, folder)
+        rows.append(dict(model_id=manifest['repo_id'],revision_norm=manifest['revision']))
+    runner.run_oversized_evidence_jobs(pd.DataFrame(rows), tmp_path, args, logging.getLogger(__name__))
+    result = pd.read_csv(tmp_path/'oversized_models.csv')
+    assert result.t1_status.tolist() == ['published','published']
+    assert len(list((tmp_path/'packages').rglob('package.json'))) == 2
+    assert not list((tmp_path/'cache').rglob('hub'))  # private caches removed after process exit
+
+
+def test_cpu_only_queue_remains_bounded_with_gpu_limited_config(tmp_path):
+    from gputracker.gputracker import DispatchThread, WorkerJob
+    dispatcher = SimpleNamespace(config={'max_concurrent_jobs': None},lock=threading.Lock())
+    thread = DispatchThread('cpu', [WorkerJob('true',cpu_only=True)], logging.getLogger(__name__),
+                            dispatcher, max_concurrent_jobs=2)
+    active = [SimpleNamespace(is_alive=lambda: True)] * 2
+    assert not thread._has_job_slot(active)

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Tuple
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+from uuid import uuid4
 
 # Add shells directory to path for gputracker
 SCRIPT_DIR = Path(__file__).parent
@@ -392,6 +393,7 @@ def parse_args():
     
     parser.add_argument("--prefetch_models", type=lambda v: v if v == "auto" else int(v), default="auto", help="Models to download ahead; auto uses GPU pool size, 0 disables")
     parser.add_argument("--prefetch_max_gib", type=float, default=64)
+    parser.add_argument("--oversized_device", choices=["auto", "cpu"], default="auto", help="Streaming T1 device; auto uses one supervisor-assigned GPU per job")
     parser.add_argument("--oversized_t1", action=argparse.BooleanOptionalAction, default=True)
     add_evidence_arguments(parser)
     args = parser.parse_args()
@@ -1057,15 +1059,74 @@ def size_models(models, args):
     return pd.DataFrame(ready, columns=list(models.columns) + (["_job_resources"] if "_job_resources" not in models else [])), pd.DataFrame(oversized)
 
 
-def measure_oversized(models, output_dir, args, logger, stopped=lambda: False):
+def run_oversized_evidence_jobs(models, output_dir, args, logger, stopped=lambda: False, dispatcher=None):
+    """Schedule supervised row-block extraction for models too large to load."""
+    if models.empty:
+        return
+    if stopped() or not getattr(args, "oversized_t1", True) or not getattr(args, "evidence", True):
+        status = "interrupted" if stopped() else "disabled"
+        models.assign(t1_status=status).to_csv(output_dir / "oversized_models.csv", index=False)
+        return
+    job_directory = output_dir / "logs" / ("oversized-" + uuid4().hex)
+    job_directory.mkdir(parents=True)
+    config_path = output_dir / "gpu_config.json"
+    if dispatcher is None:
+        create_runtime_config(args, config_path)
+        dispatcher = GPUDispatcher(str(config_path))
+    jobs = []
+    cpu_only = getattr(args, "oversized_device", "auto") == "cpu"
+    # Zero means inherit the supervisor's live limit; automatic streaming
+    # budgets cover evidence buffers and metadata, without full-model storage.
+    ram_limit_gib = 0
+    if getattr(args, "max_worker_ram_gib", "auto") == "auto":
+        ram_limit_gib = max(16, getattr(args, "evidence_max_inflight_gib", 2) + 4)
+    cache_limit_gib = 2 if getattr(args, "max_worker_cache_gib", "auto") == "auto" else 0
+    for _, row in models.iterrows():
+        worker_id = f"row-block-{len(jobs):06d}"
+        request_path = job_directory / (worker_id + ".request.json")
+        result_path = job_directory / (worker_id + ".json")
+        model_options = {key: _normalize_text(row.get(key, ""))
+                         for key in ("model_id", "revision_norm", "source_model", "stratum")}
+        request_path.write_text(json.dumps(dict(options=vars(args), row=model_options, output_dir=str(output_dir)),
+                                           default=str, allow_nan=False))
+        command = shlex.join([sys.executable, str(SCRIPT_DIR / "row_block_worker.py"),
+                              "--request", str(request_path), "--result", str(result_path)])
+        jobs.append(WorkerJob(command, worker_id=worker_id, model_id=model_options["model_id"],
+                              terminal_status_path=str(result_path), num_gpus=1, cpu_only=cpu_only,
+                              ram_limit_gib=ram_limit_gib, cache_limit_gib=cache_limit_gib))
+    dispatch_thread = DispatchThread(name="Oversized row-block evidence", bash_command_list=jobs,
+                                    logger=logger, dispatcher=dispatcher, config_path=str(config_path),
+                                    max_concurrent_jobs=getattr(args, "max_concurrent_jobs", 1),
+                                    state_dir=output_dir / "logs", run_id=job_directory.name,
+                                    cache_root=getattr(args, "worker_cache_root", None), prefetch_models=0)
+    dispatch_thread.start()
+    dispatch_thread.wait_for_completion()
+    for index, job in zip(models.index, jobs):
+        result_path = Path(job.terminal_status_path)
+        outcome = (json.loads(result_path.read_text()) if result_path.is_file()
+                   else dict(status="interrupted", reason="not_started"))
+        models.loc[index, "t1_status"] = outcome.get("t1_status") or ("failed" if outcome.get("status") == "failed" else "interrupted")
+        if outcome.get("reason"):
+            models.loc[index, "t1_error"] = outcome["reason"]
+    models.to_csv(output_dir / "oversized_models.csv", index=False)
+    if dispatcher.error:
+        raise RuntimeError(dispatcher.error)
+
+
+def extract_row_block_evidence(models, output_dir, args, logger, stopped=lambda: False, status_path=None):
+    """Extract and publish row-block evidence without loading a whole model.
+
+    Used inside each supervised row-block worker; T1 is the artifact tier name.
+    """
+    status_path = Path(status_path) if status_path else output_dir / "oversized_models.csv"
     if models.empty:
         return
     if stopped():
-        models.assign(t1_status="interrupted").to_csv(output_dir / "oversized_models.csv", index=False)
+        models.assign(t1_status="interrupted").to_csv(status_path, index=False)
         return
     if not getattr(args, "oversized_t1", True) or not getattr(args, "evidence", True):
         models = models.assign(t1_status="disabled")
-        models.to_csv(output_dir / "oversized_models.csv", index=False)
+        models.to_csv(status_path, index=False)
         return
     from types import SimpleNamespace
     from evidence_bridge import create_sidecar, evidence_settings
@@ -1073,57 +1134,59 @@ def measure_oversized(models, output_dir, args, logger, stopped=lambda: False):
     from evidence.hub import HubReader
     from evidence.manifest import write_manifest
     from evidence.cli import _complete
-    import torch
+    from evidence.delta import _compute_device
     class InterruptibleReader(HubReader):
         def read(self, *read_args):
             if stopped():
                 raise InterruptedError("Oversized T1 interrupted")
             return super().read(*read_args)
 
-    previous_threads = torch.get_num_threads()
-    torch.set_num_threads(min(8, previous_threads))
-    try:
-        for index, row in models.iterrows():
+    for index, row in models.iterrows():
+        if stopped():
+            break
+        try:
+            options = SimpleNamespace(**vars(args))
+            options.cache_self = False
+            device = _compute_device(getattr(args, "oversized_device", "auto"))
+            options.evidence_device = "gpu" if device.type == "cuda" else "cpu"
+            options.source_model = _normalize_text(row.get("source_model", ""))
+            options.stratum = _normalize_text(row.get("stratum", ""))
+            repo, revision = identity(row["model_id"], _normalize_text(row.get("revision_norm", "")))
+            sidecar = create_sidecar(options, output_dir, repo, revision)
+            write_manifest(sidecar.manifest, sidecar.out_dir)
+            path = sidecar.out_dir / (safe_filename(f"{repo}@{revision}") + ".t1.fingerprint.safetensors")
+            parent_identity = {key: sidecar.parent[key] for key in ("repo_id", "revision")} if sidecar.parent else None
+            complete = _complete(path, sidecar.manifest, "t1", sidecar.sketch_k, parent=parent_identity)
+            if complete:
+                fp = load_fingerprint(path)
+                sampled = any(item.get("reason") == "expert_not_sampled" for item in fp.coverage)
+                complete = not (sidecar.all_experts and sampled)
+                summary = sidecar.out_dir / "evidence.json"
+                if summary.is_file():
+                    complete = complete and json.loads(summary.read_text()).get("settings", {}).get("device", "cpu") == options.evidence_device
+                elif options.evidence_device != "cpu":
+                    complete = False
+            if not complete:
+                fingerprint_model(sidecar.manifest, InterruptibleReader(local_cache=True), "t1", sidecar.out_dir,
+                                  parent=sidecar.parent, parent_cache=sidecar.block_cache,
+                                  sketch_k=sidecar.sketch_k, all_experts=sidecar.all_experts,
+                                  cache_self=sidecar.cache_self, compute_device=str(device),
+                                  prefetch_groups=2, prefetch_bytes=max(1, int(args.evidence_max_inflight_gib * 1024**3)//2))
             if stopped():
-                break
-            try:
-                options = SimpleNamespace(**vars(args))
-                options.cache_self = False
-                options.source_model = _normalize_text(row.get("source_model", ""))
-                options.stratum = _normalize_text(row.get("stratum", ""))
-                repo, revision = identity(row["model_id"], _normalize_text(row.get("revision_norm", "")))
-                sidecar = create_sidecar(options, output_dir, repo, revision)
-                write_manifest(sidecar.manifest, sidecar.out_dir)
-                path = sidecar.out_dir / (safe_filename(f"{repo}@{revision}") + ".t1.fingerprint.safetensors")
-                parent_identity = {key: sidecar.parent[key] for key in ("repo_id", "revision")} if sidecar.parent else None
-                complete = _complete(path, sidecar.manifest, "t1", sidecar.sketch_k, parent=parent_identity)
-                if complete:
-                    fp = load_fingerprint(path)
-                    sampled = any(item.get("reason") == "expert_not_sampled" for item in fp.coverage)
-                    complete = not (sidecar.all_experts and sampled)
-                if not complete:
-                    fingerprint_model(sidecar.manifest, InterruptibleReader(local_cache=True), "t1", sidecar.out_dir,
-                                      parent=sidecar.parent, parent_cache=sidecar.block_cache,
-                                      sketch_k=sidecar.sketch_k, all_experts=sidecar.all_experts,
-                                      cache_self=sidecar.cache_self, compute_device="cpu")
-                if stopped():
-                    raise InterruptedError("Oversized T1 interrupted")
-                (sidecar.out_dir / "evidence.json").write_text(json.dumps(dict(settings=evidence_settings(options), stratum=options.stratum, gaps=0)))
-                publish_model(options, output_dir, row["model_id"], revision)
-                models.loc[index, "t1_status"] = "published" if getattr(args, "publish", False) else "measured"
-                logger.info(f"Oversized T1 ready: {repo}@{revision}")
-            except InterruptedError:
-                models.loc[index, "t1_status"] = "interrupted"
-                models.to_csv(output_dir / "oversized_models.csv", index=False)
-                return
-            except Exception as exc:
-                models.loc[index, "t1_status"] = "failed"
-                models.loc[index, "t1_error"] = f"{type(exc).__name__}: {exc}"
-                logger.warning(f"Oversized T1 failed: {row['model_id']}: {type(exc).__name__}")
-            models.to_csv(output_dir / "oversized_models.csv", index=False)
-    finally:
-        torch.set_num_threads(previous_threads)
-
+                raise InterruptedError("Oversized T1 interrupted")
+            (sidecar.out_dir / "evidence.json").write_text(json.dumps(dict(settings=evidence_settings(options), stratum=options.stratum, gaps=0, oversized_device=getattr(args, "oversized_device", "auto"))))
+            publish_model(options, output_dir, row["model_id"], revision)
+            models.loc[index, "t1_status"] = "published" if getattr(args, "publish", False) else "measured"
+            logger.info(f"Oversized T1 ready: {repo}@{revision}")
+        except InterruptedError:
+            models.loc[index, "t1_status"] = "interrupted"
+            models.to_csv(status_path, index=False)
+            return
+        except Exception as exc:
+            models.loc[index, "t1_status"] = "failed"
+            models.loc[index, "t1_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"Oversized T1 failed: {row['model_id']}: {type(exc).__name__}")
+        models.to_csv(status_path, index=False)
 
 def main():
     """Main experiment runner."""
@@ -1239,7 +1302,7 @@ def main():
     except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"Cannot size workers; no jobs started: {exc}") from exc
     if len(model_df) == 0:
-        measure_oversized(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set())
+        run_oversized_evidence_jobs(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
         logger.info("No models to process (all completed, skipped, or blocked by preflight)")
         outcomes = collect_run_outcomes(output_dir, measurement_config(args), evidence=args.evidence, evidence_options=args)
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
@@ -1284,7 +1347,7 @@ def main():
         raise SystemExit(1)
     
     logger.info("=" * 80)
-    measure_oversized(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set())
+    run_oversized_evidence_jobs(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
     if dispatcher.shutdown_event.is_set():
         raise SystemExit(1)
     logger.info("Experiment completed!")

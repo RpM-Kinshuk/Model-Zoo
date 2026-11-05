@@ -58,7 +58,7 @@ together; ordinary finetune lineage hints do not add a second model to the
 budget. Standard safetensors files are preferred over PyTorch files. Sharded
 checkpoints use their small index JSON, not all similarly named files in the
 repository. The default `--max_weight_gib auto` reviews sizes/access during preparation and
-uses pool capacity at launch. Oversized jobs get a later CPU T1 pass; zero
+uses pool capacity at launch. Oversized jobs get a later supervised streaming T1 pass (one assigned GPU per job, explicit CPU opt-out); zero
 disables the size cap, not missing-file/size/access checks. Gated/private repositories
 need verified read access. These checks do not validate tensor layouts, predict
 RAM/VRAM requirements, or establish quantization support. Runtime integrity and

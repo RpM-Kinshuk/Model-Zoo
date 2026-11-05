@@ -2,13 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-11-04):** Tasks1–8 implemented (owner checkpoint0738879).
-Task9 quick subset now measured:3real local14M models,CPU/GPU parity,
-Smol135T1 and cache/build timings. Correctness passes; tiny-model warm GPU
-processing overhead3.68–5.62x misses the proposed10%target. SmolT1 GPU1.98x
-faster than CPU. Broader planned runs remain outstanding. No product changes
-or sizing-rule tuning in this benchmark turn. Results:
-`analysis_runs/validation/full_mode_quick_20261104/REPORT.md`.
+**Status (2026-11-05):** Owner checkpointa796b06. Gap audit restores
+supervised/parallel streaming T1 for oversized rows (one assigned GPU per job,
+CPU opt-out), improves cache hot-read concurrency/scan cost and adds explicit
+per-change STATUS rows. Three-checkpoint fresh CPU/GPU parity passes, including
+26nonzero-rank delta views. Same-card GPU evidence contention is measured;
+CPU default retained.20-model/two-GPU throughput remains unmeasured because
+no pair of idle GPUs passed bounded admission; RAM/timeouts remain initial
+heuristics. Details: `analysis_runs/validation/gap_audit_20261105/REPORT.md`.
 Progress ledger: `.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
 
 **Agents: never run commit steps.** Leave changes uncommitted and record each
@@ -666,3 +667,43 @@ measurable benefit; no pipeline redesign or weakened integrity checks.
 0.491→0.073s (85%less). Three cold-operator sidecar pairs:2.083→1.685s (19%less).
 Exact stored-value/fingerprint parity;80focused tests pass. No claim that this
 alone meets the10%GPU-overhead target. See the benchmark report for raw samples.
+
+
+### Nov5 observed-gap corrections
+
+- Oversized rows use independent WorkerJobs with the existing process supervisor,
+  configured concurrency, RAM/cache caps, heartbeat/stage limits and private-cache
+  ownership. Streaming GPU by default, `--oversized_device cpu` opt-out. No full
+  checkpoint prefetch. The earlier inline-CPU amendment was an implementation
+  simplification that lost parallelism/supervision; this corrects it.
+- T1 package settings record the resolved T1 device, independent of the full-mode
+  `--evidence_device` flag. Default build accepts current full CPU-sidecar plus
+  CPU/GPU T1 profiles; it prefers full, then CPU T1 when both T1 variants exist.
+- Parent-cache reads use complete atomic inodes without the writer lock; stale
+  filesystem errors are cache misses. Writers use one stat snapshot and avoid
+  sorting below the cap. Global byte cap/LRU eviction remain; insertions still
+  scan O(N) and need further indexing/sharding for large deployments.
+- Exact nearest retrieval is O(N) per query within its architecture group;
+  all-model similarity construction is quadratic across large groups.
+  Shared-tensor lineage currently considers all model pairs globally. No
+ 100k-readiness claim or new approximate index is introduced.
+- Evidence-only retries retain full-model loading: durable metrics have no
+  loaded-block hashes to prove safe reuse from a later range read. Publication
+  retries already skip loading. A new provenance protocol is outside the
+  owner's minimal-change condition. The worker's no-op exception wrapper was
+  removed; cancellation/rollback remains covered.
+- No numerical/schema version change in these fixes; existing formats are logged
+  separately in the handoff. Native five-model plain run and larger planned
+  throughput/public-base runs remain pending; three real local CPU/GPU cases
+  replace a97-model run for this quick parity check.
+
+
+### Readability pass (owner request, Nov5)
+
+Operational names describe purpose: `row_block_worker.py`,
+`run_oversized_evidence_jobs` (supervision), and `extract_row_block_evidence`
+(extraction/publication). Request/result paths, model options and outcomes have
+explicit local names. Existing artifact tiers, CLI flags and CSV fields retain
+their spelling. Root AGENTS.md records these clarity conventions. Rename and
+subprocess integration tests cover all updated call sites; no numerical or
+format changes.

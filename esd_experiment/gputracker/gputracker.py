@@ -270,11 +270,16 @@ class DispatchThread(threading.Thread):
         threading.Thread.__init__(self)
         self.name = name
         self.daemon = True
-        self.bash_command_list = bash_command_list
+        self.bash_command_list = list(bash_command_list)
         self.logger = logger
         self.dispatcher = dispatcher
         self.num_gpus_needed = num_gpus_needed
         self.max_concurrent_jobs = max_concurrent_jobs
+        self.cpu_job_limit = None
+        has_cpu_jobs = any(isinstance(job, WorkerJob) and job.cpu_only for job in self.bash_command_list)
+        if has_cpu_jobs:
+            default_cpu_workers = min(8, max(1, (os.cpu_count() or 1) // 8))
+            self.cpu_job_limit = max_concurrent_jobs or default_cpu_workers
         self.state_tracker = None
         self.state_options = dict(log_dir=state_dir, run_id=run_id, logger=logger, cache_root=cache_root) if state_dir else None
         self.prefetch_models, self.prefetch_max_gib = prefetch_models, prefetch_max_gib
@@ -360,6 +365,8 @@ class DispatchThread(threading.Thread):
     def _has_job_slot(self, threads):
         max_concurrent_jobs = self._current_max_concurrent_jobs()
         if max_concurrent_jobs is None:
+            max_concurrent_jobs = self.cpu_job_limit
+        if max_concurrent_jobs is None:
             return True
         return sum(1 for thread in threads if thread.is_alive()) < max_concurrent_jobs
 
@@ -404,7 +411,7 @@ class DispatchThread(threading.Thread):
                     job = self.prefetcher.claim(job, self._progress, lambda: self.dispatcher.shutdown_event.is_set() or self.dispatcher.drain_event.is_set())
                 if self.dispatcher.shutdown_event.is_set() or self.dispatcher.drain_event.is_set():
                     break
-                cuda_devices = self.dispatcher.get_free_gpus(job.num_gpus or self.num_gpus_needed, progress=self._progress)
+                cuda_devices = [] if job.cpu_only else self.dispatcher.get_free_gpus(job.num_gpus or self.num_gpus_needed, progress=self._progress)
                 if cuda_devices is None:
                     break
                 try:
@@ -623,7 +630,7 @@ class ChildThread(threading.Thread):
         threads = cpu_thread_budget(budget)
         if threads:
             for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-                env[name] = str(threads * len(self.cuda_devices))
+                env[name] = str(threads * max(1, len(self.cuda_devices)))
         proc = None
         record = None
         log_handle = None

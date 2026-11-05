@@ -16,8 +16,10 @@ This reads `$ZOO_DATA/packages` under current measurement conventions and writes
 `$ZOO_DATA/builds/current`. `--packages PATH` selects another package tree;
 `--conventions ID` selects other settings. The build summary counts packages
 skipped for different conventions. Default T1-only and full packages use distinct
-tier convention IDs; the default build accepts both and prefers full evidence
-when both exist for the same model. This preserves preliminary packages during
+tier convention IDs; the default build accepts full CPU-sidecar packages and
+CPU/GPU streaming T1 packages, and prefers full evidence
+when both exist for the same model. When both CPU and GPU T1-only packages exist, it selects
+the CPU package deterministically. This preserves preliminary packages during
 later full-mode upgrades.
 
 Full-mode workers publish packages automatically. Set `--packages_root PATH`,

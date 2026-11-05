@@ -158,3 +158,22 @@ def test_pinned_publication_does_not_scan_other_models(package_run, monkeypatch)
     r = package_run
     monkeypatch.setattr(module, "_manifest_files", lambda run: pytest.fail("global manifest scan for a pinned key"))
     assert publish_package(r.run, "lab/tiny@" + r.manifest["revision"], r.packages, r.root).is_dir()
+
+
+def test_default_build_accepts_gpu_t1_and_prefers_cpu_when_both_exist(package_run):
+    from zoo.build import build_zoo, open_tables
+    r = package_run
+    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.t2.*")]:
+        path.unlink()
+    summary = r.folder / "evidence.json"
+    settings = dict(sketch_k=64, all_experts=False, with_parent=True, device="gpu")
+    summary.write_text(json.dumps(dict(settings=settings)))
+    gpu = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    built = build_zoo(packages=r.packages, data_root=r.root, out=r.root / "built")
+    assert len(open_tables(built)["models"]) == 1
+    settings["device"] = "cpu"
+    summary.write_text(json.dumps(dict(settings=settings)))
+    cpu = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    build_zoo(packages=r.packages, data_root=r.root, out=built)
+    path = open_tables(built)["models"].iloc[0].fingerprint_t1
+    assert str(cpu.relative_to(r.root)) in path and gpu != cpu

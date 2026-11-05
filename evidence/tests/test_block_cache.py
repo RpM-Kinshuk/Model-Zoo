@@ -54,3 +54,32 @@ def test_block_cache_get_refreshes_lru(tmp_path):
     cache.put(IDENTITY, "c", (0, 2), block)
     assert cache.get(IDENTITY, "b", (0, 2), block.dtype, block.shape) is None
     assert cache.get(IDENTITY, "a", (0, 2), block.dtype, block.shape) is not None
+
+
+def test_cached_read_does_not_wait_for_writer_lock(tmp_path):
+    from concurrent.futures import TimeoutError
+    cache = BlockCache(tmp_path, 1024)
+    block = torch.ones(2, 4)
+    cache.put(IDENTITY, 'a', (0, 2), block)
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        with cache._locked():
+            result = pool.submit(cache.get, IDENTITY, 'a', (0, 2), block.dtype, block.shape)
+            assert torch.equal(result.result(timeout=.5), block)
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_stale_network_cache_file_is_a_miss(tmp_path, monkeypatch):
+    import errno
+    from pathlib import Path
+    cache = BlockCache(tmp_path, 1024)
+    block = torch.ones(2, 4)
+    cache.put(IDENTITY, 'a', (0, 2), block)
+    original = Path.open
+    def stale(path, *args, **kwargs):
+        if path.suffix == '.bin':
+            raise OSError(errno.ESTALE, 'stale file handle')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', stale)
+    assert cache.get(IDENTITY, 'a', (0, 2), block.dtype, block.shape) is None

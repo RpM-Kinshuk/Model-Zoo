@@ -299,8 +299,16 @@ back to worker downloads. Set `--prefetch_models 0` to disable it. The default
 cache root is `$MODEL_ZOO_WORKER_CACHE_ROOT`, else `/scratch/$USER/hf_worker_cache`.
 
 Models exceeding full-mode capacity are listed in `oversized_models.csv` and
-receive CPU row-block T1-only packages after GPU jobs finish. `t1_status` records
-success/failure; these are separate from completed full ESD models. Disable with
+receive streaming T1-only packages after full-mode jobs finish. These are
+independent supervised processes with heartbeats, RAM/cache limits, stage
+timeouts and cleanup after confirmed exit. Each uses one idle assigned GPU by
+default; `--oversized_device cpu` runs supervised CPU jobs without reserving a
+GPU. Set `--gpus 0 1 --max_concurrent_jobs 2` to allow two jobs at once. Full
+weight download-ahead stays disabled for these streamed jobs. The
+`row_block_worker.py` process extracts this sampled weight evidence without
+loading a whole model. The default single-worker cap still applies unless
+explicitly raised. `t1_status` records each outcome separately from full ESD
+success. Disable with
 `--no-oversized_t1` (also disabled by `--no-evidence`).
 
 Each private cache lives at `<worker_cache_root>/<run_id>/<worker_id>/`.

@@ -36,16 +36,21 @@ class BlockCache:
 
     def get(self, manifest, view_name, bounds, dtype, shape):
         path = self._path(manifest, view_name, bounds, dtype, shape)
-        with self._locked():
-            try:
-                size = shape[0] * shape[1] * torch.empty((), dtype=dtype).element_size()
-                if path.stat().st_size != size or size == 0:
+        try:
+            size = shape[0] * shape[1] * torch.empty((), dtype=dtype).element_size()
+            # Writers publish complete inodes by atomic rename. An open reader
+            # can finish safely even if eviction unlinks that inode meanwhile.
+            with path.open("rb") as stream:
+                if os.fstat(stream.fileno()).st_size != size or size == 0:
                     return None
-                raw = path.read_bytes()
-                stamp = time.time_ns()
+                raw = stream.read()
+            stamp = time.time_ns()
+            try:
                 os.utime(path, ns=(stamp, stamp))
-            except FileNotFoundError:
-                return None
+            except OSError:
+                pass  # Timestamp maintenance must not invalidate an already complete read.
+        except OSError:
+            return None
         if len(raw) != size:
             return None
         return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(shape)
@@ -64,12 +69,20 @@ class BlockCache:
                 os.replace(temporary, path)
                 stamp = time.time_ns()
                 os.utime(path, ns=(stamp, stamp))
-                entries = sorted(self.root.glob("*.bin"), key=lambda p: (p.stat().st_atime_ns, p.name))
-                total = sum(p.stat().st_size for p in entries)
-                for entry in entries:
-                    if total <= self.max_bytes:
-                        break
-                    total -= entry.stat().st_size
-                    entry.unlink()
+                # Keep one stat result per entry and sort only when eviction
+                # is actually necessary. Preserve the existing shared byte cap.
+                entries = []
+                with os.scandir(self.root) as directory:
+                    for entry in directory:
+                        if entry.name.endswith(".bin") and entry.is_file(follow_symlinks=False):
+                            info = entry.stat(follow_symlinks=False)
+                            entries.append((info.st_atime_ns, entry.name, info.st_size, entry.path))
+                total = sum(entry[2] for entry in entries)
+                if total > self.max_bytes:
+                    for _, _, size, entry in sorted(entries):
+                        if total <= self.max_bytes:
+                            break
+                        os.unlink(entry)
+                        total -= size
             finally:
                 Path(temporary).unlink(missing_ok=True)
