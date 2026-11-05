@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 110" width="1200" height="110" role="img" aria-labelledby="title desc" fill="none" xml:space="preserve"><title id="title"></title><desc id="desc"></desc><style>
+text{font-kerning:normal;font-variant-ligatures:common-ligatures;white-space:pre}
+.comet,.comet-head{fill:none;stroke-linecap:round;opacity:0;animation:comet var(--d,3.2s) linear infinite;animation-delay:var(--t,0s)}
+.comet{stroke-dasharray:16 200;stroke-dashoffset:16}
+.comet-head{stroke-dasharray:2.4 200;stroke-dashoffset:2.4;animation-name:comet-head}
+@keyframes comet{0%{stroke-dashoffset:16;opacity:0}6%{opacity:1}86%{opacity:1}100%{stroke-dashoffset:-100;opacity:0}}
+@keyframes comet-head{0%{stroke-dashoffset:2.4;opacity:0}6%{opacity:1}86%{opacity:1}100%{stroke-dashoffset:-113.6;opacity:0}}
+@keyframes breathe{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes draw{from{stroke-dashoffset:100}to{stroke-dashoffset:0}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.breathe{animation:breathe var(--d,4s) ease-in-out infinite;animation-delay:var(--t,0s)}
+@keyframes twinkle{0%,100%{opacity:.15}50%{opacity:1}}
+.tw{animation:twinkle var(--d,3s) ease-in-out infinite;animation-delay:var(--t,0s)}
+@keyframes drift{0%,100%{transform:translate(0,0)}50%{transform:translate(14px,-8px)}}
+.drift{animation:drift var(--d,18s) ease-in-out infinite;animation-delay:var(--t,0s)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style><defs><linearGradient id="footfade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffc457" stop-opacity="0"/><stop offset="0.3" stop-color="#8b96a8" stop-opacity="0.8"/><stop offset="0.55" stop-color="#ffc457" stop-opacity="1"/><stop offset="1" stop-color="#ffc457" stop-opacity="0"/></linearGradient></defs><path d="M40 92L147.4 91.2L219 91.9L295.7 91.1L326.4 89.5L357.1 87L367.3 85.8L377.5 84.1L382.6 83L387.8 81.6L392.9 80L403.1 76.2L423.6 67.8L433.8 64L444 60.6L459.4 56.4L500.3 47.4L571.9 33.7L587.2 31.4L602.6 29.9L633.2 28.2L643.5 28L653.7 28.3L663.9 29.2L679.3 31.3L689.5 33.1L699.7 35.4L710 38.3L720.2 41.9L730.4 46.2L745.8 53.5L766.2 63.8L776.4 68.4L786.7 72.5L796.9 75.9L807.1 78.7L827.6 83.3L842.9 86.1L858.3 88.1L883.8 90.2L945.2 91.9L1006.6 91.6L1160 92" fill="none" stroke="url(#footfade)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M612.8 29.2L638.4 28L648.6 28.1L658.8 28.7L669 29.8L684.4 32.2L694.6 34.2L704.8 36.8L715.1 40L725.3 44L735.5 48.5L766.2 63.8L776.4 68.4L786.7 72.5L796.9 75.9L807.1 78.7L827.6 83.3L842.9 86.1L858.3 88.1L883.8 90.2L945.2 91.9L1006.6 91.6L1160 92" fill="none" stroke="#ffc457" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.9" class="breathe" style="--d:5s"/></svg>

@@ -1,48 +1,59 @@
 <a name="top"></a>
 
-<img src="docs/assets/page-opening.svg" width="100%" alt="">
-
-<h1 align="center">Model-Zoo</h1>
-
-<p align="center"><strong>From checkpoint weights to spectral structure.</strong><br>
-GPU orchestration and empirical spectral analysis for Hugging Face models.</p>
-
 <picture>
-  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/run-atlas.svg">
-  <img src="docs/assets/run-atlas.gif" width="100%" alt="A pinned model manifest feeds the GPU dispatcher, which allocates isolated workers. Workers compute matrix spectra under supervision; confirmed cleanup returns GPU capacity. Moving points illustrate work flow, not live telemetry.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
+  <img src="docs/assets/hero-light.svg" width="100%" alt="Model-Zoo: weight spectra, fingerprints and lineage. Measures the eigenvalue spectrum of every weight matrix in a Hugging Face checkpoint, fingerprints the same weights and publishes the results as one queryable model zoo. Beside the text, fifty ridgelines show the measured eigenvalue densities of every weight matrix in EleutherAI/pythia-160m, from the input embedding to the output, on a log scale; each tail is colored by its fitted power-law exponent alpha.">
 </picture>
 
-<p align="center"><sub>Pin the inputs. Allocate the GPUs. Measure the matrices. Return the capacity.<br>
-Illustrative concurrent run · <a href="docs/assets/run-atlas.svg">View without motion</a></sub></p>
+<p align="center">
+The pilot zoo holds <strong>628 models</strong>, <strong>129,623 measured matrix views</strong> and <strong>1,500 lineage records</strong>,<br>
+queried offline without weights or GPUs · <a href="docs/operations/zoo.md#recovery-checkpoint-2026-11-04">Validation status</a>
+</p>
 
-<table width="100%">
+<table align="center">
 <tr>
-<td width="33%" valign="top"><img src="docs/assets/nav-prepare.svg" width="72" alt=""><br><sub>01 &nbsp; / &nbsp; GET STARTED</sub><br><a href="#start-a-run"><strong>Start a run ↗</strong></a><br><sub>Prepare, review, launch and resume.</sub></td>
-<td width="33%" valign="top"><img src="docs/assets/nav-architecture.svg" width="72" alt=""><br><sub>02 &nbsp; / &nbsp; THE SYSTEM</sub><br><a href="#architecture"><strong>Architecture ↗</strong></a><br><sub>Who plans, who owns, who executes.</sub></td>
-<td width="33%" valign="top"><img src="docs/assets/nav-parallel.svg" width="72" alt=""><br><sub>03 &nbsp; / &nbsp; PARALLEL WORK</sub><br><a href="#gpu-allocation-and-parallelism"><strong>GPU parallelism ↗</strong></a><br><sub>GPU pools, model workers and threads.</sub></td>
+<td valign="top"><img src="docs/assets/glyph-start.svg" width="36" alt=""><br><a href="#quick-start"><strong>Quick start</strong></a><br><sub>Install, prepare, launch, query</sub></td>
+<td valign="top"><img src="docs/assets/glyph-architecture.svg" width="36" alt=""><br><a href="#architecture"><strong>Architecture</strong></a><br><sub>Plan, own, execute, publish</sub></td>
+<td valign="top"><img src="docs/assets/glyph-gpus.svg" width="36" alt=""><br><a href="#gpu-allocation-and-parallelism"><strong>GPU parallelism</strong></a><br><sub>Pools, workers, layer threads</sub></td>
+<td valign="top"><img src="docs/assets/glyph-control.svg" width="36" alt=""><br><a href="#runtime-controls-and-cache-lifecycle"><strong>Runtime controls</strong></a><br><sub>Signals, limits and caches</sub></td>
 </tr>
 <tr>
-<td valign="top"><img src="docs/assets/nav-control.svg" width="72" alt=""><br><sub>04 &nbsp; / &nbsp; LIVE CONTROL</sub><br><a href="#runtime-controls-and-cache-lifecycle"><strong>Steer a run ↗</strong></a><br><sub>Signals, limits, caches and retries.</sub></td>
-<td valign="top"><img src="docs/assets/nav-spectrum.svg" width="72" alt=""><br><sub>05 &nbsp; / &nbsp; THE SPECTRUM</sub><br><a href="#measurement-scope"><strong>Measurement ↗</strong></a><br><sub>Matrix coverage and numerical choices.</sub></td>
-<td valign="top"><img src="docs/assets/nav-verify.svg" width="72" alt=""><br><sub>06 &nbsp; / &nbsp; GO DEEPER</sub><br><a href="#verification-and-maintenance"><strong>Verify &amp; explore ↗</strong></a><br><sub>Checks, source maps and reference.</sub></td>
+<td valign="top"><img src="docs/assets/glyph-spectrum.svg" width="36" alt=""><br><a href="#measurement-scope"><strong>Spectra</strong></a><br><sub>The fit, coverage, numerics</sub></td>
+<td valign="top"><img src="docs/assets/glyph-fingerprint.svg" width="36" alt=""><br><a href="#evidence-and-zoo"><strong>Fingerprints</strong></a><br><sub>Sketches, hashes, lineage</sub></td>
+<td valign="top"><img src="docs/assets/glyph-zoo.svg" width="36" alt=""><br><a href="#the-zoo"><strong>The zoo</strong></a><br><sub>Packages, tables, queries</sub></td>
+<td valign="top"><img src="docs/assets/glyph-verify.svg" width="36" alt=""><br><a href="#verification-and-maintenance"><strong>Verification</strong></a><br><sub>Tests and reference guides</sub></td>
 </tr>
 </table>
 
-<p align="center"><sub>A short path through the system. Expand any section for the operational detail.<br>
-Static views: <a href="docs/assets/run-atlas.svg">system atlas</a> · <a href="docs/assets/gpu-orchestration.svg">GPU flow</a> · <a href="docs/assets/weight-to-spectrum.svg">matrix spectrum</a></sub></p>
+<a name="what-it-measures"></a>
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
+## What one run measures
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/measure-dark.svg">
+  <img src="docs/assets/measure-light.svg" width="100%" alt="Four outputs, left to right. Weights: every supported matrix of a checkpoint pinned to a commit; skipped matrices keep their reason. Spectra: squared singular values with a power-law tail fit, norms, rank and entropy. Fingerprints: seeded 64 by 64 sketches and hashes of sampled row blocks, for lineage and similarity. Zoo: one package per model, built into Parquet tables that are queried offline with find, similar and diff.">
+</picture>
+
+- **What it does:** pins Hugging Face checkpoints to exact commits, measures the spectrum of every supported weight matrix on shared GPUs, fingerprints the same weights for lineage, and publishes the results as one queryable zoo.
+- **Who it is for:** researchers collecting spectral and lineage measurements across many models on shared multi-GPU servers.
+- **What it keeps honest:** every number stays attached to its commit, matrix and measurement conventions; unmeasured matrices keep explicit reasons; GPUs return to the pool only after confirmed cleanup.
+
+<a name="quick-start"></a>
 <a name="start-a-run"></a>
 
-## <img src="docs/assets/chapter-01.svg" width="34" height="34" alt="01"> Start a run
+## <img src="docs/assets/glyph-start.svg" width="30" height="30" alt=""> Quick start
 
-**Prepare → review → launch.** Begin with a small list and the default single worker.
+*List, prepare, launch, query.* The defaults are the intended behavior: one model
+worker, automatic budgets, evidence and package publishing on.
 
-<details>
-<summary><strong>Set up once</strong> &nbsp; / &nbsp; Environment, model list and access token</summary>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/terminal-dark.svg">
+  <img src="docs/assets/terminal-light.svg" width="100%" alt="A terminal session with four commands. run_experiment.py with --prepare_only pins every row to a commit and marks rows ready or held without using a GPU. run_experiment.py with --gpus 0 1 2 3 measures GPU spectra and CPU fingerprints and publishes one immutable package per model. python -m zoo.cli build writes Parquet tables and a retrieval index to $ZOO_DATA/builds/current. python -m zoo_keeper.cli similar openai-community/gpt2 -k 5 finds the nearest models by weight fingerprint, with no weights or GPU needed.">
+</picture>
 
-### Create the environment
+<a name="install"></a>
+
+### 1. Install
 
 ```bash
 git clone https://github.com/RpM-Kinshuk/Model-Zoo.git
@@ -54,29 +65,17 @@ python -m pip install -r requirements.txt
 python esd_experiment/tests/test_setup.py
 ```
 
+The last command is an offline, CPU-only check: imports and a tiny spectrum,
+without a token, downloads or GPU use.
+
+<details>
+<summary><strong>Environment notes</strong> · CUDA pairing, CPU-only work and optional backends</summary>
+
 Use a fresh environment; preserve the shared `esd_ind` installation.
 Conda supplies Python; pip installs the directly pinned analysis dependencies.
 This is not a full transitive lock. The CUDA pairing follows the
 [official PyTorch recipe](https://pytorch.org/get-started/previous-versions/#v2110);
-use its `cpu` wheel index for CPU-only work. The setup check is offline and CPU-only.
-
-Create `models.csv`:
-
-```csv
-model_id
-openai-community/gpt2
-google/flan-t5-small
-```
-
-For an adapter, supply `base_model_relation=adapter` and preferably
-`source_model=org/base-model`. Preparation also accepts `org/model@revision`
-or `revision_norm` and resolves them to full commit pins.
-
-Gated/private repositories need an authorized token:
-
-```bash
-export HF_TOKEN="<your-token>"
-```
+use its `cpu` wheel index for CPU-only work.
 
 Optional quantization backends and the
 [clustering dashboard](clustering/unsupervised/README.md) are separate installs.
@@ -84,7 +83,39 @@ An importable backend does not guarantee a checkpoint can be measured.
 
 </details>
 
-### <img src="docs/assets/nav-prepare.svg" width="38" alt=""> Prepare the list
+### 2. List the models
+
+Create `models.csv` with one Hugging Face ID per row, then set two paths:
+
+```csv
+model_id
+openai-community/gpt2
+google/flan-t5-small
+```
+
+```bash
+export HF_TOKEN="<your-token>"      # gated or private repositories
+export ZOO_DATA=/path/to/zoo-data   # packages, parent-block cache and zoo builds
+```
+
+Without `ZOO_DATA`, packages go to `<output_dir>/packages` and the zoo build
+needs `--data_root`.
+
+<details>
+<summary><strong>List options</strong> · Revisions, adapters and curated collections</summary>
+
+Preparation accepts `org/model@revision` or a `revision_norm` column and
+resolves them to full commit pins. For an adapter, supply
+`base_model_relation=adapter` and preferably `source_model=org/base-model`.
+
+For larger collections, start from `data/curated/model_zoo_phase2.csv`.
+Imported family labels and old ready subsets have known
+[limitations](docs/operations/curation.md#architecture-label-caveat);
+prefer pinned config evidence over names.
+
+</details>
+
+### 3. Prepare and review
 
 ```bash
 python esd_experiment/run_experiment.py \
@@ -93,15 +124,15 @@ python esd_experiment/run_experiment.py \
 ```
 
 > [!NOTE]
-> **Review before launch** · Check the generated `models.csv` for pins, config
-> labels, weight budget and ready/held status. Preparation reads metadata and
-> small JSON files and selected safetensors headers, not tensor values.
+> **Review before launch.** Open `analysis_runs/phase2/my_run/models.csv`. Ready rows
+> launch; held rows stay visible with a `preparation_reason` and are never dispatched.
+> Preparation reads metadata, small JSON files and selected safetensors headers,
+> not tensor values, and uses no GPU.
 
 <details>
-<summary><strong>Preparation notes</strong> &nbsp; / &nbsp; Pins, held rows and curated inputs</summary>
+<summary><strong>Preparation notes</strong> · Pins, held rows and weight budgets</summary>
 
 Launch requires full 40-character model and adapter-base commit SHAs.
-Ready rows can launch; held rows remain visible and are not dispatched.
 Inspect `preparation_status` and `preparation_reason` before starting.
 
 Config labels are trusted for routing only at their recorded revision.
@@ -111,86 +142,152 @@ without probing GPUs. At launch, `--max_weight_gib auto` uses the selected pool'
 capacity, including adapter bases; `0` disables its size cap. Old size-only holds
 are reconsidered when the new budget permits; access/layout holds remain held.
 
-For larger collections, start from `data/curated/model_zoo_phase2.csv`.
-Imported family labels and old ready subsets have known
-[limitations](docs/operations/curation.md#architecture-label-caveat);
-prefer pinned config evidence over names.
-
 </details>
 
-### <img src="docs/assets/nav-parallel.svg" width="38" alt=""> Launch the run
+### 4. Launch
 
 ```bash
 python esd_experiment/run_experiment.py \
   --model_list analysis_runs/phase2/my_run/models.csv \
   --output_dir analysis_runs/phase2/my_run \
-  --gpus 0 1 2 3 --num_gpus_per_job 1 \
+  --gpus 0 1 2 3 \
   --worker_cache_root /scratch/$USER/model_zoo_worker_cache
+
+python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/my_run
 ```
 
-Full-mode runs also write pinned evidence under `evidence/<safe>/`: fingerprints
+One model worker at a time draws GPUs from the pool you name, sized from its
+weights. While the GPUs compute spectra, a CPU sidecar fingerprints the same
+downloaded files, and each finished model publishes one package. Point
+`--worker_cache_root` at fast local disk; private caches are deleted after
+confirmed exit. The second command indexes the run into `summary.csv`; filter on
+both `outcome` and `matrix_coverage` before comparing models.
+
+> [!TIP]
+> **Continue where you left off.** Relaunch with the same pins and settings;
+> compatible completed work is skipped. `run_script.sh` is the site-specific HPC
+> wrapper with every default spelled out.
+
+<details>
+<summary><strong>Launch options</strong> · Evidence, publishing and opt-outs</summary>
+
+Full-mode runs write pinned evidence under `evidence/<safe>/`: fingerprints
 of full tensors and sampled 128/256/512-row blocks, full spectra, and declared-parent deltas.
 Evidence runs on CPU alongside GPU analysis by default. Use `--no-evidence` for
 the previous CSV/H5-only behavior; checkpoint mode disables evidence with a notice.
 If evidence fails, the ESD pair is retained and the next run retries evidence only.
+
 Completed models publish immutable packages to `$ZOO_DATA/packages`, or
 `<output_dir>/packages` when `ZOO_DATA` is unset. Set `--packages_root PATH` or
-use `--no-publish` to retain only run-folder outputs.
-
-> [!TIP]
-> **Continue where you left off.** Relaunch with the same pins and settings;
-> compatible completed work is skipped. Use `run_script.sh` for the site-specific HPC wrapper.
-
-<img src="docs/assets/chapter-compute.svg" width="100%" alt="">
-
-<a name="architecture"></a>
-
-## <img src="docs/assets/chapter-02.svg" width="34" height="34" alt="02"> Architecture
-
-**Plan → own resources → execute.** Supervision stays active through cleanup.
-
-![The runner prepares pinned jobs; the dispatcher owns GPU reservations and supervision; isolated workers load and measure matrices. Live policy controls the dispatcher. Confirmed exit and private-cache cleanup precede GPU release; unconfirmed exit stops dispatch.](docs/assets/architecture.svg)
-
-<details>
-<summary><strong>Explore the implementation</strong> &nbsp; / &nbsp; Source files and responsibilities</summary>
-
-| Code | Owns |
-| --- | --- |
-| `esd_experiment/src/run_experiment.py` | Preparation, metadata pins, preflight, resume and worker jobs |
-| `esd_experiment/gputracker/` | GPU allocation, live config, process groups, resource checks and cleanup |
-| `esd_experiment/src/worker.py` | One model's load → analyze → finalize lifecycle and heartbeat |
-| `esd_experiment/src/model_loader.py` | Architecture selection, checkpoint integrity and validated adapter merging |
-| `esd_experiment/src/checkpoint_tensors.py` | Stored-matrix analysis without constructing a model |
-| `net_esd/` | Matrix discovery, coverage, layer scheduling and spectral computation |
+use `--no-publish` to retain only run-folder outputs. Models too large for full
+mode receive [row-block evidence](#oversized-models) after the full-mode queue.
 
 </details>
 
-<img src="docs/assets/chapter-compute.svg" width="100%" alt="">
+### 5. Build and query the zoo
+
+```bash
+python -m zoo.cli build
+```
+
+The build reads current-convention packages from `$ZOO_DATA/packages` and
+atomically publishes `$ZOO_DATA/builds/current`: Parquet tables, a retrieval
+index and links to full HDF5 spectra. Query it offline, without weights or GPUs,
+from a [Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) checkout beside
+Model-Zoo:
+
+```bash
+python -m pip install -e . duckdb==1.5.6   # once: Zoo-Keeper imports zoo/ and evidence/
+cd ../Zoo-Keeper
+python -m zoo_keeper.cli find --text gpt2 --limit 10
+python -m zoo_keeper.cli similar openai-community/gpt2 -k 5
+```
+
+<a name="what-a-run-writes"></a>
+
+### What a run writes
+
+```text
+analysis_runs/phase2/my_run/
+├── models.csv              pinned list: ready/held status, sizes, config labels
+├── stats/<model>.csv       per-layer scalars: alpha, fit quality, rank
+├── metrics/<model>.h5      full spectra (/eigs), fits (/layers), coverage
+├── evidence/<safe>/        manifest, fingerprints, full spectra, parent deltas
+├── summary.csv             per-model index, written by analyze_results.py
+├── oversized_models.csv    models routed to row-block-only evidence, if any
+├── gpu_config.json         live policy; edit it, then send SIGHUP
+└── logs/                   current_state.json, terminal_status/, failure records
+
+$ZOO_DATA/
+├── packages/               one immutable package per model and convention
+├── cache/parent-blocks/    disposable parent row blocks; never published
+└── builds/current/         the zoo snapshot that queries read
+```
+
+The CSV/HDF5 pairs are authoritative; `summary.csv` and the zoo are rebuildable
+views of them. See [reading a run](docs/operations/analysis.md#reading-a-run)
+for every `outcome` and coverage field.
+
+<a name="architecture"></a>
+
+## <img src="docs/assets/glyph-architecture.svg" width="30" height="30" alt=""> Architecture
+
+*Plan, own resources, execute, publish.* Supervision stays active through cleanup.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture-light.svg" width="100%" alt="The runner reads the pinned models.csv, runs preflight and resume checks and routes oversized models to later row-block jobs. The dispatcher owns idle checks, GPU reservations, process groups and CPU thread budgets, and reloads live policy from gpu_config.json on SIGHUP. Each isolated worker loads one model, computes spectra on GPU threads while a CPU sidecar fingerprints the same weights, and publishes one immutable package. A supervisor watches heartbeat, stage time, RAM and cache. Capacity returns only after confirmed process-group exit, private-cache removal and GPU release; an unconfirmed exit keeps the cache and reservation and stops new dispatch.">
+</picture>
+
+The runner decides what runs, the dispatcher decides where and when, and each
+worker owns exactly one model. A package is published before the worker exits;
+GPUs return to the pool only after the worker's process group has exited and its
+private cache is gone.
+
+<details>
+<summary><strong>Source map</strong> · Files and responsibilities</summary>
+
+| Code | Owns |
+| --- | --- |
+| `esd_experiment/src/run_experiment.py` | Preparation, metadata pins, preflight, resume, worker jobs and oversized-model routing |
+| `esd_experiment/src/sizing.py` · `prefetch.py` | Automatic per-job budgets; bounded download-ahead into future workers' caches |
+| `esd_experiment/gputracker/` | GPU allocation, live config, process groups, resource checks and cleanup |
+| `esd_experiment/src/worker.py` | One model's load → analyze → finalize lifecycle, heartbeat and package publication |
+| `esd_experiment/src/model_loader.py` | Architecture selection, checkpoint integrity and validated adapter merging |
+| `esd_experiment/src/checkpoint_tensors.py` | Stored-matrix analysis without constructing a model |
+| `esd_experiment/src/evidence_bridge.py` | Evidence sidecar setup, completion checks and publishing for runner jobs |
+| `esd_experiment/src/oversized_model_worker.py` | Supervised row-block evidence for models too large for full mode |
+| `net_esd/` | Matrix discovery, coverage, layer scheduling and spectral computation |
+| `evidence/` | Manifests, fingerprints, row-block sketches, parent deltas, the CPU sidecar and the evidence CLI |
+| `zoo/` | Package publication, the zoo build, lineage, retrieval and the candidate-pair delta pass |
+
+The [runner source map](esd_experiment/README.md#code-map) lists entrypoints and
+implementation boundaries.
+
+</details>
 
 <a name="gpu-allocation-and-parallelism"></a>
 
-## <img src="docs/assets/chapter-03.svg" width="34" height="34" alt="03"> GPU allocation and parallelism
+## <img src="docs/assets/glyph-gpus.svg" width="30" height="30" alt=""> GPU allocation and parallelism
 
-**Across models. Within a model.** Separate processes own devices; layer threads share the work.
+*Across models and within a model.* Separate processes own devices; layer threads share the work.
 
 <picture>
-  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/gpu-orchestration.svg">
-  <img src="docs/assets/gpu-orchestration.gif" width="100%" alt="Two isolated workers each reserve a GPU pair. Moving pulses follow layer dispatch to fixed-device GPU threads and return paths to ordered metrics. Model C waits for capacity. This illustrates flow, not measured speed.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gpus-dark.svg">
+  <img src="docs/assets/gpus-light.svg" width="100%" alt="Two levels of parallelism. Across models, isolated workers each reserve their own GPUs: worker A holds GPUs 0 and 1, worker B holds GPUs 2 and 3, each in its own process group with a private cache and CUDA_VISIBLE_DEVICES; model C waits for idle GPUs. Admission needs two idle checks five seconds apart with under 500 MB used. Within a model, matrices are sorted by SVD cost and dispatched to one fixed-device thread per GPU; layer metrics return in the original order.">
 </picture>
 
-<p align="center"><sub>Pulses follow layer dispatch and return paths; timing is illustrative.<br><a href="docs/assets/gpu-orchestration.svg">View without motion</a></sub></p>
-
-| Pool → | Devices per model → | Models at once |
+| Pool | Devices per model | Models at once |
 | --- | --- | --- |
 | `--gpus 0 1 2 3` | `--num_gpus_per_job 2` | `--max_concurrent_jobs 2` |
 
 > [!TIP]
-> **Start small** · The launch default is **one worker**, with **automatic GPUs per model**.
+> **Start small.** The launch default is **one worker**, with **automatic GPUs per model**.
 > The figure shows a larger configuration. Admission requires two idle checks,
 > five seconds apart: no GPU processes and memory below 500 MB.
 
 <details>
-<summary><strong>Tune the parallelism</strong> &nbsp; / &nbsp; Allocation, threads and a multi-GPU launch</summary>
+<summary><strong>Tune the parallelism</strong> · Allocation, threads and a multi-GPU launch</summary>
 
 Physical GPU IDs become local CUDA IDs through `CUDA_VISIBLE_DEVICES`.
 The dispatcher reserves devices within this run. Idle checks are cooperative;
@@ -207,6 +304,10 @@ changes the number of consecutive checks. Model mode cost-sorts matrices and
 uses one fixed-device thread per compute GPU. It prefers visible devices not
 hosting the model, otherwise reuses the visible pool. Disable layer parallelism
 with `--no-parallel_esd`. The library API also offers a spawned-process backend.
+
+Evidence runs on the worker's CPU budget beside the GPU threads.
+`--evidence_device gpu` moves it to the worker's first visible GPU instead;
+`--evidence_max_inflight_gib` (default 2) bounds its in-flight weight bytes.
 
 For two simultaneous model workers, each seeing two GPUs:
 
@@ -226,36 +327,41 @@ on one selected device. Explicit `--analysis_source checkpoint` requires
 
 </details>
 
-<img src="docs/assets/chapter-thread.svg" width="100%" alt="">
-
 <a name="runtime-controls-and-cache-lifecycle"></a>
 
-## <img src="docs/assets/chapter-04.svg" width="34" height="34" alt="04"> Runtime controls and cache lifecycle
+## <img src="docs/assets/glyph-control.svg" width="30" height="30" alt=""> Runtime controls and cache lifecycle
 
-**A live run stays steerable.** Change policy, drain the queue or stop with supervised cleanup.
+*A live run stays steerable.* Change policy, drain the queue or stop with supervised cleanup.
 
-![Load, analyze and finalize run under heartbeat, stage, RAM and cache monitoring. Confirmed process-group exit precedes private-cache removal and GPU release.](docs/assets/worker-lifecycle.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lifecycle-dark.svg">
+  <img src="docs/assets/lifecycle-light.svg" width="100%" alt="A worker loads, analyzes and finalizes one model under heartbeat, stage-time, RAM and cache monitoring. Cleanup runs in order: confirm process-group exit, remove the private worker cache, release the GPU reservation. An unconfirmed exit keeps evidence and the reservation and stops dispatch. Signals: SIGHUP reloads policy from gpu_config.json at a safe point, SIGUSR1 lets running workers finish while nothing new starts, SIGINT or SIGTERM terminates, confirms exit and then cleans up.">
+</picture>
 
-<table width="100%">
-<tr>
-<td width="33%" align="center"><img src="docs/assets/cue-reload.svg" width="80" alt=""><br><strong>Reload policy</strong><br><code>SIGHUP</code></td>
-<td width="33%" align="center"><img src="docs/assets/cue-drain.svg" width="80" alt=""><br><strong>Finish active work</strong><br><code>SIGUSR1</code></td>
-<td width="33%" align="center"><img src="docs/assets/cue-stop.svg" width="80" alt=""><br><strong>Stop and clean up</strong><br><code>SIGINT</code> / <code>SIGTERM</code></td>
-</tr>
-</table>
+Send signals to the runner. Its PID is `runner_pid` in `logs/current_state.json`:
 
-<table width="100%">
-<tr>
-<td width="33%" align="center"><img src="docs/assets/cue-weights.svg" width="80" alt=""><br><sub>SELECTED WEIGHTS</sub><br><strong>Pool capacity</strong><br><sub>Includes adapter-base weights</sub></td>
-<td width="33%" align="center"><img src="docs/assets/cue-ram.svg" width="80" alt=""><br><sub>WORKER RAM</sub><br><strong>Auto, ≥16 GiB</strong><br><sub>Sampled process-tree RSS</sub></td>
-<td width="33%" align="center"><img src="docs/assets/cue-cache.svg" width="80" alt=""><br><sub>PRIVATE CACHE</sub><br><strong>Auto</strong><br><sub>Sampled allocated disk usage</sub></td>
-</tr>
-</table>
+```bash
+RUN=analysis_runs/phase2/my_run
+PID=$(python -c "import json, sys; print(json.load(open(sys.argv[1]))['runner_pid'])" "$RUN/logs/current_state.json")
+kill -HUP "$PID"    # after editing $RUN/gpu_config.json
+```
 
-<p align="center"><sub>Default bounds · Configurable per run · RAM and cache may overshoot between samples</sub></p>
+| Goal | Signal | What happens |
+| --- | --- | --- |
+| Reload policy | `kill -HUP` | Rereads `gpu_config.json` at a safe point; an invalid file keeps the previous settings |
+| Finish active work | `kill -USR1` | Stops dispatching new models; running workers complete |
+| Stop and clean up | `kill -INT` or `kill -TERM` | Terminates worker groups, confirms exit, then removes caches and releases GPUs |
+
+| Bound | Default | Checked as |
+| --- | --- | --- |
+| Selected weights | Pool capacity, including adapter-base weights | Reviewed download sizes |
+| Worker RAM | Automatic, at least 16 GiB | Sampled process-tree RSS |
+| Private cache | Automatic | Sampled allocated disk usage |
+
+Every bound is configurable per run. RAM and cache can overshoot between samples.
 
 <details>
-<summary><strong>Operate the run</strong> &nbsp; / &nbsp; Live state, limits, timeouts and cache ownership</summary>
+<summary><strong>Operate the run</strong> · Live state, limits, timeouts and cache ownership</summary>
 
 ```bash
 watch -n 5 'python -m json.tool analysis_runs/phase2/my_run/logs/current_state.json'
@@ -298,20 +404,6 @@ loader metadata enter future workers' private caches. Failed prefetch falls
 back to worker downloads. Set `--prefetch_models 0` to disable it. The default
 cache root is `$MODEL_ZOO_WORKER_CACHE_ROOT`, else `/scratch/$USER/hf_worker_cache`.
 
-Models exceeding full-mode capacity are listed in `oversized_models.csv` and
-receive streaming row-block-only packages after full-mode jobs finish. These are
-independent supervised processes with heartbeats, RAM/cache limits, stage
-timeouts and cleanup after confirmed exit. Each uses one idle assigned GPU by
-default; `--oversized_models_device cpu` runs supervised CPU jobs without reserving a
-GPU. Set `--gpus 0 1 --max_concurrent_jobs 2` to allow two jobs at once. Full
-weight download-ahead stays disabled for these streamed jobs. The
-`oversized_model_worker.py` process extracts this sampled weight evidence without
-loading a whole model. The default single-worker cap still applies unless
-explicitly raised. `evidence_status` and `evidence_error` record outcomes separately
-from full ESD success. `--oversized_models_evidence` enables these jobs by default;
-`--no-oversized_models_evidence` disables them (as does `--no-evidence`).
-The device setting accepts `--oversized_models_device auto|cpu`.
-
 Each private cache lives at `<worker_cache_root>/<run_id>/<worker_id>/`.
 Hub and legacy Transformers downloads share revision-addressed storage;
 dataset, Xet and remote-module caches stay under the same private root.
@@ -330,7 +422,7 @@ RAM and other supervision remain active.
 </details>
 
 <details>
-<summary><strong>Recover and resume</strong> &nbsp; / &nbsp; Failure boundaries and retry behavior</summary>
+<summary><strong>Recover and resume</strong> · Failure boundaries and retry behavior</summary>
 
 Compatible completed pairs are skipped. Interrupted models restart from the
 model boundary, not an individual layer. Resume requires the same manifest,
@@ -350,20 +442,27 @@ Allow signal-triggered cleanup to finish; avoid killing the runner with SIGKILL.
 
 </details>
 
-<img src="docs/assets/chapter-spectrum.svg" width="100%" alt="">
-
 <a name="measurement-scope"></a>
 
-## <img src="docs/assets/chapter-05.svg" width="34" height="34" alt="05"> Measurement scope
+## <img src="docs/assets/glyph-spectrum.svg" width="30" height="30" alt=""> Measurement scope
 
-**Weights → singular values → spectrum.** Explicit matrix coverage gives the numbers context.
+*Weights, singular values, spectrum.* Explicit matrix coverage gives the numbers context.
 
 <picture>
-  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/weight-to-spectrum.svg">
-  <img src="docs/assets/weight-to-spectrum.gif" width="100%" alt="For the diagonal matrix with entries 4, 3, 2 and 1, matching highlights connect each entry to its singular value and squared spectral value. The sorted spectrum stays 1, 4, 9 and 16 throughout.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/spectrum-dark.svg">
+  <img src="docs/assets/spectrum-light.svg" width="100%" alt="Anatomy of one measured spectrum: EleutherAI/pythia-160m, gpt_neox.layers.5.mlp.dense_h_to_4h, a 3072 by 768 matrix. Panel A: a histogram of its 768 squared singular values on a log scale; the tail above the median eigenvalue is highlighted, the largest eigenvalue is marked, and a Marchenko–Pastur curve shows an i.i.d. matrix of the same shape and norm for reference. Panel B: the 384 tail eigenvalues on log-log axes with the fitted power law, alpha 2.56 and Kolmogorov–Smirnov distance 0.117. Panel C: the fitted alpha of all 50 matrices of the model from input to output, colored by attention QKV, attention output, MLP up, MLP down and embedding.">
 </picture>
 
-<p align="center"><sub>Matching highlights trace one component of this diagonal example; the values stay fixed.<br><a href="docs/assets/weight-to-spectrum.svg">View without motion</a></sub></p>
+Each supported matrix $W$ contributes its eigenvalues $\lambda_i = \sigma_i(W)^2$.
+Above the cutoff $\lambda_{\min}$, the median retained eigenvalue by default,
+the tail is fitted with a power law $p(\lambda) \propto \lambda^{-\alpha}$ by maximum likelihood,
+where $n$ counts the tail eigenvalues and $F_n$ is their empirical distribution:
+
+```math
+\hat\alpha \;=\; 1 + n \Bigg/ \sum_{\lambda_i \ge \lambda_{\min}} \ln\frac{\lambda_i}{\lambda_{\min}},
+\qquad
+D \;=\; \sup_{\lambda \ge \lambda_{\min}} \big|\,F_n(\lambda) - F_{\hat\alpha}(\lambda)\,\big|
+```
 
 | Decompose | Compute | Fit the tail |
 | --- | --- | --- |
@@ -373,7 +472,7 @@ Declared module weights and ordinary dense 2D parameters are measured.
 Unsupported representations retain explicit reasons.
 
 <details>
-<summary><strong>Know the coverage</strong> &nbsp; / &nbsp; Included matrices and explicit exclusions</summary>
+<summary><strong>Know the coverage</strong> · Included matrices and explicit exclusions</summary>
 
 | Matrix family | Interpretation |
 | --- | --- |
@@ -402,10 +501,10 @@ not a verified linear operator.
 </details>
 
 <details>
-<summary><strong>Follow the loading path</strong> &nbsp; / &nbsp; Strict loading, fallback and routing diagram</summary>
+<summary><strong>Follow the loading path</strong> · Strict loading, fallback and routing diagram</summary>
 
 ```mermaid
-%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#3978C5","edgeLabelBackground":"#FFFFFF"}}}%%
+%%{init: {"theme":"base","flowchart":{"curve":"basis","nodeSpacing":26,"rankSpacing":36},"themeVariables":{"fontFamily":"ui-sans-serif, system-ui","fontSize":"15px","lineColor":"#8A97A3","edgeLabelBackground":"#FFFFFF"}}}%%
 flowchart TB
     POLICY{"analysis_source"}
     POLICY -->|auto / model| LOAD["Strict model loading"]
@@ -417,11 +516,11 @@ flowchart TB
     MODULES --> ESD["SVD → retained spectrum → power-law fit"]
     STORED --> ESD
     MODULES -.-> COVERAGE["Unsupported matrices stay explicit<br/>no checkpoint backfill after a successful load"]
-    classDef decision fill:#FFF4D6,stroke:#FDB515,color:#3B2A00,stroke-width:2px;
-    classDef control fill:#EAF3FF,stroke:#006CE4,color:#002F6C,stroke-width:2px;
-    classDef execute fill:#003B95,stroke:#002F6C,color:#FFFFFF,stroke-width:2px;
-    classDef failure fill:#FDECEC,stroke:#B42318,color:#7A271A,stroke-width:2px;
-    classDef coverage fill:#E8F5EF,stroke:#00693E,color:#00452A,stroke-width:2px;
+    classDef decision fill:#FDF1D6,stroke:#E0A12E,color:#3B2A00,stroke-width:2px;
+    classDef control fill:#E4F3F1,stroke:#2AA596,color:#0B3833,stroke-width:2px;
+    classDef execute fill:#10233A,stroke:#10233A,color:#FFFFFF,stroke-width:2px;
+    classDef failure fill:#FCEAE6,stroke:#C8492C,color:#6B1F10,stroke-width:2px;
+    classDef coverage fill:#E7F4EA,stroke:#3FA866,color:#123F1E,stroke-width:2px;
     class POLICY decision;
     class LOAD,TENSORS,MODULES,STORED control;
     class ESD execute;
@@ -453,7 +552,7 @@ rejected.
 </details>
 
 <details>
-<summary><strong>Choose the numerics</strong> &nbsp; / &nbsp; Settings, interpretation and compatibility</summary>
+<summary><strong>Choose the numerics</strong> · Settings, metrics and compatibility</summary>
 
 | Option | Default |
 | --- | --- |
@@ -464,10 +563,22 @@ rejected.
 | `--fix_fingers` | `xmin_mid`; alternatives: `xmin_peak`, `DKS` |
 | `--filter_zeros` / `--evals_thresh` | On / absolute threshold `1e-5` |
 
+| Field | Definition, over the retained spectrum |
+| --- | --- |
+| `alpha`, `D` | Fitted tail exponent and its Kolmogorov–Smirnov distance |
+| `fit_xmin`, `n_tail` | Cutoff and the number of tail eigenvalues, ties included |
+| `spectral_norm` | Largest eigenvalue $\lambda_{\max}$ |
+| `norm` | $\sum_i \lambda_i$, the squared Frobenius norm |
+| `stable_rank` | $\sum_i \lambda_i / \lambda_{\max}$ |
+| `alpha_weighted` | $\alpha \log_{10} \lambda_{\max}$ |
+| `log_alpha_norm` | $\log_{10} \sum_i \lambda_i^{\alpha}$ |
+| `entropy` | Shannon entropy of the rank-many largest eigenvalues, divided by $\log(\text{rank})$ |
+
 SVD is the default because Gram construction can lose small-eigenvalue
 accuracy. Upcasting cannot restore loading precision. Missing fits stay explicit;
 a completed run may have partial coverage. A finite alpha or small KS distance
-does not establish power-law behavior or generalization.
+does not establish power-law behavior or generalization. The Marchenko–Pastur
+curve in the figure is a visual reference; the pipeline does not fit or store it.
 
 Current conventions: **numerics 7 · loader 10 · matrix selection 4**.
 Selection 4 adds generic parameter matrices without changing formulas. Older
@@ -479,36 +590,147 @@ coverage in a fresh directory.
 
 </details>
 
-## Weight evidence (range reads)
+<a name="evidence-and-zoo"></a>
 
-Fingerprint checkpoints without loading a model. Use `--measurement_mode row_blocks`
-to sample row blocks for lineage comparisons, or `--measurement_mode full_weights`
-to retain full tensor spectra for the database. Both accept pinned Hub repositories
-and local checkpoints. Manifests record `metadata_only` evidence from metadata,
-configs and headers.
+## <img src="docs/assets/glyph-fingerprint.svg" width="30" height="30" alt=""> Evidence and the zoo
 
-See the [weight evidence guide](docs/operations/evidence.md) for supported formats,
-coverage, quick-start commands and the pilot runbook.
+*Weights, fingerprints, packages, zoo.* Measure each model once; compare across every package.
 
-<img src="docs/assets/chapter-spectrum.svg" width="100%" alt="">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/fingerprint-dark.svg">
+  <img src="docs/assets/fingerprint-light.svg" width="100%" alt="Weight fingerprints. A deterministic 256-row block from the middle of a stored matrix W is sketched from both sides as S = L B R-transpose, where L and R are orthonormal operators seeded by axis size and k is 64 by default, 128 for lab rows. The block is also hashed with SHA-256 together with its dtype, so identical blocks share a hash. A child and a parent are compared view by view with sketch cosine and shared block hashes. Lineage evidence is declared, detected or verified, and stays uncalibrated until an applicable calibrated null exists.">
+</picture>
+
+A full run already writes fingerprints and publishes packages. The evidence CLI
+also reads a checkpoint directly, without loading a model or reserving a GPU.
+Targets can be `org/repo@revision` or a local directory:
+
+```bash
+python -m evidence.cli fingerprint org/model \
+  --measurement_mode row_blocks --out "$ZOO_DATA/example" --json
+python -m evidence.cli diff org/child org/parent --json
+```
+
+<a name="the-zoo"></a>
+
+### The zoo
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/zoo-dark.svg">
+  <img src="docs/assets/zoo-light.svg" width="100%" alt="Left: the 44 models measured in this repository's phase-2 runs, placed by median layer alpha and median stable rank and colored by architecture family: Qwen2, Llama, BERT, GPT-2, GPT-Neo and GPT-NeoX, Phi and Mistral, and other. Fine-tunes sit beside their bases: Qwen2 and Qwen2.5 0.5B fine-tunes, two bert-base-uncased fine-tunes, smol_llama-220M and two fine-tunes. Right: the snapshot under builds/current has seven Parquet tables, models, views, layers, coverage, lineage, scores and predictions, plus a retrieval index and links to full HDF5 spectra. It is queried offline with find, info, similar, family, diff and check. In the 2026-11-02 snapshot, similar found a closest neighbor at cosine 0.999992 and diff found 151 identical views and 60 changed.">
+</picture>
+
+To grow the zoo, backfill packages from older run folders, measure row-block
+updates for newly detected candidate pairs, then rebuild:
+
+```bash
+python -m zoo.cli publish --runs analysis_runs/phase2/older_run
+python -m zoo.cli deltas --workers auto --compute_device cpu
+python -m zoo.cli build
+```
+
+| Query | Answers |
+| --- | --- |
+| `find` · `info` | Filter models by metadata and scores; show one model's coverage, scores and links |
+| `similar` | Nearest weight neighbors within the same architecture signature |
+| `family` | Ancestors and descendants from lineage records, with their evidence tiers |
+| `diff` | Views two models share on their measured blocks and views that changed |
+| `check` | A model diffed against its declared bases, with a verdict |
+
+<a name="oversized-models"></a>
+
+<details>
+<summary><strong>Oversized models</strong> · Row-block evidence when full mode cannot load a model</summary>
+
+Models exceeding full-mode capacity are listed in `oversized_models.csv` and
+receive streaming row-block-only packages after full-mode jobs finish. The
+`oversized_model_worker.py` process extracts this sampled weight evidence without
+loading a whole model. Each job is an independent supervised process with
+heartbeats, RAM/cache limits, stage timeouts and cleanup after confirmed exit.
+
+By default each job uses one idle assigned GPU; `--oversized_models_device cpu`
+runs supervised CPU jobs without reserving a GPU. The default single-worker cap
+still applies; `--gpus 0 1 --max_concurrent_jobs 2` allows two jobs at once.
+Full-weight download-ahead stays disabled for these streamed jobs.
+`evidence_status` and `evidence_error` record outcomes separately from full ESD
+success. `--no-oversized_models_evidence` (or `--no-evidence`) disables them.
+
+</details>
+
+<details>
+<summary><strong>Packages and the snapshot</strong> · Layout, immutability, tables and versions</summary>
+
+A package lives at `<packages_root>/<shard>/<safe>/<conventions_id>/`. It holds
+only derived evidence and, for full mode, `esd/stats.csv` and `esd/metrics.h5`;
+raw checkpoints and cached parent blocks are never included. `package.json`
+records pinned identity, kind, conventions, artifact SHA256 hashes, reuse counts
+and source-run provenance. An identical existing package is reused; different
+contents never overwrite it.
+
+| Table | Contents |
+| --- | --- |
+| `models` | Pinned identity, metadata, coverage and artifact links |
+| `views` | Measured matrices and their block hashes |
+| `layers` | Per-layer alpha, fit quality, spectral metrics and HDF5 row indices |
+| `coverage` | Measured/skipped tensors and reasons |
+| `lineage` | Candidate relationships with evidence tiers and statistics |
+| `scores` | Measured scores and revision verification |
+| `predictions` | Separate prediction records; empty in v0 |
+
+Eigenvalues stay in HDF5; `layers.h5_index` points into each package's
+`esd/metrics.h5`. The default build accepts full and row-block-only packages and
+prefers full evidence when both exist. `--packages` and `--conventions` select
+explicit inputs; legacy builds remain available through `--manifests` and
+`--fingerprints`. Open readers keep their original snapshot while a new one is
+published.
+
+New artifacts use evidence version 3 and zoo version 2; numerical conventions
+remain numerics 7, HDF5 format 2.0. Readers accept evidence versions 1–3 and zoo
+versions 0–2.
+
+</details>
+
+<details>
+<summary><strong>Read the lineage</strong> · Evidence tiers, calibration and exit codes</summary>
+
+- **Declared:** supplied relationship metadata.
+- **Detected:** a method-derived candidate, with its method and statistics.
+- **Verified:** evidence checked under the producing method's rules.
+
+An **uncalibrated** verdict means no applicable calibrated null supports a
+relationship decision. Cosine remains a measured similarity statistic;
+duplicate labels mean "identical on every measured block". A measured update
+does not verify ancestry or predict skill changes.
+
+`check` exits **0** for consistent, undetermined or uncalibrated results,
+**1** for inconsistent and **2** for invalid input or an unavailable comparison.
+Read the verdict as well as the exit code.
+
+</details>
+
+[Weight evidence guide](docs/operations/evidence.md): scopes, supported views,
+coverage reasons and the pilot runbook ·
+[Build and query guide](docs/operations/zoo.md): score inputs, lineage tiers
+and revision handling
 
 <a name="verification-and-maintenance"></a>
 
-## <img src="docs/assets/chapter-06.svg" width="34" height="34" alt="06"> Verification and maintenance
+## <img src="docs/assets/glyph-verify.svg" width="30" height="30" alt=""> Verification and maintenance
 
-**Check the installation. Explore the implementation.**
-
-```bash
-python -m pytest esd_experiment/tests -q
-```
-
-<details>
-<summary><strong>Validate a change</strong> &nbsp; / &nbsp; Installation checks, regressions and maintenance</summary>
-
-Pytest is a development dependency, not a worker requirement:
+*Check the installation, then the change.*
 
 ```bash
 python -m pip install 'pytest>=8,<9'
+MODEL_ZOO_NETWORK_TESTS=0 python -m pytest esd_experiment/tests evidence/tests zoo/tests -q
+```
+
+<details>
+<summary><strong>Validate a change</strong> · Installation checks, focused regressions and maintenance</summary>
+
+Pytest is a development dependency, not a worker requirement. The setup check
+uses imports and a tiny CPU spectrum without token access, downloads or GPU use:
+
+```bash
 python esd_experiment/tests/test_setup.py
 
 python -m pytest \
@@ -517,9 +739,15 @@ python -m pytest \
   esd_experiment/tests/test_model_loader.py -q
 ```
 
-The setup check uses imports and a tiny CPU spectrum without token access,
-downloads or GPU use. Regression tests cover matrix selection, numerical edge
-cases, integrity, persistence, process ownership and fallback boundaries.
+Regression tests cover matrix selection, numerical edge cases, integrity,
+persistence, process ownership, fallback boundaries, evidence formats and zoo
+builds. With `HF_TOKEN` and `ZOO_DATA` set, two optional checks touch the network:
+
+```bash
+MODEL_ZOO_NETWORK_TESTS=1 python -m pytest evidence/tests/test_hub.py::test_network_smoke -q
+python evidence/scripts/day_one_checks.py
+```
+
 Optional independent SciPy float64 controls are in the
 [validation guide](docs/operations/analysis.md#validation); they are separate
 from collection and do not establish model quality.
@@ -528,43 +756,29 @@ Use `python esd_experiment/run_experiment.py --help` for the complete CLI.
 Keep helpers simple and add support for consequential collection failures.
 General probes are not a prerequisite for every small change or batch.
 
-The diagrams are editable, self-contained assets. Their
-[visual reference](docs/assets/README.md) includes regeneration instructions.
+The figures are generated from this repository's measurements by one script;
+the [visual system](docs/assets/README.md) explains how to regenerate them.
 
 </details>
 
 > [!NOTE]
-> **Research scope** · Collection supports bounded research runs; 50,000-model
+> **Research scope.** Collection supports bounded research runs; 50,000-model
 > operation is not yet proven. Matrix support is not universal architecture
 > support, and spectral descriptors require separate validation for model-quality claims.
 
-<table width="100%">
+<table align="center">
 <tr>
-<td width="33%" valign="top"><sub>UNDERSTAND THE NUMBERS</sub><br><a href="docs/operations/analysis.md"><strong>Analysis reference ↗</strong></a><br><sub>Coverage, conventions and interpretation</sub></td>
-<td width="33%" valign="top"><sub>FOLLOW THE CODE</sub><br><a href="esd_experiment/README.md#code-map"><strong>Runner source map ↗</strong></a><br><sub>Entrypoints and implementation boundaries</sub></td>
-<td width="33%" valign="top"><sub>MANAGE A COLLECTION</sub><br><a href="docs/operations/README.md"><strong>Operations guide ↗</strong></a><br><sub>Preparation and practical run management</sub></td>
+<td valign="top"><a href="docs/operations/analysis.md"><strong>Analysis reference</strong></a><br><sub>Coverage and metrics</sub></td>
+<td valign="top"><a href="docs/operations/evidence.md"><strong>Evidence guide</strong></a><br><sub>Scopes, views, runbook</sub></td>
+<td valign="top"><a href="docs/operations/zoo.md"><strong>Build and query guide</strong></a><br><sub>Packages, tables, lineage</sub></td>
+<td valign="top"><a href="docs/operations/README.md"><strong>Operations guide</strong></a><br><sub>Phases, curation, runs</sub></td>
 </tr>
 </table>
 
-<p align="center"><sub><a href="#top">Back to top ↑</a> &nbsp; · &nbsp; <a href="LICENSE">License</a> &nbsp; · &nbsp; <a href="docs/assets/README.md">Visual system</a></sub></p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/footer-dark.svg">
+  <img src="docs/assets/footer-light.svg" width="100%" alt="">
+</picture>
 
-<img src="docs/assets/page-closing.svg" width="100%" alt="">
-
-## Zoo database (build)
-
-Build a queryable snapshot from completed model packages:
-
-```bash
-python -m zoo.cli build
-```
-
-With `ZOO_DATA` set, this selects current measurement conventions from
-`$ZOO_DATA/packages` and publishes `$ZOO_DATA/builds/current`. Use `--packages`
-and `--conventions` to select explicit inputs. Existing manifest/fingerprint
-builds remain available through `--manifests` and `--fingerprints`.
-Backfill completed runs with `python -m zoo.cli publish --runs RUN_DIR`.
-
-The snapshot contains Parquet tables, including per-layer fit metrics, retrieval
-indexes and links to full HDF5 spectra. Zoo-Keeper provides `find`, `info`, `similar`, `family`, `diff` and
-`check`. See the [build and query guide](docs/operations/zoo.md) for score inputs,
-evidence tiers and revision handling.
+<p align="center"><sub><a href="#top">Back to top</a> · <a href="LICENSE">License</a> · <a href="docs/assets/README.md">Visual system</a><br>
+Product names and logos are trademarks of their owners.</sub></p>

@@ -1,6 +1,6 @@
 # ESD experiment runner
 
-Use the repository's [installation recipe](../README.md#1--create-the-environment)
+Use the repository's [installation recipe](../README.md#install)
 and root `requirements.txt`; there is no separate experiment dependency list.
 
 From the repository root, prepare a small pinned list first (metadata/config

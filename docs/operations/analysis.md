@@ -683,7 +683,7 @@ python -m pytest esd_experiment/tests -q
 ```
 
 Install pytest separately for development; it is not needed by workers. The
-[installation recipe](../../README.md#1--create-the-environment) uses one root
+[installation recipe](../../README.md#install) uses one root
 dependency list. `python esd_experiment/tests/test_setup.py` checks imports and
 a tiny CPU spectrum without accessing tokens, downloading weights or using GPUs.
 
@@ -732,7 +732,7 @@ Use the ordinary workflow: **prepare → review → run → index → query**.
   No database service, extra observer or separate cache manager is required.
 
 Current budgets are automatic from reviewed weight bytes and the selected GPU
-pool; see README's resource table for the initial sizing rules. Limits are configurable sampled safeguards, not OS quotas
+pool; see the README's [resource table](../../README.md#runtime-controls-and-cache-lifecycle) for the initial sizing rules. Limits are configurable sampled safeguards, not OS quotas
 or predictions of GPU memory. Keep cache ownership, bounded disk and shared-HPC
 availability checks even when optimizing overhead.
 
