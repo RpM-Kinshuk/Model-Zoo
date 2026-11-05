@@ -2,14 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status (2026-11-04):** Tasks1–8 implemented. Owner commits through `bcbcea0`
-include the CPU budget and initial pair pass; final pair fixes and Task8 remain
-uncommitted. One final batch review/fix pass; focused integration264PASS,
-final edge checks23PASS. XF approved following the practical-purpose audit below.
-Task9 real GPU validation remains pending: sandbox NVML is unavailable;
-outside-sandbox access works, but a90s-bounded smoke yielded no completion result
-as the initially idle slots became busy. Preparation regression48PASS.
-No full-scale performance claims or numeric-core changes.
+**Status (2026-11-04):** Tasks1–8 implemented (owner checkpoint0738879).
+Task9 quick subset now measured:3real local14M models,CPU/GPU parity,
+Smol135T1 and cache/build timings. Correctness passes; tiny-model warm GPU
+processing overhead3.68–5.62x misses the proposed10%target. SmolT1 GPU1.98x
+faster than CPU. Broader planned runs remain outstanding. No product changes
+or sizing-rule tuning in this benchmark turn. Results:
+`analysis_runs/validation/full_mode_quick_20261104/REPORT.md`.
 Progress ledger: `.superpowers/sdd/2026-11-04-full-mode-evidence-packages/progress.md`.
 
 **Agents: never run commit steps.** Leave changes uncommitted and record each
@@ -622,6 +621,13 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 
 ### Task 9: Validation runs (lead)
 
+**Quick subset (2026-11-04):** [Measured report](../../../analysis_runs/validation/full_mode_quick_20261104/REPORT.md).
+CPU/GPU correctness passed on local sources; warm tiny-model overhead target
+missed. For direct CPU/GPU math, hashes/statuses/ranks must be exact; sketches
+use rtol/atol1e-4 and spectra error must be below1e-4times the view's largest
+eigenvalue. CPU sidecar/standalone equality remains exact. This subset does not
+check off the larger acceptance runs below.
+
 Each run stays within D4.1 or is handed to the person through `STATUS.md`.
 
 - [ ] **Plain run:** a 5-model run with only `--model_list`, `--output_dir` and
@@ -643,3 +649,20 @@ Each run stays within D4.1 or is handed to the person through `STATUS.md`.
   `CUDA_VISIBLE_DEVICES`. Report wall time, bytes read and GPU busy fraction;
   pass on the parity criteria above.
 - [ ] Record the results in `STATUS.md`.
+
+
+### Conditional small optimization — bulk sidecar spectrum writes
+
+Owner authorized only if worthwhile (2026-11-04). Profile identified0.33–0.43s
+for26row-at-a-time HDF5 spectrum writes. Preserve the existing streaming writer
+and add an empty-file bulk writer used only by publish_t2 after complete-bundle
+validation. Formats/numerics/coverage/atomic publication unchanged. Verify exact
+streaming/bulk dataset parity (including ragged spectra and missing metrics),
+sidecar validation/rollback tests, and before/after timings. Retain only with a
+measurable benefit; no pipeline redesign or weakened integrity checks.
+
+
+**Outcome:** Retained. Five paired real-row trials: spectrum publication median
+0.491→0.073s (85%less). Three cold-operator sidecar pairs:2.083→1.685s (19%less).
+Exact stored-value/fingerprint parity;80focused tests pass. No claim that this
+alone meets the10%GPU-overhead target. See the benchmark report for raw samples.

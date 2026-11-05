@@ -51,8 +51,7 @@ def publish_t2(out_dir: Path, manifest: dict, results: list[tuple[str, dict]], m
     devices = {str(result["compute_device"]) for result in by_name.values() if result.get("compute_device")}
     spectra.handle.attrs["compute_device"] = next(iter(devices)) if len(devices) == 1 else ("mixed" if devices else "unknown")
     try:
-        for name in names:
-            spectra.add_result(name, by_name[name])
+        spectra.add_results((name, by_name[name]) for name in names)
         spectra.close(publish=True)
         spectra = None
         os.replace(staged, marker)

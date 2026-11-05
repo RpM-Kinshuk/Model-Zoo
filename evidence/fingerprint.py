@@ -441,6 +441,37 @@ class _Spectra:
         self.eigs.resize(index + 1, axis=0)
         self.eigs[index] = np.asarray(result["eigs"], dtype=np.float32)
 
+    def add_results(self, results):
+        """Write a complete bundle with one write per scalar/string column."""
+        if len(self.eigs):
+            raise ValueError("Batch spectrum writing requires an empty file")
+        results = list(results)
+        if not results:
+            return
+        rows = [{key: value for key, value in result.items()
+                 if key not in ("eigs", "longname") and isinstance(value, (str, int, float, bool, np.number))}
+                for _, result in results]
+        for values in rows:
+            for key, value in values.items():
+                if "/" in key or not key:
+                    raise ValueError("Invalid spectrum metric name")
+                if key not in self.layers:
+                    self.layers.create_dataset(key, (0,), maxshape=(None,),
+                                               dtype=h5py.string_dtype() if isinstance(value, str) else "f8")
+        count = len(results)
+        for key, dataset in self.layers.items():
+            dataset.resize(count, axis=0)
+            if key == "longname":
+                dataset[:] = [name for name, _ in results]
+            else:
+                missing = "" if h5py.check_string_dtype(dataset.dtype) else np.nan
+                dataset[:] = [values.get(key, missing) for values in rows]
+        self.eigs.resize(count, axis=0)
+        # h5py treats equal-length object arrays as a 2D broadcast, even for
+        # a variable-length dataset. Keep its per-spectrum assignment path.
+        for index, (_, result) in enumerate(results):
+            self.eigs[index] = np.asarray(result["eigs"], dtype=np.float32)
+
     def close(self, publish=False):
         self.handle.close()
         if publish:

@@ -281,3 +281,43 @@ def test_published_spectrum_device_describes_supplied_results(local_manifest, tm
     with h5py.File(next(tmp_path.glob("*.h5"))) as h:
         assert h.attrs["compute_device"] == "cuda:1"
         assert set(h["layers/compute_device"].asstr()[:]) == {"cuda:1"}
+
+
+def test_batched_spectra_matches_streaming_layout_and_values(tmp_path):
+    from evidence.fingerprint import _Spectra
+    rows = [
+        ("a.weight", dict(eigs=np.array([1., 2.], np.float32), alpha=2., fit_status="ok", extra=3.)),
+        ("b.weight", dict(eigs=np.array([0., 4., 5.], np.float32), alpha=np.float64(2.5), fit_status="small", late=7)),
+        ("c.weight", dict(eigs=np.array([6.], np.float32), alpha=3., fit_status="ok")),
+    ]
+    for label in ("stream", "batch"):
+        writer = _Spectra(tmp_path / f"{label}.h5", torch.device("cpu"), config())
+        try:
+            if label == "stream":
+                for name, result in rows:
+                    writer.add_result(name, result)
+            else:
+                writer.add_results(rows)
+            writer.close(publish=True)
+        except BaseException:
+            writer.close()
+            raise
+    with h5py.File(tmp_path / "stream.h5") as left, h5py.File(tmp_path / "batch.h5") as right:
+        assert dict(left.attrs) == dict(right.attrs)
+        assert list(left["layers"]) == list(right["layers"])
+        for key in left["layers"]:
+            a, b = left["layers"][key], right["layers"][key]
+            assert a.dtype == b.dtype and a.maxshape == b.maxshape
+            np.testing.assert_equal(a[:], b[:])
+        assert left["eigs"].dtype == right["eigs"].dtype
+        assert left["eigs"].maxshape == right["eigs"].maxshape
+        for a, b in zip(left["eigs"][:], right["eigs"][:]):
+            np.testing.assert_array_equal(a, b)
+
+
+def test_sidecar_publishes_spectra_in_batch(local_manifest, tmp_path, monkeypatch):
+    from evidence.fingerprint import _Spectra
+    monkeypatch.setattr(_Spectra, "add_result", lambda *args: pytest.fail("row-by-row spectrum write"))
+    sidecar = EvidenceSidecar(local_manifest, tmp_path / "out")
+    sidecar.start()
+    assert sidecar.finish(runner_results(local_manifest), loader(local_manifest), measure, config()) == dict(reused=2, measured=0, gaps=0)
