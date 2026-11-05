@@ -55,6 +55,27 @@ class BlockCache:
             return None
         return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(shape)
 
+    def _entries(self):
+        """Take one size/LRU snapshot; needed only for recovery or eviction."""
+        entries = []
+        with os.scandir(self.root) as directory:
+            for entry in directory:
+                if entry.name.endswith(".bin") and entry.is_file(follow_symlinks=False):
+                    info = entry.stat(follow_symlinks=False)
+                    entries.append((info.st_atime_ns, entry.name, info.st_size, entry.path))
+        return entries
+
+    def _accounted_bytes(self, usage_path):
+        """Trust accounting only while directory membership is unchanged."""
+        try:
+            usage = json.loads(usage_path.read_text())
+            if (type(usage["bytes"]) is int and usage["bytes"] >= 0
+                    and usage["directory_mtime_ns"] == self.root.stat().st_mtime_ns):
+                return usage["bytes"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        return None
+
     def put(self, manifest, view_name, bounds, block):
         block = block.detach().cpu().contiguous()
         raw = block.view(torch.uint8).numpy().tobytes()
@@ -62,6 +83,14 @@ class BlockCache:
             return
         path = self._path(manifest, view_name, bounds, block.dtype, block.shape)
         with self._locked():
+            usage_path = self.root / ".usage.json"
+            total = self._accounted_bytes(usage_path)
+            if total is None:
+                total = sum(entry[2] for entry in self._entries())
+            # Invalidate before any mutation: an interrupted writer forces the
+            # next writer to recount, including any newly published block.
+            usage_path.unlink(missing_ok=True)
+            previous_size = path.stat().st_size if path.exists() else 0
             fd, temporary = tempfile.mkstemp(suffix=".tmp", dir=self.root)
             try:
                 with os.fdopen(fd, "wb") as stream:
@@ -69,20 +98,21 @@ class BlockCache:
                 os.replace(temporary, path)
                 stamp = time.time_ns()
                 os.utime(path, ns=(stamp, stamp))
-                # Keep one stat result per entry and sort only when eviction
-                # is actually necessary. Preserve the existing shared byte cap.
-                entries = []
-                with os.scandir(self.root) as directory:
-                    for entry in directory:
-                        if entry.name.endswith(".bin") and entry.is_file(follow_symlinks=False):
-                            info = entry.stat(follow_symlinks=False)
-                            entries.append((info.st_atime_ns, entry.name, info.st_size, entry.path))
-                total = sum(entry[2] for entry in entries)
+                total += len(raw) - previous_size
                 if total > self.max_bytes:
+                    entries = self._entries()
+                    total = sum(entry[2] for entry in entries)
+                    # Reclaim about 5% headroom so a full large cache does not
+                    # scan again on every insert. Large blocks still use the cap.
+                    target = self.max_bytes * 95 // 100
                     for _, _, size, entry in sorted(entries):
-                        if total <= self.max_bytes:
+                        if total <= self.max_bytes and total - size < target:
                             break
                         os.unlink(entry)
                         total -= size
+                # Creating the record changes directory mtime; writing its
+                # contents does not. Legacy writers/external additions invalidate it.
+                with usage_path.open("w") as stream:
+                    json.dump(dict(bytes=total, directory_mtime_ns=self.root.stat().st_mtime_ns), stream)
             finally:
                 Path(temporary).unlink(missing_ok=True)

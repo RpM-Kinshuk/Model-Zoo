@@ -707,3 +707,29 @@ explicit local names. Existing artifact tiers, CLI flags and CSV fields retain
 their spelling. Root AGENTS.md records these clarity conventions. Rename and
 subprocess integration tests cover all updated call sites; no numerical or
 format changes.
+
+### Bounded scaling follow-up (owner request, Nov5)
+
+Keep exact retrieval/lineage semantics and existing artifacts. Three focused
+changes, executed in the current authorized checkout without commits:
+
+1. `evidence/block_cache.py`: share a small byte-count record under the existing
+   writer lock. Invalidate it before mutation; missing/partial records or directory
+   membership changes trigger a recovery scan. Scan for LRU eviction only when
+   full; reclaim about 5% headroom when entry sizes permit. Preserve lock-free
+   reads, atomic block publication and the byte cap. Test shared accounting,
+   interrupted publication, external additions, batching and existing races.
+2. `zoo/lineage.py`: index nonempty hashes with full view alignment, and compare
+   only pairs sharing an aligned hash. Exclude duplicate classes before pair
+   expansion. Preserve denominators, tiers, scores and deterministic orientation.
+   Test sparse candidates and existing compatibility cases.
+3. `zoo/retrieval.py`, `zoo/lineage.py`: reuse validated metadata/memory maps once
+   per architecture during a build; pre-group model view rows during index
+   assembly. Preserve the public nearest API and scoring. Test index reuse and
+   existing exact score/mask/tie/calibration cases. Exact all-model scoring still
+   has quadratic arithmetic; ANN/recall policy and dense edge-output limits are
+   deferred as larger work. No dependencies, GPUs or format/version changes.
+
+Run the changed cache/retrieval/lineage/build suites once after RED→GREEN;
+benchmark local synthetic cache and sparse-lineage workloads, document measured
+scope and remaining limits. No repeated full suites or review loops.

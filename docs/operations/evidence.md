@@ -270,9 +270,14 @@ covered in the [zoo guide](zoo.md#candidate-pair-delta-pass).
 
 Parent cache operations publish complete files atomically. Hot reads do not
 wait for the eviction writer; unavailable/stale cache files are misses. Writers
-still serialize eviction and scan the cache directory, so insertion remains
-linear in the entry count. Use a local scratch parent-cache path for throughput;
-large shared caches need a further indexing/sharding change before a census.
+share a small byte-count record under the existing lock, so ordinary inserts
+avoid directory scans. The record is invalidated before mutation; an interrupted
+write, unreadable record or changed directory membership triggers a recount.
+Block files are private: do not modify their contents in place outside the cache.
+On overflow, one LRU scan reclaims about 5% headroom when block sizes permit,
+amortizing scans across later inserts. A recovery/eviction scan remains linear
+(and eviction sorting costs O(N log N)); writers still serialize. Use local
+scratch for throughput; this adds no cross-node locking guarantee.
 The Nov5 audit measured same-host cross-process locking on the actual NFS4 mount;
 cross-node locking remains unverified. See the
 [gap audit](../../analysis_runs/validation/gap_audit_20261105/REPORT.md).

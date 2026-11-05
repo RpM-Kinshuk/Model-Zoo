@@ -204,3 +204,39 @@ def test_pair_delta_does_not_promote_detected_claim_to_verified():
     assert result.iloc[0].evidence == "sketch_similarity+row_block_delta"
     assert result.iloc[0].evidence_tier == "detected" and not result.iloc[0].calibrated
     assert result.iloc[0].estimand == "same_root" and result.iloc[0].score == .8
+
+
+def test_shared_tensor_candidates_skip_unrelated_and_duplicate_pairs(monkeypatch):
+    from itertools import combinations
+    import zoo.lineage as lineage
+    enumerated = []
+    def counted(items, count):
+        for pair in combinations(items, count):
+            enumerated.append(pair)
+            yield pair
+    monkeypatch.setattr(lineage, 'combinations', counted)
+    views = _views()
+    unrelated = [dict(row, model_key=f'unrelated-{i}', block_sha256=f'{i}-{row["name"]}')
+                 for i in range(100) for row in views[views.model_key == 'a'].to_dict('records')]
+    actual = shared_tensor_edges(pd.concat([views, pd.DataFrame(unrelated)], ignore_index=True), {})
+    assert list(zip(actual.child_key, actual.parent_key, actual.score)) == [('a', 'b', .5)]
+    assert len(enumerated) <= 2
+    enumerated.clear()
+    duplicates = views[views.model_key == 'a']
+    duplicates = pd.concat([duplicates.assign(model_key=f'dup-{i}') for i in range(100)], ignore_index=True)
+    assert shared_tensor_edges(duplicates, {f'dup-{i}': 'same' for i in range(100)}).empty
+    assert not enumerated
+
+
+def test_similarity_reuses_each_retrieval_index(tmp_path, monkeypatch):
+    models = _staged_pair(tmp_path)
+    original = np.load
+    opened = []
+    def load(path, **kwargs):
+        opened.append(path)
+        return original(path, **kwargs)
+    monkeypatch.setattr(np, 'load', load)
+    edges = similarity_edges(tmp_path, models, tmp_path)
+    assert len(edges) == 1
+    assert edges.iloc[0].score == pytest.approx(0., abs=1e-6)
+    assert len(opened) == 1

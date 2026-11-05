@@ -133,6 +133,24 @@ Exit codes: **0** completed (including uncalibrated or base-not-in-zoo checks),
 **1** an inconsistent `check`, **2** invalid input or unavailable/ambiguous
 comparison. Read the verdict as well as the exit code.
 
+## Build scaling
+
+Shared-tensor lineage first indexes hashes with their view names and alignment,
+then compares only pairs sharing an aligned hash. Duplicate classes are excluded
+before pair expansion. Exact shared fractions and edge orientation are unchanged;
+large families sharing a hash can still require quadratic pair/output work.
+
+Retrieval assembly groups view rows once per model. During lineage detection,
+each architecture index is loaded once and reused, with alignment comparisons
+encoded as integer IDs. This removes repeated metadata parsing and Python
+alignment checks. Scores, missing-view masks, deterministic ties and the on-disk
+index format are unchanged. Exact scoring is linear per query and quadratic when
+a build queries every model in a large group. Approximate search needs a separate
+candidate-recall policy before it can replace this path at census scale.
+
+Local synthetic timings and exact before/after parity are recorded in the
+[scaling follow-up](../../analysis_runs/validation/scaling_followup_20261105/REPORT.md).
+
 ## Validation status
 
 The 2026-11-02 scoped CLI smoke passed on 85 models: 43 measured checkpoints and

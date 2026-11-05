@@ -83,3 +83,42 @@ def test_stale_network_cache_file_is_a_miss(tmp_path, monkeypatch):
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'open', stale)
     assert cache.get(IDENTITY, 'a', (0, 2), block.dtype, block.shape) is None
+
+
+def test_cache_accounting_is_shared_and_batch_eviction_avoids_repeated_scans(tmp_path, monkeypatch):
+    # Catch both per-insert full scans and per-instance accounting that ignores peers.
+    original = os.scandir
+    scans = []
+    def scan(path):
+        scans.append(path)
+        return original(path)
+    monkeypatch.setattr(os, "scandir", scan)
+    block = torch.ones(2, 4)  # 32 bytes; 100 slots in the shared budget.
+    caches = [BlockCache(tmp_path, 3200), BlockCache(tmp_path, 3200)]
+    for index in range(120):
+        caches[index % 2].put(IDENTITY, str(index), (0, 2), block * index)
+    assert len(scans) <= 6
+    assert sum(path.stat().st_size for path in tmp_path.glob("*.bin")) <= 3200
+    assert caches[0].get(IDENTITY, '0', (0, 2), block.dtype, block.shape) is None
+    assert torch.equal(caches[1].get(IDENTITY, '119', (0, 2), block.dtype, block.shape), block * 119)
+
+
+def test_cache_accounting_recovers_after_interruption_and_external_addition(tmp_path, monkeypatch):
+    import pytest
+    block = torch.ones(2, 4)
+    cache = BlockCache(tmp_path, 64)
+    cache.put(IDENTITY, 'a', (0, 2), block)
+    original = os.replace
+    def interrupted(*args):
+        original(*args)
+        raise OSError('interrupted after block publication')
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'replace', interrupted)
+        with pytest.raises(OSError, match='interrupted'):
+            cache.put(IDENTITY, 'b', (0, 2), block)
+    # Simulate a legacy writer while the current writer is not holding its lock.
+    (tmp_path / 'external.bin').write_bytes(b'x' * 64)
+    cache = BlockCache(tmp_path, 64)
+    cache.put(IDENTITY, 'c', (0, 2), block * 3)
+    assert sum(path.stat().st_size for path in tmp_path.glob('*.bin')) <= 64
+    assert torch.equal(cache.get(IDENTITY, 'c', (0, 2), block.dtype, block.shape), block * 3)

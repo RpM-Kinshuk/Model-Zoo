@@ -1,7 +1,8 @@
 """Declared and measured v0 lineage, with optional P1 evidence appended."""
 
+from collections import defaultdict
 from dataclasses import replace
-from itertools import combinations
+from itertools import combinations, product
 import math
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from evidence.compare import _relatedness, _view_reason, pair_similarity
-from .retrieval import _fingerprint, _paths, nearest
+from .retrieval import RetrievalIndex, _fingerprint, _paths
 from .schema import LINEAGE_COLUMNS, empty_table, split_key
 
 
@@ -56,14 +57,25 @@ def shared_tensor_edges(views: pd.DataFrame, dup_groups: dict) -> pd.DataFrame:
     """Count identical hashes only among aligned T1 blocks, excluding duplicates."""
     first = views[views.tier == "t1"]
     groups = {}
-    for key, group in first.groupby("model_key", sort=True):
-        if group.name.duplicated().any():
-            raise ValueError(f"Duplicate T1 view names: {key}")
-        groups[key] = {row.name: row for row in group.itertuples()}
+    for view in first.itertuples():
+        own = groups.setdefault(view.model_key, {})
+        if view.name in own:
+            raise ValueError(f"Duplicate T1 view names: {view.model_key}")
+        own[view.name] = view
+    # A pair with no aligned identical hash cannot produce this edge. Group
+    # duplicate classes before expansion to avoid enumerating within-class pairs.
+    postings = defaultdict(lambda: defaultdict(list))
+    for key, own in groups.items():
+        for view in own.values():
+            if view.block_sha256:
+                identity = (view.name, view.geometry, view.r0, view.r1, view.n_cols, view.block_sha256)
+                postings[identity][dup_groups.get(key, key)].append(key)
+    candidates = set()
+    for duplicate_classes in postings.values():
+        for left_keys, right_keys in combinations(duplicate_classes.values(), 2):
+            candidates.update(tuple(sorted(pair)) for pair in product(left_keys, right_keys))
     rows = []
-    for child, parent in combinations(sorted(groups), 2):
-        if dup_groups.get(child, child) == dup_groups.get(parent, parent):
-            continue
+    for child, parent in sorted(candidates):
         left, right = groups[child], groups[parent]
         shared, identical = 0, 0
         for name in left.keys() & right.keys():
@@ -115,19 +127,25 @@ def similarity_edges(zoo_dir: Path, models: pd.DataFrame, data_root: Path,
     root = Path(data_root).resolve()
     records = {row.model_key: row for row in models.itertuples()
                if isinstance(row.fingerprint_t1, str) and row.fingerprint_t1}
-    candidates = set()
+    groups = defaultdict(list)
     for key, model in sorted(records.items()):
-        paths = _paths(zoo_dir, model.arch_signature)
+        groups[model.arch_signature].append(key)
+    candidates = set()
+    for signature, keys in sorted(groups.items()):
+        paths = _paths(zoo_dir, signature)
         present = [path.exists() or path.is_symlink() for path in paths]
         if not any(present):
             continue  # Singletons and signatures without common T1 views have no index.
         if not all(present):
             raise ValueError("Incomplete retrieval index: matrix and metadata are required")
-        neighbors = nearest(zoo_dir, key, model.arch_signature, k)
-        for neighbor, _ in neighbors:
-            if neighbor not in records or records[neighbor].arch_signature != model.arch_signature:
-                raise ValueError("Retrieval candidate disagrees with lineage models")
-            candidates.add(tuple(sorted((key, neighbor))))
+        if not k:
+            continue
+        index = RetrievalIndex(zoo_dir, signature)
+        for key in keys:
+            for neighbor, _ in index.nearest(key, k):
+                if neighbor not in records or records[neighbor].arch_signature != signature:
+                    raise ValueError("Retrieval candidate disagrees with lineage models")
+                candidates.add(tuple(sorted((key, neighbor))))
     fingerprints, rows = {}, []
     for child, parent in sorted(candidates):
         for key in (child, parent):

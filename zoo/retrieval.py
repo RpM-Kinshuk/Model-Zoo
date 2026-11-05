@@ -114,9 +114,11 @@ def build_retrieval(zoo_dir: Path, models: pd.DataFrame, views: pd.DataFrame,
                                           shape=(len(group), len(names) * _VIEW_WIDTH))
         matrix[:] = 0
         keys, presence, coordinates, missing = [], [], [], {}
+        rows_by_model = {key: own for key, own in selected_rows.groupby("model_key", sort=False)}
+        empty_views = selected_rows.iloc[:0]
         for model_index, row in enumerate(group.itertuples()):
             fp = _fingerprint(row, root)
-            own = selected_rows[selected_rows.model_key == row.model_key]
+            own = rows_by_model.get(row.model_key, empty_views)
             if own.name.duplicated().any():
                 raise ValueError(f"Duplicate retrieval view names: {row.model_key}")
             own = own.set_index("name", drop=False)
@@ -159,49 +161,79 @@ def _unit_blocks(rows, n_views):
     return blocks, valid
 
 
+class RetrievalIndex:
+    """One validated exact-search index, reusable across queries in a build.
+
+    The matrix remains memory-mapped and search chunks remain bounded. Reusing
+    metadata removes repeated parsing/alignment work, not exact pairwise scoring.
+    """
+
+    def __init__(self, zoo_dir: Path, signature: str):
+        matrix_path, metadata_path = _paths(zoo_dir, signature)
+        metadata = json.loads(metadata_path.read_text())
+        keys, names = metadata["models"], metadata["views"]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Duplicate retrieval model keys")
+        if (metadata.get("sketch_seed") != SKETCH_SEED or metadata.get("row_block") != ROW_BLOCK
+                or metadata.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS):
+            raise ValueError("Incompatible retrieval settings")
+        n_views = len(names)
+        presence = np.asarray(metadata["presence"], dtype=bool)
+        coordinates = metadata["coordinates"]
+        if (presence.shape != (len(keys), n_views) or len(coordinates) != len(keys)
+                or any(len(row) != n_views for row in coordinates) or not n_views):
+            raise ValueError("Invalid retrieval presence/alignment metadata")
+        matrix = np.load(matrix_path, mmap_mode="r", allow_pickle=False)
+        if matrix.shape != (len(keys), n_views * _VIEW_WIDTH) or matrix.dtype != np.float16:
+            raise ValueError("Invalid retrieval matrix shape/dtype")
+        self.keys, self.presence, self.matrix = keys, presence, matrix
+        self.n_views = n_views
+        self.key_indices = {key: index for index, key in enumerate(keys)}
+        # Encode alignment facts once. IDs are local to each view position, so
+        # equality retains precisely the old per-view coordinate comparison.
+        self.alignment_ids = np.full((len(keys), n_views), -1, dtype=np.int64)
+        for view in range(n_views):
+            identities = {}
+            for index, row in enumerate(coordinates):
+                if row[view] is not None:
+                    facts = tuple(row[view])
+                    self.alignment_ids[index, view] = identities.setdefault(facts, len(identities))
+
+    def nearest(self, key: str, k: int) -> list[tuple[str, float]]:
+        if type(k) is not int or k < 0:
+            raise ValueError("k must be a nonnegative integer")
+        if k == 0:
+            return []
+        if key not in self.key_indices:
+            raise ValueError(f"Model has no comparable T1 retrieval row: {key}")
+        keys, matrix, presence, n_views = self.keys, self.matrix, self.presence, self.n_views
+        query_index = self.key_indices[key]
+        query, query_valid = _unit_blocks(matrix[query_index:query_index + 1], n_views)
+        query = query[0]
+        query_present = presence[query_index] & query_valid[0]
+        output = []
+        for start in range(0, len(keys), _SEARCH_CHUNK):
+            stop = min(start + _SEARCH_CHUNK, len(keys))
+            blocks, valid = _unit_blocks(matrix[start:stop], n_views)
+            aligned = ((self.alignment_ids[start:stop] >= 0)
+                       & (self.alignment_ids[start:stop] == self.alignment_ids[query_index]))
+            common = presence[start:stop] & valid & query_present & aligned
+            denominator = common.sum(axis=1)
+            per_view = np.einsum("mvd,vd->mv", blocks, query, dtype=np.float32, optimize=True)
+            totals = np.where(common, per_view, 0).sum(axis=1, dtype=np.float32)
+            for offset, count in enumerate(denominator):
+                index = start + offset
+                if count and index != query_index:
+                    score = float(np.clip(totals[offset] / count, -1., 1.))
+                    if math.isfinite(score):
+                        output.append((keys[index], score))
+        return sorted(output, key=lambda item: (-item[1], item[0]))[:k]
+
+
 def nearest(zoo_dir: Path, key: str, sig: str, k: int) -> list[tuple[str, float]]:
     """Exact float32 search, bounded in memory, with pairwise view masks."""
     if type(k) is not int or k < 0:
         raise ValueError("k must be a nonnegative integer")
     if k == 0:
         return []
-    matrix_path, metadata_path = _paths(zoo_dir, sig)
-    metadata = json.loads(metadata_path.read_text())
-    keys, names = metadata["models"], metadata["views"]
-    if len(set(keys)) != len(keys):
-        raise ValueError("Duplicate retrieval model keys")
-    if key not in keys:
-        raise ValueError(f"Model has no comparable T1 retrieval row: {key}")
-    if (metadata.get("sketch_seed") != SKETCH_SEED or metadata.get("row_block") != ROW_BLOCK
-            or metadata.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS):
-        raise ValueError("Incompatible retrieval settings")
-    n_views = len(names)
-    presence = np.asarray(metadata["presence"], dtype=bool)
-    coordinates = metadata["coordinates"]
-    if (presence.shape != (len(keys), n_views) or len(coordinates) != len(keys)
-            or any(len(row) != n_views for row in coordinates) or not n_views):
-        raise ValueError("Invalid retrieval presence/alignment metadata")
-    matrix = np.load(matrix_path, mmap_mode="r", allow_pickle=False)
-    if matrix.shape != (len(keys), n_views * _VIEW_WIDTH) or matrix.dtype != np.float16:
-        raise ValueError("Invalid retrieval matrix shape/dtype")
-    query_index = keys.index(key)
-    query, query_valid = _unit_blocks(matrix[query_index:query_index + 1], n_views)
-    query = query[0]
-    query_present = presence[query_index] & query_valid[0]
-    output = []
-    for start in range(0, len(keys), _SEARCH_CHUNK):
-        stop = min(start + _SEARCH_CHUNK, len(keys))
-        blocks, valid = _unit_blocks(matrix[start:stop], n_views)
-        aligned = np.asarray([[facts is not None and facts == coordinates[query_index][view]
-                               for view, facts in enumerate(row)] for row in coordinates[start:stop]], dtype=bool)
-        common = presence[start:stop] & valid & query_present & aligned
-        denominator = common.sum(axis=1)
-        per_view = np.einsum("mvd,vd->mv", blocks, query, dtype=np.float32, optimize=True)
-        totals = np.where(common, per_view, 0).sum(axis=1, dtype=np.float32)
-        for offset, count in enumerate(denominator):
-            index = start + offset
-            if count and index != query_index:
-                score = float(np.clip(totals[offset] / count, -1., 1.))
-                if math.isfinite(score):
-                    output.append((keys[index], score))
-    return sorted(output, key=lambda item: (-item[1], item[0]))[:k]
+    return RetrievalIndex(zoo_dir, sig).nearest(key, k)
