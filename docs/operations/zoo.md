@@ -271,3 +271,25 @@ zoo readers accept versions 0, 1 and 2, translating legacy numbered columns to
 Old six-table builds have an empty `layers` table. Current default packages use
 evidence version 3; select older conventions explicitly or regenerate evidence.
 Rebuild older generations for query clients that require the current `ZOO_VERSION`.
+
+
+### Approved formal roster calibration smoke (2026-11-05)
+
+The approved `formal166-public-constructions-v2`166-model build is recorded
+under `$ZOO_DATA/runs/track-a-roster-v2-calibration-20261105/`. `R5-report.md`
+and `verification.json` bind the existing calibration writer and all six CLI
+query results. `zoo/` is an immutable build pointer; `calibration.json` uses
+k64/block256/seed20261028.165 independent/157 parent fitting pairs exclude
+the prior two held-out roots;15 independent evaluation pairs had0threshold
+exceedances, with no held-out positive recall estimate.
+
+Example query (existing environment and editable packages):
+
+```bash
+python -m zoo_keeper.cli find --zoo "$ZOO_DATA/runs/track-a-roster-v2-calibration-20261105/zoo" --json
+```
+
+6/18 imported Raw leaderboard associations verify their revision; default
+skill queries exclude unverified associations. Explicit standalone evidence
+retains full spectra and has no collector ESD layer table. This internal
+snapshot does not decide G0/G1 or establish the5000-candidate retrieval gate.
