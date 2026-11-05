@@ -238,3 +238,47 @@ def test_embedded_lora_and_base_have_unique_identities():
     assert all(c["status"] == "measured" for c in coverage)
     standalone, _ = plan_views({k: v for k, v in entries.items() if "lora_" in k}, {})
     assert standalone[0].name == "model.layers.0.q_proj.weight"
+
+
+def test_real_embedded_peft_wrapper_keeps_base_and_update_identities_separate():
+    prefix = 'base_model.model.'
+    module = prefix + 'model.layers.0.q_proj'
+    tensors = {
+        module + '.base_layer.weight': torch.arange(64 * 64).reshape(64, 64).float(),
+        module + '.lora_A.default.weight': torch.ones(8, 64),
+        module + '.lora_B.default.weight': torch.ones(64, 8),
+        prefix + 'model.layers.0.k_proj.weight': torch.eye(64),
+    }
+    entries = E(**{name: ('F32', tuple(tensor.shape)) for name, tensor in tensors.items()})
+    views, coverage = plan_views(entries, {})
+    by_name = {view.name: view for view in views}
+    assert set(by_name) == {'model.layers.0.q_proj.weight',
+                           'model.layers.0.q_proj.weight[lora]',
+                           'model.layers.0.k_proj.weight'}
+    assert by_name['model.layers.0.q_proj.weight'].geometry == 'matrix'
+    assert by_name['model.layers.0.q_proj.weight[lora]'].geometry == 'lora_product'
+    for name, source in [('model.layers.0.q_proj.weight', module + '.base_layer.weight'),
+                         ('model.layers.0.k_proj.weight', prefix + 'model.layers.0.k_proj.weight')]:
+        view = by_name[name]
+        assert view.sources == (source,)
+        torch.testing.assert_close(decode_view(view, lambda key, rows: tensors[key] if rows is None else tensors[key][rows], {}), tensors[source], rtol=0, atol=0)
+    assert len(views) == len(by_name)
+    assert all(row['status'] == 'measured' for row in coverage)
+
+
+def test_wrapper_normalization_requires_embedded_adapter_evidence():
+    name = 'base_model.model.model.layers.0.q_proj.weight'
+    views, _ = plan_views(E(**{name: ('F32', (64, 64))}), {})
+    assert views[0].name == name
+
+
+def test_embedded_wrapper_rejects_ambiguous_canonical_base():
+    module = 'base_model.model.model.layers.0.q_proj'
+    entries = E(**{
+        module + '.base_layer.weight': ('F32', (64, 64)),
+        module + '.lora_A.default.weight': ('F32', (8, 64)),
+        module + '.lora_B.default.weight': ('F32', (64, 8)),
+        'model.layers.0.q_proj.weight': ('F32', (64, 64)),
+    })
+    with pytest.raises(ValueError, match='ambiguous.*view'):
+        plan_views(entries, {})

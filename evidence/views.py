@@ -128,6 +128,7 @@ def plan_views(entries: dict[str, TensorEntry], config: dict, adapter_config: di
         if packed and reps[name] is None:
             poisoned.add(name.rpartition(".")[0])
     views, coverage, factors = [], {}, {}
+    embedded_bases = set()
     for name in sorted(entries):
         for down, up in _LORA_PAIRS:
             if re.search(r"(?:^|[./])" + re.escape(down) + r"(?:\.|$)", name):
@@ -158,6 +159,9 @@ def plan_views(entries: dict[str, TensorEntry], config: dict, adapter_config: di
                         scale = 1. / rank
                     elif adapter_config is None and down in ("lora_A", "lora_embedding_A"):
                         scale, reason = 1., "lora_scale_unknown"
+                base_name = module + ".base_layer.weight"
+                if module.startswith("base_model.model.") and base_name in entries:
+                    embedded_bases.add(base_name)
                 vname = module.removeprefix("base_model.model.") + ".weight"
                 views.append(View(vname, "plain", "lora_product", sources, None, matrix_shape,
                                   component_of(module, a.file), False, scale))
@@ -223,6 +227,12 @@ def plan_views(entries: dict[str, TensorEntry], config: dict, adapter_config: di
         indices = sorted(selected if count == shape[0] else (range(shape[0]) if all_experts or shape[0] <= 8 else np.random.default_rng([SKETCH_SEED, shape[0]]).choice(shape[0], 8, replace=False))) if expert else [None]
         for index in indices:
             vname = name.removesuffix("_blocks")
+            if embedded_bases:
+                # Real PEFT full checkpoints wrap the entire backbone. Sources
+                # stay physical; only view identities match the unwrapped base.
+                vname = vname.removeprefix("base_model.model.")
+                if name in embedded_bases:
+                    vname = vname.removesuffix(".base_layer.weight") + ".weight"
             suffix = f"[{index}]" if index is not None else ""
             split = "gate_up_proj" in name and matrix[0] % 2 == 0 and config.get("model_type") != "gpt_oss"
             fused = bool(re.search(r"qkv|query_key_value|w13|in_proj", name)) or ("gate_up_proj" in name and not split)
@@ -233,6 +243,8 @@ def plan_views(entries: dict[str, TensorEntry], config: dict, adapter_config: di
                                   component_of(name, entry.file), fused, 1.))
         record["status"] = "measured"
     occupied = {view.name for view in views if view.geometry != "lora_product"}
+    if len(occupied) != sum(view.geometry != "lora_product" for view in views):
+        raise ValueError("ambiguous canonical matrix view")
     for index, view in enumerate(views):
         if view.geometry == "lora_product" and view.name in occupied:
             name = view.name + "[lora]"
