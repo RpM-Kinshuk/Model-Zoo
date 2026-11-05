@@ -1,5 +1,11 @@
 # Weight Evidence Extractor Implementation Plan (v2, 2026-10-29)
 
+> Historical implementation record. Numbered evidence names, commands, schema fields and
+> recorded paths below describe the interfaces at the time of this plan. Old
+> names map to `metadata_only` (T0), `row_blocks` (T1) and `full_weights` (T2). For current
+> commands and descriptive names, use the [evidence guide](../../operations/evidence.md)
+> and [zoo guide](../../operations/zoo.md). Historical paths remain unchanged for reproduction.
+
 Revised 2026-10-31: interface fixes found in the pre-handoff cross-check (artifact
 names, coverage vocabulary, calibration statistic, config subset, fixtures). Each is
 listed in `Zoo-Keeper/handoff/STATUS.md`, "Plan and interface change log".

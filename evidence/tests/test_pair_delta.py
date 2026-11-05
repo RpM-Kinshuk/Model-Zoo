@@ -17,9 +17,9 @@ def test_pair_delta_matches_in_run_delta_and_diff(child_with_extended_vocab, par
     from evidence.compare import diff_fingerprints
     child, parent = child_with_extended_vocab, parent_manifest
     package = tmp_path / "package"
-    a = load_fingerprint(fingerprint_model(child, HubReader(), "t1", package))
-    b = load_fingerprint(fingerprint_model(parent, HubReader(), "t1", tmp_path / "parent"))
-    reference = load_fingerprint(fingerprint_model(child, HubReader(), "t1", tmp_path / "reference", parent=parent))
+    a = load_fingerprint(fingerprint_model(child, HubReader(), "row_blocks", package))
+    b = load_fingerprint(fingerprint_model(parent, HubReader(), "row_blocks", tmp_path / "parent"))
+    reference = load_fingerprint(fingerprint_model(child, HubReader(), "row_blocks", tmp_path / "reference", parent=parent))
     path = pair_deltas(child, parent, HubReader(), package)
     meta, tensors = load_pair_delta(path)
     assert meta["child"] == {key: child[key] for key in ("repo_id", "revision")}
@@ -76,7 +76,7 @@ def test_supplement_opposite_in_run_direction_uses_correct_view_index(local_mani
     from zoo.lineage import _subset
     from evidence.pair_delta import pair_deltas
     from evidence.compare import diff_fingerprints
-    a = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "t1", tmp_path / "a"))
+    a = load_fingerprint(fingerprint_model(local_manifest, HubReader(), "row_blocks", tmp_path / "a"))
     b = _subset(a, [1])
     b.meta = dict(b.meta, repo_id="org/subset", revision="a"*40, parent={key: a.meta[key] for key in ("repo_id", "revision")})
     b.path = None

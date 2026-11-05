@@ -5,6 +5,8 @@ import math
 
 import numpy as np
 
+from .compatibility import canonical_mode
+
 from .fingerprint import Fingerprint
 from .sketch import SKETCH_SEED, sketch_cosine
 
@@ -36,7 +38,7 @@ def _scores(a, b, k):
 def pair_similarity(a: Fingerprint, b: Fingerprint, sketch_k: int | None = None) -> dict:
     """Median cosine on compatible shared views, using nested sketch prefixes.
 
-    T1 vocabulary growth can preserve row coordinates and column dimensions;
+    row-block vocabulary growth can preserve row coordinates and column dimensions;
     its shared block is comparable even though the full matrix was reshaped.
     """
     available = min(a.meta["sketch_k"], b.meta["sketch_k"])
@@ -57,6 +59,7 @@ def _relatedness(a, b, null):
     if null is None:
         return result
     try:
+        null = dict(null, tier=canonical_mode(null["tier"]))
         k, height, n = null["sketch_k"], null["row_block"], null["n_pairs"]
         quantiles = np.asarray(null["null_quantiles"], dtype=float)
         threshold = float(null["related_threshold"])
@@ -65,8 +68,8 @@ def _relatedness(a, b, null):
                 or quantiles.ndim != 1 or len(quantiles) == 0
                 or not np.isfinite(quantiles).all() or (np.diff(quantiles) < 0).any()
                 or (np.abs(quantiles) > 1).any() or not math.isfinite(threshold)
-                or not -1 <= threshold <= 1 or null["tier"] not in ("t1", "t2")
-                and not str(null["tier"]).startswith("t1b")):
+                or not -1 <= threshold <= 1 or null["tier"] not in ("row_blocks", "full_weights")
+                and not str(null["tier"]).startswith("row_blocks_")):
             raise ValueError("invalid calibration")
     except (KeyError, ValueError, TypeError, OverflowError):
         result["reason"] = "invalid calibration file"

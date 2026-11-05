@@ -1217,8 +1217,8 @@ def test_plain_worker_run_writes_package_files(evidence_worker):
     worker, out, _, _ = evidence_worker
     assert worker.main() == 0
     folder = next((out / "evidence").iterdir())
-    for suffix in ("manifest.json", "t2.fingerprint.safetensors", "t1.fingerprint.safetensors",
-                   "t1b128.fingerprint.safetensors", "t1b512.fingerprint.safetensors", "t2.spectra.h5"):
+    for suffix in ("manifest.json", "full_weights.fingerprint.safetensors", "row_blocks.fingerprint.safetensors",
+                   "row_blocks_128.fingerprint.safetensors", "row_blocks_512.fingerprint.safetensors", "full_weights.spectra.h5"):
         assert list(folder.glob("*." + suffix))
     summary = json.loads((folder / "evidence.json").read_text())
     assert summary["reused"] == 2 and summary["measured"] == 0
@@ -1243,7 +1243,7 @@ def test_evidence_without_token_uses_local_download(evidence_worker):
     (source / "README.md").write_text('---\nbase_model: org/missing-parent\n---\n')
     assert worker.main() == 0
     from evidence.fingerprint import load_fingerprint
-    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    fp = load_fingerprint(next((out / "evidence").rglob("*.row_blocks.fingerprint.safetensors")))
     assert set(fp.delta["status"]) == {"parent_unavailable"}
     manifest = json.loads(next((out / "evidence").rglob("*.manifest.json")).read_text())
     assert manifest["repo_id"] == "org/tiny" and manifest["revision"] == "a" * 40
@@ -1258,12 +1258,12 @@ def test_evidence_failure_keeps_esd_outputs_and_retries_evidence_only(evidence_w
     assert worker.main() == 1
     paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
     saved = [p.read_bytes() for p in paths]
-    assert not list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert not list((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))
     monkeypatch.setattr(EvidenceSidecar, "finish", real_finish)
     assert worker.main() == 0
     assert esd.call_count == 1
     assert [p.read_bytes() for p in paths] == saved
-    assert list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert list((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))
 
 
 def test_interrupt_in_fingerprint_stage_publishes_nothing(evidence_worker, monkeypatch):
@@ -1271,7 +1271,7 @@ def test_interrupt_in_fingerprint_stage_publishes_nothing(evidence_worker, monke
     worker, out, _, _ = evidence_worker
     monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()))
     assert worker.main() == 1
-    assert not list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert not list((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))
     assert not list((out / "evidence").rglob(".evidence-sidecar-*"))
     record = json.loads(next((out / "logs/terminal_status").glob("*.json")).read_text())
     assert record["stage"] == "fingerprint" and record["reason"] == "interrupted"
@@ -1315,7 +1315,7 @@ def test_missing_pinned_parent_without_token_is_a_delta_gap(evidence_worker, mon
     monkeypatch.setattr(sys, "argv", argv + ["--source_model", "org/missing-parent@" + "b" * 40])
     assert worker.main() == 0
     from evidence.fingerprint import load_fingerprint
-    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    fp = load_fingerprint(next((out / "evidence").rglob("*.row_blocks.fingerprint.safetensors")))
     assert set(fp.delta["status"]) == {"parent_unavailable"}
 
 
@@ -1324,7 +1324,7 @@ def test_overwrite_recomputes_evidence_with_new_settings(evidence_worker, monkey
     assert worker.main() == 0
     monkeypatch.setattr(sys, "argv", argv + ["--overwrite", "--fix_fingers", "xmin_peak"])
     assert worker.main() == 0
-    with worker.h5py.File(next((out / "evidence").rglob("*.t2.spectra.h5"))) as h:
+    with worker.h5py.File(next((out / "evidence").rglob("*.full_weights.spectra.h5"))) as h:
         assert json.loads(h.attrs["measurement_config_json"])["fix_fingers"] == "xmin_peak"
 
 
@@ -1358,7 +1358,7 @@ def test_changed_sketch_rebuilds_only_evidence(evidence_worker, monkeypatch):
     monkeypatch.setattr(sys, "argv", argv + ["--sketch_k", "32"])
     assert worker.main() == 0
     assert esd.call_count == 1 and (out / "metrics/org--tiny.h5").read_bytes() == saved
-    assert load_fingerprint(next((out / "evidence").rglob("*.t2.fingerprint.safetensors"))).meta["sketch_k"] == 32
+    assert load_fingerprint(next((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))).meta["sketch_k"] == 32
 
 
 def test_stale_evidence_after_esd_only_overwrite_is_rebuilt(evidence_worker, monkeypatch):
@@ -1372,7 +1372,7 @@ def test_stale_evidence_after_esd_only_overwrite_is_rebuilt(evidence_worker, mon
     monkeypatch.setattr(sys, "argv", argv + ["--fix_fingers", "xmin_peak"])
     assert worker.main() == 0
     assert esd.call_count == 2 and (out / "metrics/org--tiny.h5").read_bytes() == saved
-    with worker.h5py.File(next((out / "evidence").rglob("*.t2.spectra.h5"))) as h:
+    with worker.h5py.File(next((out / "evidence").rglob("*.full_weights.spectra.h5"))) as h:
         assert json.loads(h.attrs["measurement_config_json"])["fix_fingers"] == "xmin_peak"
 
 
@@ -1410,7 +1410,7 @@ def test_online_worker_resolves_unpinned_declared_parent(evidence_worker, monkey
     monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", lambda repo, filename, **kwargs: str(source / filename))
     assert worker.main() == 0
     assert pins == [("org/base", "main")]
-    fp = load_fingerprint(next((out / "evidence").rglob("*.t1.fingerprint.safetensors")))
+    fp = load_fingerprint(next((out / "evidence").rglob("*.row_blocks.fingerprint.safetensors")))
     assert set(fp.delta["status"]) == {"identical"}
 
 
@@ -1435,7 +1435,7 @@ def test_tokenless_parent_uses_private_block_cache_before_declaring_gap(evidence
     monkeypatch.setattr(sys, "argv", argv + flags)
     assert worker.main() == 0
     folder = bridge.evidence_dir(out, "org/tiny", "a" * 40)
-    fp = load_fingerprint(next(folder.glob("*.t1.fingerprint.safetensors")))
+    fp = load_fingerprint(next(folder.glob("*.row_blocks.fingerprint.safetensors")))
     assert set(fp.delta["status"]) == ({"identical"} if use_cache else {"parent_unavailable"})
 
 
@@ -1476,7 +1476,7 @@ def test_no_publish_keeps_run_folder_only(evidence_worker, monkeypatch):
     worker, out, argv, _ = evidence_worker
     monkeypatch.setattr(sys, "argv", argv + ["--no-publish"])
     assert worker.main() == 0
-    assert list((out / "evidence").rglob("*.t2.fingerprint.safetensors"))
+    assert list((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))
     assert not (out / "packages").exists()
 
 
@@ -1504,7 +1504,7 @@ def test_failed_publish_keeps_rebuilt_evidence_for_publication_only_retry(eviden
     monkeypatch.setattr(publisher, "publish_package", lambda *args: (_ for _ in ()).throw(OSError("publication failed")))
     monkeypatch.setattr(sys, "argv", argv + ["--sketch_k", "32"])
     assert worker.main() == 1
-    fp = next((out / "evidence").glob("*/*.t2.fingerprint.safetensors"))
+    fp = next((out / "evidence").glob("*/*.full_weights.fingerprint.safetensors"))
     assert load_fingerprint(fp).meta["sketch_k"] == 32
     monkeypatch.setattr(publisher, "publish_package", original)
     monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: pytest.fail("evidence recomputed"))

@@ -14,8 +14,8 @@ MODELS_COLUMNS = [
     "license", "gated", "declared_bases", "base_model_relation", "architecture",
     "is_decision", "system_one", "decision_type", "num_labels", "labels",
     "arch_signature", "n_views", "modality", "pipeline_tag", "downloads", "params",
-    "stratum", "inclusion_prob", "dup_group", "fingerprint_t1", "fingerprint_t2",
-    "spectra_t2", "coverage_status", "skipped_tensors",
+    "stratum", "inclusion_prob", "dup_group", "row_block_fingerprint", "full_weight_fingerprint",
+    "full_weight_spectra", "coverage_status", "skipped_tensors",
 ]
 VIEWS_COLUMNS = [
     "model_key", "view_index", "name", "geometry", "component", "n_rows", "n_cols",

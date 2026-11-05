@@ -322,7 +322,7 @@ def unrelated_dir(cli_checkpoints):
 def null_file(tmp_path):
     path = tmp_path / "null.json"
     path.write_text(json.dumps({"statistic": "median_cosine", "sketch_k": 64,
-                                "row_block": 256, "tier": "t1", "n_pairs": 99,
+                                "row_block": 256, "tier": "row_blocks", "n_pairs": 99,
                                 "null_quantiles": [-.1, 0., .1], "related_threshold": .9}))
     return path
 
@@ -346,7 +346,7 @@ def models_csv_with_denied(tmp_path):
 
 @pytest.fixture
 def synthetic_run(tmp_path):
-    """Actual tiny T1/T2 artifacts; inventory and measurements stay distinct."""
+    """Actual tiny row-block/full-weight artifacts; inventory and measurements stay distinct."""
     import itertools
     import pandas as pd
     from evidence.fingerprint import fingerprint_model, load_fingerprint
@@ -355,7 +355,7 @@ def synthetic_run(tmp_path):
 
     root = tmp_path / "pilot"
     root.mkdir()
-    t1, t2 = root / "t1", root / "t2"
+    row_blocks, full_weights = root / "row_blocks", root / "full_weights"
     generator = torch.Generator().manual_seed(909)
     base = torch.randn(512, 64, generator=generator)
 
@@ -373,8 +373,8 @@ def synthetic_run(tmp_path):
         manifest = _fingerprint_manifest(root / name, {"linear.weight": matrix})
         write_manifest(manifest, root / "manifests")
         keys[name] = f"{manifest['repo_id']}@{manifest['revision']}"
-        fp = load_fingerprint(fingerprint_model(manifest, HubReader(), "t1", t1))
-        fingerprint_model(manifest, HubReader(), "t2", t2, also_t1_blocks=(128, 256, 512))
+        fp = load_fingerprint(fingerprint_model(manifest, HubReader(), "row_blocks", row_blocks))
+        fingerprint_model(manifest, HubReader(), "full_weights", full_weights, also_row_block_sizes=(128, 256, 512))
         records.append(dict(repo_id=manifest["repo_id"], revision=manifest["revision"],
                             status="complete", reason="", stratum="text:<1B", modality="text",
                             params=matrix.numel(), **{k: fp.meta[k] for k in
@@ -386,9 +386,9 @@ def synthetic_run(tmp_path):
         ("independent0", "independent1", "independent2"), 2)]
     pairs = pd.DataFrame([dict(a=keys[a], b=keys[b], label=label, source="lab") for a, b, label in pairs])
     pairs.to_csv(root / "pairs.csv", index=False)
-    (t1 / "summary.json").write_text(json.dumps({"stage": "batch", "models": records}))
-    (t2 / "summary.json").write_text(json.dumps({"stage": "batch", "models": records}))
-    return SimpleNamespace(root=root, t1=t1, t2=t2, pairs=pairs)
+    (row_blocks / "summary.json").write_text(json.dumps({"stage": "batch", "models": records}))
+    (full_weights / "summary.json").write_text(json.dumps({"stage": "batch", "models": records}))
+    return SimpleNamespace(root=root, row_blocks=row_blocks, full_weights=full_weights, pairs=pairs)
 
 
 @pytest.fixture

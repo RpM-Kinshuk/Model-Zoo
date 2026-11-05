@@ -10,6 +10,7 @@ import pandas as pd
 
 from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
 from evidence.fingerprint import load_fingerprint
+from evidence.compatibility import companion_spectra_path, is_baseline_fingerprint, normalize_manifest
 from .schema import (COVERAGE_COLUMNS, MODELS_COLUMNS, PREDICTIONS_COLUMNS,
                      SCORES_COLUMNS, VIEWS_COLUMNS, arch_signature, empty_table,
                      model_key, split_key)
@@ -50,13 +51,13 @@ def _fingerprint_files(inputs):
             if (path / "package.json").is_file():
                 metadata = json.loads((path / "package.json").read_text())
                 yield from sorted(path / name for name in metadata["files"]
-                                  if name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")))
+                                  if is_baseline_fingerprint(name))
             else:
-                yield from sorted(path.glob("*.t[12].fingerprint.safetensors"))
-        elif path.is_file() and path.name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")):
+                yield from sorted(item for item in path.glob("*.fingerprint.safetensors") if is_baseline_fingerprint(item))
+        elif path.is_file() and is_baseline_fingerprint(path):
             yield path
         else:
-            raise ValueError(f"Expected a fingerprint directory or T1/T2 fingerprint file: {path}")
+            raise ValueError(f"Expected a fingerprint directory or row-block/full-weight fingerprint file: {path}")
 
 
 def _rows(records, columns, sort):
@@ -66,15 +67,15 @@ def _rows(records, columns, sort):
 
 
 def duplicate_groups(views: pd.DataFrame) -> dict[str, str]:
-    """Group identical compatible T1 blocks, never claim full-file identity."""
+    """Group identical compatible row-block blocks, never claim full-file identity."""
     if views.empty:
         return {}
     result = {key: key for key in sorted(views.model_key.unique())}
     signatures = defaultdict(list)
-    first = views[views.tier == "t1"]
+    first = views[views.tier == "row_blocks"]
     for key, records in first.groupby("model_key", sort=True):
         if records.name.duplicated().any():
-            raise ValueError(f"Duplicate T1 view names for {key}")
+            raise ValueError(f"Duplicate row-block view names for {key}")
         signature = tuple(sorted((r.name, r.geometry, int(r.n_rows), int(r.n_cols),
                                   int(r.r0), int(r.r1), r.block_sha256)
                                  for r in records.itertuples()))
@@ -149,14 +150,14 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
                  score_tables: Sequence[pd.DataFrame] = ()) -> dict[str, pd.DataFrame]:
     """Read extractor outputs without writing or modifying any input artifacts.
 
-    Fingerprint inputs are directories or canonical T1/T2 files. Paths stored
-    in the tables are resolved relative to data_root, including T2's complete
-    HDF5 spectrum. Extra T1 block-height outputs are not database baselines.
+    Fingerprint inputs are directories or canonical row-block/full-weight files. Paths stored
+    in the tables are resolved relative to data_root, including full-weight's complete
+    HDF5 spectrum. Extra row-block block-height outputs are not database baselines.
     """
     root = Path(data_root).resolve()
     records, manifest_paths = {}, {}
     for path in _manifest_files(manifests):
-        manifest = json.loads(path.read_text())
+        manifest = normalize_manifest(json.loads(path.read_text()))
         key = model_key(manifest["repo_id"], manifest["revision"])
         if key in records:
             raise ValueError(f"Duplicate manifest identity {key}: {manifest_paths[key]} and {path}")
@@ -167,7 +168,7 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
         fp = load_fingerprint(path)
         key = model_key(fp.meta["repo_id"], fp.meta["revision"])
         tier = fp.meta["tier"]
-        if tier not in ("t1", "t2") or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS:
+        if tier not in ("row_blocks", "full_weights") or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS:
             raise ValueError(f"Unsupported fingerprint settings: {path}")
         if key not in records:
             raise ValueError(f"Fingerprint identity has no manifest: {key}: {path}")
@@ -178,20 +179,20 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
     model_rows, view_rows, coverage_rows = [], [], []
     for key, manifest in sorted(records.items()):
         pair = measured.get(key, {})
-        chosen = pair.get("t1", pair.get("t2"))
+        chosen = pair.get("row_blocks", pair.get("full_weights"))
         fp = chosen[2] if chosen else None
         coverage = _coverage(manifest, fp)
         skipped = [dict(name=r["name"], reason=r.get("reason", ""))
                    for r in coverage if r.get("status") == "skipped"]
         access = manifest["access"]
-        if access not in ("granted", "no_access", "t0_only"):
+        if access not in ("granted", "no_access", "metadata_only"):
             raise ValueError(f"Unknown manifest access state: {access}")
         status = ("partial" if any(r["reason"] not in _BENIGN_SKIPS for r in skipped) else "measured") if fp else (
-            access if access in ("t0_only", "no_access") else "not_measured")
+            access if access in ("metadata_only", "no_access") else "not_measured")
         spectra = ""
-        if "t2" in pair:
-            path = pair["t2"][0]
-            spectrum_path = path.with_name(path.name.removesuffix(".t2.fingerprint.safetensors") + ".t2.spectra.h5")
+        if "full_weights" in pair:
+            path = pair["full_weights"][0]
+            spectrum_path = companion_spectra_path(path)
             package_path = path.parent / "package.json"
             if package_path.is_file():
                 package = json.loads(package_path.read_text())
@@ -207,8 +208,8 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
             **{field: decision.get(field) for field in ("is_decision", "system_one", "decision_type", "num_labels", "labels")},
             arch_signature=arch_signature(config, shapes), n_views=len(fp.names) if fp else 0,
             **_frame_values(frame_rows, manifest["repo_id"], manifest["revision"]),
-            dup_group=key, fingerprint_t1=pair["t1"][1] if "t1" in pair else "",
-            fingerprint_t2=pair["t2"][1] if "t2" in pair else "", spectra_t2=spectra,
+            dup_group=key, row_block_fingerprint=pair["row_blocks"][1] if "row_blocks" in pair else "",
+            full_weight_fingerprint=pair["full_weights"][1] if "full_weights" in pair else "", full_weight_spectra=spectra,
             coverage_status=status, skipped_tensors=skipped))
         if fp is not None:
             for index, name in enumerate(fp.names):
@@ -235,9 +236,9 @@ def pair_delta_files(models, data_root):
     root = Path(data_root).resolve()
     result = []
     for row in models.itertuples():
-        if not row.fingerprint_t1:
+        if not row.row_block_fingerprint:
             continue
-        folder = (root / row.fingerprint_t1).resolve().parent
+        folder = (root / row.row_block_fingerprint).resolve().parent
         if not folder.is_relative_to(root):
             raise ValueError("Pair delta input escapes data_root")
         for path in sorted((folder / "deltas").glob("*.delta.safetensors")):

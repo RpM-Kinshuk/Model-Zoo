@@ -44,7 +44,7 @@ def run_deltas(zoo, packages, data_root, *, workers="auto", compute_device="auto
         manifests, folders = [], []
         for key in pair:
             row = models.get(key)
-            relative = getattr(row, "fingerprint_t1", "")
+            relative = getattr(row, "row_block_fingerprint", "")
             if not isinstance(relative, str) or not relative:
                 break
             artifact = (root / relative).resolve()
@@ -69,7 +69,7 @@ def run_deltas(zoo, packages, data_root, *, workers="auto", compute_device="auto
             skipped += 1
             continue
         from evidence.fingerprint import load_fingerprint
-        fp = load_fingerprint(root / models[pair[0]].fingerprint_t1)
+        fp = load_fingerprint(root / models[pair[0]].row_block_fingerprint)
         all_experts = not any(row.get("reason") == "expert_not_sampled" for row in fp.coverage)
         tasks.append((child, parent, folders[0], parent_cache, int(parent_cache_gib * 1024**3), all_experts))
     count = min(count, max(1, len(tasks)))

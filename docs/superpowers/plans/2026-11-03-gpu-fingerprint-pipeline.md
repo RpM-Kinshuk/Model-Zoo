@@ -1,5 +1,11 @@
 # GPU fingerprint pipeline implementation plan
 
+> Historical implementation record. Numbered evidence names, commands, schema fields and
+> recorded paths below describe the interfaces at the time of this plan. Old
+> names map to `metadata_only` (T0), `row_blocks` (T1) and `full_weights` (T2). For current
+> commands and descriptive names, use the [evidence guide](../../operations/evidence.md)
+> and [zoo guide](../../operations/zoo.md). Historical paths remain unchanged for reproduction.
+
 > Implement inline with one core implementer and one independent review, following handoff/PROMPTS.md. Leave all work uncommitted.
 
 Goal: accelerate the authorized running R3 queue by moving matrix arithmetic to CUDA, reusing child/parent tensors across full and companion measurements, and overlapping bounded storage reads with computation.

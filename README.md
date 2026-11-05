@@ -128,8 +128,8 @@ python esd_experiment/run_experiment.py \
   --worker_cache_root /scratch/$USER/model_zoo_worker_cache
 ```
 
-Full-mode runs also write pinned evidence under `evidence/<safe>/`: T2 and
-128/256/512-row T1 fingerprints, full spectra, and declared-parent deltas.
+Full-mode runs also write pinned evidence under `evidence/<safe>/`: fingerprints
+of full tensors and sampled 128/256/512-row blocks, full spectra, and declared-parent deltas.
 Evidence runs on CPU alongside GPU analysis by default. Use `--no-evidence` for
 the previous CSV/H5-only behavior; checkpoint mode disables evidence with a notice.
 If evidence fails, the ESD pair is retained and the next run retries evidence only.
@@ -299,17 +299,18 @@ back to worker downloads. Set `--prefetch_models 0` to disable it. The default
 cache root is `$MODEL_ZOO_WORKER_CACHE_ROOT`, else `/scratch/$USER/hf_worker_cache`.
 
 Models exceeding full-mode capacity are listed in `oversized_models.csv` and
-receive streaming T1-only packages after full-mode jobs finish. These are
+receive streaming row-block-only packages after full-mode jobs finish. These are
 independent supervised processes with heartbeats, RAM/cache limits, stage
 timeouts and cleanup after confirmed exit. Each uses one idle assigned GPU by
-default; `--oversized_device cpu` runs supervised CPU jobs without reserving a
+default; `--oversized_models_device cpu` runs supervised CPU jobs without reserving a
 GPU. Set `--gpus 0 1 --max_concurrent_jobs 2` to allow two jobs at once. Full
 weight download-ahead stays disabled for these streamed jobs. The
-`row_block_worker.py` process extracts this sampled weight evidence without
+`oversized_model_worker.py` process extracts this sampled weight evidence without
 loading a whole model. The default single-worker cap still applies unless
-explicitly raised. `t1_status` records each outcome separately from full ESD
-success. Disable with
-`--no-oversized_t1` (also disabled by `--no-evidence`).
+explicitly raised. `evidence_status` and `evidence_error` record outcomes separately
+from full ESD success. `--oversized_models_evidence` enables these jobs by default;
+`--no-oversized_models_evidence` disables them (as does `--no-evidence`).
+The device setting accepts `--oversized_models_device auto|cpu`.
 
 Each private cache lives at `<worker_cache_root>/<run_id>/<worker_id>/`.
 Hub and legacy Transformers downloads share revision-addressed storage;
@@ -480,9 +481,11 @@ coverage in a fresh directory.
 
 ## Weight evidence (range reads)
 
-Fingerprint checkpoints without loading a model. T1 reads row blocks for lineage
-comparisons; T2 retains full spectra for the database. Both accept pinned Hub
-repositories and local checkpoints.
+Fingerprint checkpoints without loading a model. Use `--measurement_mode row_blocks`
+to sample row blocks for lineage comparisons, or `--measurement_mode full_weights`
+to retain full tensor spectra for the database. Both accept pinned Hub repositories
+and local checkpoints. Manifests record `metadata_only` evidence from metadata,
+configs and headers.
 
 See the [weight evidence guide](docs/operations/evidence.md) for supported formats,
 coverage, quick-start commands and the pilot runbook.

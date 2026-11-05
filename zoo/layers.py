@@ -5,6 +5,8 @@ import h5py
 import pandas as pd
 from safetensors import safe_open
 
+from evidence.compatibility import is_baseline_fingerprint
+
 from .schema import LAYERS_COLUMNS, empty_table
 
 
@@ -15,7 +17,7 @@ def build_layers(packages):
             continue
         names = set()
         for name in package["files"]:
-            if name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")):
+            if is_baseline_fingerprint(name):
                 with safe_open(folder / name, framework="numpy") as h:
                     names.update(json.loads(h.metadata()["names"]))
         with h5py.File(folder / "esd/metrics.h5") as h:

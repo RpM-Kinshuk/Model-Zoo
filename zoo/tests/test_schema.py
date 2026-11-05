@@ -56,9 +56,9 @@ def test_shared_universe_preserves_pins_copies_and_coverage(universe, zoo_models
                  (json.loads(p.read_text()) for p in universe.manifests.glob("*.manifest.json"))}
     fingerprints = {model_key(fp.meta["repo_id"], fp.meta["revision"]): fp for fp in
                     (load_fingerprint(p) for p in universe.fingerprints.glob("*.fingerprint.safetensors"))}
-    assert ZOO_VERSION == "1" and "spectra_t2" in MODELS_COLUMNS
+    assert ZOO_VERSION == "2" and "full_weight_spectra" in MODELS_COLUMNS
     assert len(manifests) == len(zoo_models) == 12 and len(fingerprints) == 9
-    assert manifests["org/t0only@" + SHA8]["access"] == "t0_only"
+    assert manifests["org/t0only@" + SHA8]["access"] == "metadata_only"
     assert manifests["org/gated@" + SHA9]["access"] == "no_access"
     assert manifests["org/parent-GGUF@" + SHA12]["gguf"]["architecture"] == "llama"
     for key in ("org/child@" + SHA2, "org/child@" + SHA10, "org/dup@" + SHA5):

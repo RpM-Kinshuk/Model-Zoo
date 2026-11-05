@@ -9,8 +9,8 @@ from evidence.pilot_analysis import (lineage_pairs, tier_agreement, spectra_agre
 
 
 def test_tier_agreement_metrics(synthetic_run):
-    out = tier_agreement(synthetic_run.pairs, synthetic_run.t1, synthetic_run.t2)
-    assert out["auroc_t1"] == 1.0 and out["auroc_t2"] == 1.0
+    out = tier_agreement(synthetic_run.pairs, synthetic_run.row_blocks, synthetic_run.full_weights)
+    assert out["auroc_row_blocks"] == 1.0 and out["auroc_full_weights"] == 1.0
     assert out["spearman_within_related"] > 0.8 and out["decision_agreement"] >= 0.9
     assert set(out["byte_curve"]) == {128, 256, 512}
 
@@ -27,33 +27,33 @@ def test_calibration_is_compatible_empirical_and_excludes_sanity(synthetic_run, 
     out = tmp_path / "calibration.json"
     pairs = synthetic_run.pairs.copy()
     sanity = pairs.iloc[[0]].assign(label="independent", source="hub_declared_base")
-    write_calibration(pd.concat([pairs, sanity]), synthetic_run.t1, out)
+    write_calibration(pd.concat([pairs, sanity]), synthetic_run.row_blocks, out)
     null = json.loads(out.read_text())
     assert null["n_pairs"] == 3 and len(null["null_quantiles"]) == 3
     assert null["statistic"] == "median_cosine" and null["sketch_k"] == 64
-    fps = [load_fingerprint(p) for p in synthetic_run.t1.glob("*.fingerprint.safetensors")]
+    fps = [load_fingerprint(p) for p in synthetic_run.row_blocks.glob("*.fingerprint.safetensors")]
     relatedness = diff_fingerprints(fps[0], fps[0], null)["relatedness"]
     assert relatedness["verdict"] != "uncalibrated" and relatedness["p_value"] >= .25
     with pytest.raises(ValueError, match="independent"):
-        write_calibration(pairs[pairs.label != "independent"], synthetic_run.t1, out)
+        write_calibration(pairs[pairs.label != "independent"], synthetic_run.row_blocks, out)
     assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_missing_measurements_are_visible_and_do_not_pass(tmp_path):
-    t1, t2 = tmp_path / "t1", tmp_path / "t2"
-    t1.mkdir(); t2.mkdir()
+    row_blocks, full_weights = tmp_path / "row_blocks", tmp_path / "full_weights"
+    row_blocks.mkdir(); full_weights.mkdir()
     pairs = pd.DataFrame([dict(a="a@rev", b="b@rev", label="independent", source="lab")])
-    out = tier_agreement(pairs, t1, t2)
-    assert out["auroc_t1"] is None and out["n_missing_pairs"] == 1
+    out = tier_agreement(pairs, row_blocks, full_weights)
+    assert out["auroc_row_blocks"] is None and out["n_missing_pairs"] == 1
     with pytest.raises(ValueError, match="independent"):
-        write_calibration(pairs, t1, tmp_path / "null.json")
+        write_calibration(pairs, row_blocks, tmp_path / "null.json")
     write_g0_report(tmp_path, tmp_path / "g0.md")
     report = (tmp_path / "g0.md").read_text()
     assert "FAIL" in report and "unavailable" in report and "PASS" not in report
 
 
 def test_spectra_use_full_artifacts_and_disclose_sorted_rank_limit(synthetic_run):
-    out = spectra_agreement(synthetic_run.t1, synthetic_run.t2)
+    out = spectra_agreement(synthetic_run.row_blocks, synthetic_run.full_weights)
     assert out["n_matrices"] == 9 and out["n_alpha_pairs"] == 9
     assert np.isfinite(out["median_abs_alpha_diff"])
     assert out["median_per_matrix_spearman"] == pytest.approx(1.)
@@ -61,7 +61,7 @@ def test_spectra_use_full_artifacts_and_disclose_sorted_rank_limit(synthetic_run
 
 
 def test_throughput_uses_requested_denominator_and_current_summary(synthetic_run):
-    path = synthetic_run.t1 / "summary.json"
+    path = synthetic_run.row_blocks / "summary.json"
     summary = json.loads(path.read_text())
     summary["models"][0].update(bytes_read=100, elapsed_seconds=20)
     summary["models"] += [dict(repo_id="missing", revision="x", stratum="text:<1B", status="failed",
@@ -69,7 +69,7 @@ def test_throughput_uses_requested_denominator_and_current_summary(synthetic_run
                           dict(repo_id="gated", revision="x", stratum="text:<1B", status="failed",
                                reason="no_access", bytes_read=0, elapsed_seconds=1, resolves=0)]
     path.write_text(json.dumps(summary))
-    (synthetic_run.t1 / "failures.csv").write_text("repo_id,stage,reason,message\nold,batch,error,historical\n")
+    (synthetic_run.row_blocks / "failures.csv").write_text("repo_id,stage,reason,message\nold,batch,error,historical\n")
     out = throughput_report(synthetic_run.root).iloc[0]
     assert out.n_models == 11 and out.n_eligible == 10 and out.failure_rate == pytest.approx(.1)
     assert out.failure_rate_by_reason == {"error": pytest.approx(.1)}
@@ -107,7 +107,7 @@ def test_lineage_uses_graph_and_certified_reference_pairs(tmp_path):
 
 
 def test_unknown_stratum_and_partial_cost_coverage_cannot_pass(synthetic_run, tmp_path):
-    summary_path = synthetic_run.t1 / "summary.json"
+    summary_path = synthetic_run.row_blocks / "summary.json"
     summary = json.loads(summary_path.read_text())
     summary["models"][0].pop("elapsed_seconds")
     for row in summary["models"]:
@@ -135,13 +135,13 @@ def test_calibration_requires_parent_settings_match_null(synthetic_run, tmp_path
         return result
     monkeypatch.setattr(analysis, "_fingerprints", altered)
     with pytest.raises(ValueError, match="settings"):
-        write_calibration(synthetic_run.pairs, synthetic_run.t1, tmp_path / "null.json")
+        write_calibration(synthetic_run.pairs, synthetic_run.row_blocks, tmp_path / "null.json")
 
 
 def test_spectral_partial_coverage_is_explicit(synthetic_run, tmp_path):
     # A missing full model must not make agreement on the rest certify G0.
-    next(synthetic_run.t2.glob("*.t2.fingerprint.safetensors")).unlink()
-    result = spectra_agreement(synthetic_run.t1, synthetic_run.t2)
+    next(synthetic_run.full_weights.glob("*.full_weights.fingerprint.safetensors")).unlink()
+    result = spectra_agreement(synthetic_run.row_blocks, synthetic_run.full_weights)
     assert result["n_models_requested"] == 9 and result["n_models_matched"] == 8
     assert not result["measurement_coverage_complete"]
     write_g0_report(synthetic_run.root, tmp_path / "g0.md")
@@ -149,10 +149,10 @@ def test_spectral_partial_coverage_is_explicit(synthetic_run, tmp_path):
 
 
 def test_missing_full_spectrum_companion_stays_unavailable(synthetic_run, tmp_path):
-    next(synthetic_run.t2.glob("*.t2.spectra.h5")).unlink()
-    result = tier_agreement(synthetic_run.pairs, synthetic_run.t1, synthetic_run.t2)
+    next(synthetic_run.full_weights.glob("*.full_weights.spectra.h5")).unlink()
+    result = tier_agreement(synthetic_run.pairs, synthetic_run.row_blocks, synthetic_run.full_weights)
     assert result["n_missing_pairs"] > 0
-    spectral = spectra_agreement(synthetic_run.t1, synthetic_run.t2)
+    spectral = spectra_agreement(synthetic_run.row_blocks, synthetic_run.full_weights)
     assert not spectral["measurement_coverage_complete"]
     write_g0_report(synthetic_run.root, tmp_path / "g0.md")
 
@@ -167,25 +167,25 @@ def test_calibration_requires_all_requested_parent_pairs(synthetic_run, tmp_path
         return result
     monkeypatch.setattr(analysis, "_fingerprints", partial)
     with pytest.raises(ValueError, match="parent"):
-        write_calibration(synthetic_run.pairs, synthetic_run.t1, tmp_path / "null.json")
+        write_calibration(synthetic_run.pairs, synthetic_run.row_blocks, tmp_path / "null.json")
 
 
-def test_t1_false_matches_use_own_tpr_operating_point(synthetic_run, monkeypatch):
+def test_row_blocks_false_matches_use_own_tpr_operating_point(synthetic_run, monkeypatch):
     from evidence import pilot_analysis as analysis
     real_score, real_false_matches = analysis._score, analysis._false_matches
     thresholds = []
     def shifted(a, b, k=64):
         value = real_score(a, b, k)
-        return value - .5 if value is not None and a.meta["tier"] == "t1" else value
+        return value - .5 if value is not None and a.meta["tier"] == "row_blocks" else value
     def capture(pairs, fps, threshold):
         thresholds.append(threshold)
         return real_false_matches(pairs, fps, threshold)
     monkeypatch.setattr(analysis, "_score", shifted)
     monkeypatch.setattr(analysis, "_false_matches", capture)
-    result = tier_agreement(synthetic_run.pairs, synthetic_run.t1, synthetic_run.t2)
-    assert thresholds[0] < result["threshold_t2_tpr_0_9"] - .4
-    assert result["achieved_tpr_t1"] >= .9
-    assert thresholds[0] == result["threshold_t1_tpr_0_9"]
+    result = tier_agreement(synthetic_run.pairs, synthetic_run.row_blocks, synthetic_run.full_weights)
+    assert thresholds[0] < result["threshold_full_weights_tpr_0_9"] - .4
+    assert result["achieved_tpr_row_blocks"] >= .9
+    assert thresholds[0] == result["threshold_row_blocks_tpr_0_9"]
 
 
 def test_parent_retrieval_counts_reverse_descendants_as_negatives(monkeypatch):
@@ -216,35 +216,35 @@ def test_lineage_missing_mapping_population_survives_csv(tmp_path):
     path = tmp_path / "pairs.csv"
     pairs.to_csv(path, index=False)
     pairs = pd.read_csv(path, keep_default_na=False)
-    result = tier_agreement(pairs, tmp_path / "t1", tmp_path / "t2")
+    result = tier_agreement(pairs, tmp_path / "row_blocks", tmp_path / "full_weights")
     assert result["n_pairs_requested"] == 4 and result["n_missing_manifest_models"] == 1
     with pytest.raises(ValueError, match="mapping"):
-        write_calibration(pairs, tmp_path / "t1", tmp_path / "null.json")
+        write_calibration(pairs, tmp_path / "row_blocks", tmp_path / "null.json")
 
 
-def test_default_t1_companions_supply_related_and_null_inputs(synthetic_run, tmp_path):
-    for path in synthetic_run.t1.glob("*.fingerprint.safetensors"):
+def test_default_row_blocks_companions_supply_related_and_null_inputs(synthetic_run, tmp_path):
+    for path in synthetic_run.row_blocks.glob("*.fingerprint.safetensors"):
         path.unlink()
-    result = tier_agreement(synthetic_run.pairs, synthetic_run.t1, synthetic_run.t2)
-    assert result["n_missing_pairs"] == 0 and result["auroc_t1"] == 1.
-    assert spectra_agreement(synthetic_run.t1, synthetic_run.t2)["measurement_coverage_complete"]
-    write_calibration(synthetic_run.pairs, synthetic_run.t1, tmp_path / "null.json")
+    result = tier_agreement(synthetic_run.pairs, synthetic_run.row_blocks, synthetic_run.full_weights)
+    assert result["n_missing_pairs"] == 0 and result["auroc_row_blocks"] == 1.
+    assert spectra_agreement(synthetic_run.row_blocks, synthetic_run.full_weights)["measurement_coverage_complete"]
+    write_calibration(synthetic_run.pairs, synthetic_run.row_blocks, tmp_path / "null.json")
     assert json.loads((tmp_path / "null.json").read_text())["n_pairs"] == 3
 
 
-def test_spectral_cohort_excludes_intentional_t1_only_census(synthetic_run, tmp_path):
+def test_spectral_cohort_excludes_intentional_row_blocks_only_census(synthetic_run, tmp_path):
     import torch
     from evidence.fingerprint import fingerprint_tensors
     fingerprint_tensors([("linear.weight", torch.ones(512,64))],
-                        synthetic_run.t1 / "census.fingerprint.safetensors",
+                        synthetic_run.row_blocks / "census.fingerprint.safetensors",
                         dict(repo_id="lab/census", revision="local:x"))
-    result = spectra_agreement(synthetic_run.t1, synthetic_run.t2)
+    result = spectra_agreement(synthetic_run.row_blocks, synthetic_run.full_weights)
     assert result["n_models_requested"] == 9 and result["n_models_matched"] == 9
-    assert result["measurement_coverage_complete"] and result["n_t1_only_models"] == 1
+    assert result["measurement_coverage_complete"] and result["n_row_blocks_only_models"] == 1
 
 
 def test_known_empty_small_model_timing_cohort_is_not_applicable(synthetic_run, tmp_path):
-    path = synthetic_run.t1 / "summary.json"
+    path = synthetic_run.row_blocks / "summary.json"
     summary = json.loads(path.read_text())
     for row in summary["models"]:
         row.update(stratum="text:9-35B", params=20_000_000_000)
@@ -256,8 +256,8 @@ def test_known_empty_small_model_timing_cohort_is_not_applicable(synthetic_run, 
 
 
 def test_byte_curve_incomplete_height_is_unavailable(synthetic_run):
-    next(synthetic_run.t2.glob("*.t1b128.fingerprint.safetensors")).unlink()
-    result = tier_agreement(synthetic_run.pairs, synthetic_run.t1, synthetic_run.t2)
+    next(synthetic_run.full_weights.glob("*.row_blocks_128.fingerprint.safetensors")).unlink()
+    result = tier_agreement(synthetic_run.pairs, synthetic_run.row_blocks, synthetic_run.full_weights)
     assert result["byte_curve"][128] is None
     assert result["byte_curve_counts"][128]["missing"] > 0
     assert result["byte_curve_counts"][128]["requested"] == len(synthetic_run.pairs)

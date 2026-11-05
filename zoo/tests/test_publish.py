@@ -66,18 +66,18 @@ def test_publish_never_overwrites_and_separates_conventions(package_run):
 
 def test_publish_skips_incomplete_models(package_run):
     r = package_run
-    next(r.folder.glob("*.t2.fingerprint.safetensors")).unlink()
+    next(r.folder.glob("*.full_weights.fingerprint.safetensors")).unlink()
     assert publish_package(r.run, "lab/tiny", r.packages, r.root) is None
     assert not list(r.packages.rglob("package.json"))
 
 
-def test_publish_t1_only_package_without_esd_files(package_run):
+def test_publish_row_blocks_only_package_without_esd_files(package_run):
     r = package_run
-    for path in (r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.t2.*")):
+    for path in (r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")):
         path.unlink()
     path = publish_package(r.run, "lab/tiny", r.packages, r.root)
     metadata = json.loads((path / "package.json").read_text())
-    assert metadata["kind"] == "t1_only" and metadata["complete"]
+    assert metadata["kind"] == "row_blocks_only" and metadata["complete"]
     assert not (path / "esd").exists()
 
 
@@ -92,13 +92,13 @@ def test_publish_falls_back_to_copy_across_filesystems(package_run, monkeypatch)
     assert (path / "esd/metrics.h5").is_file()
 
 
-def test_t1_preliminary_and_full_packages_coexist_without_overwrite(package_run):
+def test_row_blocks_preliminary_and_full_packages_coexist_without_overwrite(package_run):
     from zoo.build import build_zoo, open_tables
     r = package_run
     stash = r.root / "stash"
     stash.mkdir()
     saved = []
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.t2.*")]:
+    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
         other = stash / path.name
         os.replace(path, other)
         saved.append((other, path))
@@ -117,11 +117,11 @@ def test_missing_summary_infers_nondefault_sketch_from_artifacts(package_run):
     from evidence.fingerprint import fingerprint_tensors
     from safetensors.torch import load_file
     r = package_run
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.t2.*"),
-                 *r.folder.glob("*.t1b*"), r.folder / "evidence.json"]:
+    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*"),
+                 *r.folder.glob("*.row_blocks_*"), r.folder / "evidence.json"]:
         path.unlink()
     fingerprint_tensors(load_file(r.root / "source/model.safetensors").items(),
-                        r.folder / f"{r.safe}.t1.fingerprint.safetensors", r.manifest, sketch_k=128)
+                        r.folder / f"{r.safe}.row_blocks.fingerprint.safetensors", r.manifest, sketch_k=128)
     path = publish_package(r.run, "lab/tiny", r.packages, r.root)
     meta = json.loads((path / "package.json").read_text())
     assert meta["conventions"]["evidence"]["sketch_k"] == 128
@@ -160,10 +160,10 @@ def test_pinned_publication_does_not_scan_other_models(package_run, monkeypatch)
     assert publish_package(r.run, "lab/tiny@" + r.manifest["revision"], r.packages, r.root).is_dir()
 
 
-def test_default_build_accepts_gpu_t1_and_prefers_cpu_when_both_exist(package_run):
+def test_default_build_accepts_gpu_row_blocks_and_prefers_cpu_when_both_exist(package_run):
     from zoo.build import build_zoo, open_tables
     r = package_run
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.t2.*")]:
+    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
         path.unlink()
     summary = r.folder / "evidence.json"
     settings = dict(sketch_k=64, all_experts=False, with_parent=True, device="gpu")
@@ -175,5 +175,5 @@ def test_default_build_accepts_gpu_t1_and_prefers_cpu_when_both_exist(package_ru
     summary.write_text(json.dumps(dict(settings=settings)))
     cpu = publish_package(r.run, "lab/tiny", r.packages, r.root)
     build_zoo(packages=r.packages, data_root=r.root, out=built)
-    path = open_tables(built)["models"].iloc[0].fingerprint_t1
+    path = open_tables(built)["models"].iloc[0].row_block_fingerprint
     assert str(cpu.relative_to(r.root)) in path and gpu != cpu

@@ -68,7 +68,7 @@ def evidence_settings(args, stratum=None):
 
 def quarantine_evidence(output_dir, repo, revision):
     folder = evidence_dir(output_dir, repo, revision)
-    marker = folder / (folder.name + ".t2.fingerprint.safetensors")
+    marker = folder / (folder.name + ".full_weights.fingerprint.safetensors")
     if not marker.is_file():
         return None
     backup = folder.with_name("." + folder.name + ".previous-" + uuid.uuid4().hex)
@@ -92,7 +92,7 @@ def evidence_complete(output_dir, model_id, revision="", *, measurement=None, op
     folders = ([evidence_dir(output_dir, repo, revision)] if revision else
                (Path(output_dir) / "evidence").glob(safe_filename(repo) + "__*"))
     for folder in folders:
-        marker = folder / (folder.name + ".t2.fingerprint.safetensors")
+        marker = folder / (folder.name + ".full_weights.fingerprint.safetensors")
         manifest_path = folder / (folder.name + ".manifest.json")
         if marker.is_file() and manifest_path.is_file():
             try:
@@ -105,7 +105,7 @@ def evidence_complete(output_dir, model_id, revision="", *, measurement=None, op
                         continue
                 if measurement is not None:
                     import h5py
-                    with h5py.File(folder / (folder.name + ".t2.spectra.h5")) as h:
+                    with h5py.File(folder / (folder.name + ".full_weights.spectra.h5")) as h:
                         actual = json.loads(h.attrs["measurement_config_json"])
                     if any(actual.get(key) != value for key, value in measurement.items() if key != "runtime"):
                         continue

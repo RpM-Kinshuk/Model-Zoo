@@ -21,13 +21,13 @@ def test_check_exit_codes(child_dir, unrelated_dir, null_file):
 
 def test_resume_skips_done_and_overwrites_tmp(run_dir, models_csv):
     args = ["batch", "--models", str(models_csv), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t1", "--out", str(run_dir / "t1"), "--workers", "2"]
-    main(args); done = sorted((run_dir / "t1").glob("*.safetensors"))
+            "--measurement_mode", "row_blocks", "--out", str(run_dir / "row_blocks"), "--workers", "2"]
+    main(args); done = sorted((run_dir / "row_blocks").glob("*.safetensors"))
     mtimes = [p.stat().st_mtime_ns for p in done]
-    (run_dir / "t1" / "extra.t1.fingerprint.safetensors.tmp").write_bytes(b"partial")
+    (run_dir / "row_blocks" / "extra.row_blocks.fingerprint.safetensors.tmp").write_bytes(b"partial")
     main(args)
     assert [p.stat().st_mtime_ns for p in done] == mtimes
-    assert not (run_dir / "t1" / "extra.t1.fingerprint.safetensors.tmp").exists()
+    assert not (run_dir / "row_blocks" / "extra.row_blocks.fingerprint.safetensors.tmp").exists()
 
 
 def test_no_access_recorded_once(run_dir, models_csv_with_denied, denying_reader, fake_api):
@@ -56,8 +56,8 @@ def test_similarity_alignment_and_calibration_guards(child_dir, parent_dir, null
     reader = HubReader()
     parent = build_manifest(str(parent_dir), "main", reader, None)
     child = build_manifest(str(child_dir), "main", reader, None)
-    a = load_fingerprint(fingerprint_model(child, reader, "t1", tmp_path / "fp", parent=parent))
-    b = load_fingerprint(fingerprint_model(parent, reader, "t1", tmp_path / "fp"))
+    a = load_fingerprint(fingerprint_model(child, reader, "row_blocks", tmp_path / "fp", parent=parent))
+    b = load_fingerprint(fingerprint_model(parent, reader, "row_blocks", tmp_path / "fp"))
     null = json.loads(null_file.read_text())
     diff = diff_fingerprints(a, b, null)
     assert diff["relatedness"]["verdict"] == "related"
@@ -67,7 +67,7 @@ def test_similarity_alignment_and_calibration_guards(child_dir, parent_dir, null
     other = copy.deepcopy(b)
     other.meta["repo_id"] = "lab/different-parent"
     assert not any("delta_status" in v for v in diff_fingerprints(a, other)["views"].values())
-    for field, value in (("tier", "t2"), ("row_block", 128), ("sketch_seed", 1), ("sketch_k", 32)):
+    for field, value in (("tier", "full_weights"), ("row_block", 128), ("sketch_seed", 1), ("sketch_k", 32)):
         other = copy.deepcopy(b)
         other.meta[field] = value
         guarded = diff_fingerprints(a, other, null)["relatedness"]
@@ -98,32 +98,32 @@ def test_batch_outputs_workers_and_settings(run_dir, models_csv, monkeypatch):
     from evidence.fingerprint import load_fingerprint
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     args = ["batch", "--models", str(models_csv), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t1", "--out", str(run_dir / "t1"), "--workers", "2", "--sketch_k", "32"]
+            "--measurement_mode", "row_blocks", "--out", str(run_dir / "row_blocks"), "--workers", "2", "--sketch_k", "32"]
     assert main(args) == 0
-    paths = sorted((run_dir / "t1").glob("*.safetensors"))
+    paths = sorted((run_dir / "row_blocks").glob("*.safetensors"))
     assert len(paths) == 2
     assert all(load_fingerprint(p).meta["sketch_k"] == 32 for p in paths)
     args[-1] = "64"
     assert main(args) == 0
     assert all(load_fingerprint(p).meta["sketch_k"] == 64 for p in paths)
-    summary = json.loads((run_dir / "t1" / "summary.json").read_text())
+    summary = json.loads((run_dir / "row_blocks" / "summary.json").read_text())
     assert len(summary["models"]) == 2
     for record in summary["models"]:
         assert record["bytes_read"] > 0 and record["range_reads"] > 0
         assert record["stratum"] == "text:<1B" and record["view_counts"]["matrix"] == 2
 
 
-def test_t2_resume_requires_companions_and_parent_cache(run_dir, models_csv):
+def test_full_weights_resume_requires_companions_and_parent_cache(run_dir, models_csv):
     from evidence.fingerprint import load_fingerprint
     args = ["batch", "--models", str(models_csv), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t2", "--out", str(run_dir / "t2"), "--also_t1_blocks", "128,256",
+            "--measurement_mode", "full_weights", "--out", str(run_dir / "full_weights"), "--also_row_block_sizes", "128,256",
             "--with_parent", "--parent_cache", str(run_dir / "cache")]
     assert main(args) == 0
-    paths = sorted((run_dir / "t2").glob("*.t2.fingerprint.safetensors"))
+    paths = sorted((run_dir / "full_weights").glob("*.full_weights.fingerprint.safetensors"))
     assert len(paths) == 2 and list((run_dir / "cache").glob("*.bin"))
     child = next(p for p in paths if load_fingerprint(p).meta["parent"])
     assert load_fingerprint(child).meta["parent"]["repo_id"] == "lab/parent"
-    companion = child.with_name(child.name.replace(".t2.", ".t1b128."))
+    companion = child.with_name(child.name.replace(".full_weights.", ".row_blocks_128."))
     companion.unlink()
     assert main(args) == 0 and companion.is_file()
     spectra = child.with_name(child.name.replace("fingerprint.safetensors", "spectra.h5"))
@@ -158,7 +158,7 @@ def test_batch_records_real_failures_and_finishes_other_models(run_dir, models_c
     path = tmp_path / "broken.csv"
     models.to_csv(path, index=False)
     args = ["batch", "--models", str(path), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t1", "--out", str(run_dir / "broken")]
+            "--measurement_mode", "row_blocks", "--out", str(run_dir / "broken")]
     assert main(args) == 2
     failures = pd.read_csv(run_dir / "broken" / "failures.csv")
     assert list(failures.repo_id) == ["lab/missing"]
@@ -229,7 +229,7 @@ def test_batch_denied_retry_keeps_resolved_pin(run_dir, tmp_path, denying_reader
             if revision == "main":
                 info.sha = "b" * 40
             return info
-    args = ["batch", "--models", str(models), "--manifests", str(directory), "--tier", "t1",
+    args = ["batch", "--models", str(models), "--manifests", str(directory), "--measurement_mode", "row_blocks",
             "--out", str(run_dir / "pinned-output"), "--retry_denied", "--workers", "1"]
     assert main(args, reader_factory=lambda: fake_reader, api=MovingApi()) == 0
     assert calls == [SHA]
@@ -247,7 +247,7 @@ def test_batch_extraction_denial_is_skipped_until_retry(run_dir, models_csv):
             raise AccessDenied("Access revoked after metadata collection")
     reader = LaterDeniedReader()
     args = ["batch", "--models", str(models_csv), "--manifests", str(run_dir / "manifests"),
-            "--tier", "t1", "--out", str(run_dir / "revoked"), "--workers", "1"]
+            "--measurement_mode", "row_blocks", "--out", str(run_dir / "revoked"), "--workers", "1"]
     assert main(args, reader_factory=lambda: reader) == 2
     attempts = reader.attempts
     assert attempts == 2
@@ -325,7 +325,7 @@ def test_cli_forwards_spectrum_compute_device(command, tiny_checkpoint, tmp_path
     import torch
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    args = [command, "--tier", "t2", "--out", str(tmp_path / "device-out"),
+    args = [command, "--measurement_mode", "full_weights", "--out", str(tmp_path / "device-out"),
             "--compute_device", "cuda:1"]
     if command == "fingerprint":
         args.append(str(source))
@@ -346,21 +346,21 @@ def test_batch_defaults_match_target(tmp_path, monkeypatch):
     captured = []
     monkeypatch.setattr(cli, "_run_many", lambda args, *unused: captured.append(args) or 0)
     common = ["batch", "--models", "models.csv", "--manifests", "manifests", "--out", str(tmp_path)]
-    assert main(common + ["--tier", "t2"]) == 0
+    assert main(common + ["--measurement_mode", "full_weights"]) == 0
     args = captured[-1]
     assert args.with_parent and args.delta_blocks == (256,)
     assert args.parent_cache == tmp_path / "data/cache/parent-blocks"
     assert args.parent_cache_max_gib == 64
-    assert args.also_t1_blocks == (128, 256, 512)
-    assert main(common + ["--tier", "t1"]) == 0
-    assert captured[-1].also_t1_blocks == ()
+    assert args.also_row_block_sizes == (128, 256, 512)
+    assert main(common + ["--measurement_mode", "row_blocks"]) == 0
+    assert captured[-1].also_row_block_sizes == ()
 
 
 @pytest.mark.parametrize("stratum,k,experts", [("lab", 128, True), ("anchor", 128, True), ("census", 64, False), ("", 64, False)])
 def test_batch_auto_sketch_k_and_experts_follow_stratum(local_manifest, tmp_path, stratum, k, experts):
     from evidence.cli import _batch_options, _parser
     args = _parser().parse_args(["batch", "--models", "unused", "--manifests", "unused",
-                                "--tier", "t2", "--out", str(tmp_path)])
+                                "--measurement_mode", "full_weights", "--out", str(tmp_path)])
     options = _batch_options(args, dict(repo_id=local_manifest["repo_id"], stratum=stratum), set())
     assert options["sketch_k"] == k
     assert options["all_experts"] is experts
@@ -378,10 +378,10 @@ def test_opt_outs_reproduce_previous_batch_outputs(local_manifest, tmp_path, mon
     write_manifest(local_manifest, manifests)
     models = tmp_path / "models.csv"
     models.write_text("repo_id,revision\n" + local_manifest["repo_id"] + "," + local_manifest["revision"] + "\n")
-    baseline = fp.fingerprint_model(local_manifest, HubReader(), "t2", tmp_path / "old")
+    baseline = fp.fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path / "old")
     assert main(["batch", "--models", str(models), "--manifests", str(manifests),
-                 "--tier", "t2", "--out", str(tmp_path / "new"), "--no-with_parent",
-                 "--no-parent_cache", "--sketch_k", "64", "--also_t1_blocks", "none", "--workers", "1"]) == 0
+                 "--measurement_mode", "full_weights", "--out", str(tmp_path / "new"), "--no-with_parent",
+                 "--no-parent_cache", "--sketch_k", "64", "--also_row_block_sizes", "none", "--workers", "1"]) == 0
     result = next((tmp_path / "new").glob("*.safetensors"))
     # Safetensors header map ordering is not stable; payload bytes and metadata are.
     with safe_open(baseline, framework="numpy") as a, safe_open(result, framework="numpy") as b:
@@ -430,9 +430,9 @@ def test_batch_resume_respects_delta_policy(local_manifest, tmp_path):
     models = tmp_path / "models.csv"
     models.write_text("repo_id,revision\n" + manifest["repo_id"] + "," + manifest["revision"] + "\n")
     args = ["batch", "--models", str(models), "--manifests", str(tmp_path / "manifests"),
-            "--tier", "t2", "--out", str(tmp_path / "out"), "--workers", "1"]
+            "--measurement_mode", "full_weights", "--out", str(tmp_path / "out"), "--workers", "1"]
     assert main(args) == 0
-    path = next((tmp_path / "out").glob("*.t2.fingerprint.safetensors"))
+    path = next((tmp_path / "out").glob("*.full_weights.fingerprint.safetensors"))
     assert set(load_fingerprint(path).delta["status"]) == {"not_computed"}
     assert main(args + ["--full_delta"]) == 0
     assert set(load_fingerprint(path).delta["status"]) == {"identical"}
@@ -444,6 +444,6 @@ def test_batch_accepts_existing_maximum_sketch_override(monkeypatch, tmp_path):
     import evidence.cli as cli
     captured = []
     monkeypatch.setattr(cli, "_run_many", lambda args, *unused: captured.append(args) or 0)
-    assert main(["batch", "--models", "unused", "--manifests", "unused", "--tier", "t1",
+    assert main(["batch", "--models", "unused", "--manifests", "unused", "--measurement_mode", "row_blocks",
                  "--out", str(tmp_path), "--sketch_k", "256"]) == 0
     assert captured[0].sketch_k == "256"

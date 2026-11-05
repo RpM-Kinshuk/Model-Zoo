@@ -1,4 +1,4 @@
-"""Extract row-block weight evidence in a supervised worker process."""
+"""Extract row-block weight evidence for an oversized model under supervision."""
 import argparse
 import json
 import logging
@@ -39,9 +39,9 @@ def main():
             logging.getLogger(__name__), status_path=status_csv_path,
         )
         measurement_outcome = pd.read_csv(status_csv_path).fillna('').iloc[0]
-        t1_status = measurement_outcome['t1_status']
-        status = 'success' if t1_status in ('published', 'measured') else 'failed'
-        outcome.update(status=status, t1_status=t1_status, reason=measurement_outcome.get('t1_error', ''))
+        evidence_status = measurement_outcome['evidence_status']
+        status = 'success' if evidence_status in ('published', 'measured') else 'failed'
+        outcome.update(status=status, evidence_status=evidence_status, reason=measurement_outcome.get('evidence_error', ''))
     except BaseException as exc:
         outcome.update(status='failed', reason=type(exc).__name__, message=str(exc))
     finally:

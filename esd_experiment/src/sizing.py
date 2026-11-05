@@ -10,7 +10,7 @@ def job_resources(weight_bytes, gpu_memory_bytes, pool_size, evidence_inflight_b
         raise ValueError("Sizing requires positive weight/GPU bytes and a nonempty pool")
     count = max(1, math.ceil(1.5 * weight_bytes / gpu_memory_bytes))
     if count > pool_size:
-        return dict(oversized=True)
+        return dict(oversized_model=True)
     gib = weight_bytes / GIB
     timeouts = dict(BASE_TIMEOUTS)
     timeouts["analyze"] = timeouts["fingerprint"] = max(28800, math.ceil(600 * gib))

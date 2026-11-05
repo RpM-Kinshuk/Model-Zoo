@@ -163,7 +163,7 @@ def test_deltas_measures_detected_package_pair_and_resumes(package_run, capsys):
     parent = dict(r.manifest, repo_id="lab/other")
     folder = r.run / "evidence" / safe_filename(parent["repo_id"] + "@" + parent["revision"])
     write_manifest(parent, folder)
-    fingerprint_model(parent, HubReader(), "t1", folder)
+    fingerprint_model(parent, HubReader(), "row_blocks", folder)
     publish_package(r.run, "lab/other", r.packages, r.root)
     built = build_zoo(packages=r.packages, data_root=r.root, out=r.root / "builds/current")
     capsys.readouterr()

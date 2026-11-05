@@ -1,4 +1,4 @@
-"""T1-only retrieval with exact mean cosine over compatible shared views."""
+"""row-block-only retrieval with exact mean cosine over compatible shared views."""
 
 import json
 import math
@@ -26,10 +26,10 @@ def select_retrieval_views(views: pd.DataFrame) -> list[str]:
 
 
 def _select_retrieval_views(views, model_count=None):
-    """The builder supplies its full population, including empty T1 models."""
+    """The builder supplies its full population, including empty row-block models."""
     if views.empty:
         return []
-    first = views[views.tier == "t1"] if "tier" in views else views
+    first = views[views.tier == "row_blocks"] if "tier" in views else views
     if first.empty:
         return []
     count = first.model_key.nunique() if model_count is None else model_count
@@ -50,20 +50,20 @@ def _paths(zoo_dir, signature):
 
 
 def _fingerprint(row, root):
-    relative = Path(row.fingerprint_t1)
+    relative = Path(row.row_block_fingerprint)
     if relative.is_absolute():
-        raise ValueError("T1 fingerprint path must be relative to data_root")
+        raise ValueError("row-block fingerprint path must be relative to data_root")
     path = (root / relative).resolve()
     if not path.is_relative_to(root):
-        raise ValueError("T1 fingerprint path escapes data_root")
+        raise ValueError("row-block fingerprint path escapes data_root")
     fp = load_fingerprint(path)
     if model_key(fp.meta["repo_id"], fp.meta["revision"]) != row.model_key:
         raise ValueError(f"Fingerprint identity does not match model: {row.model_key}")
-    if (fp.meta.get("tier") != "t1" or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS
+    if (fp.meta.get("tier") != "row_blocks" or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS
             or fp.meta.get("sketch_seed") != SKETCH_SEED or fp.meta.get("row_block") != ROW_BLOCK
             or fp.meta.get("sketch_k", 0) < _SKETCH_SIZE
             or fp.sketch.shape != (len(fp.names), fp.meta["sketch_k"], fp.meta["sketch_k"])):
-        raise ValueError(f"Incompatible T1 fingerprint settings (seed/row_block/sketch): {row.model_key}")
+        raise ValueError(f"Incompatible row-block fingerprint settings (seed/row_block/sketch): {row.model_key}")
     return fp
 
 
@@ -73,7 +73,7 @@ def _view_index(fp, row):
             or fp.geometry[index] != row.geometry or fp.sha256[index] != row.block_sha256
             or fp.shape[index].tolist() != [int(row.n_rows), int(row.n_cols)]
             or fp.rows[index].tolist() != [int(row.r0), int(row.r1)]):
-        raise ValueError(f"View table disagrees with T1 fingerprint: {row['name']}")
+        raise ValueError(f"View table disagrees with row-block fingerprint: {row['name']}")
     return index
 
 
@@ -102,10 +102,10 @@ def build_retrieval(zoo_dir: Path, models: pd.DataFrame, views: pd.DataFrame,
         return
     if models.model_key.duplicated().any():
         raise ValueError("Duplicate model keys in retrieval input")
-    candidates = models[models.fingerprint_t1.map(lambda value: isinstance(value, str) and bool(value))]
+    candidates = models[models.row_block_fingerprint.map(lambda value: isinstance(value, str) and bool(value))]
     for signature, group in candidates.groupby("arch_signature", sort=True):
         group = group.sort_values("model_key")
-        selected_rows = views[views.model_key.isin(group.model_key) & views.tier.eq("t1")]
+        selected_rows = views[views.model_key.isin(group.model_key) & views.tier.eq("row_blocks")]
         names = _select_retrieval_views(selected_rows, model_count=len(group))
         if len(group) < 2 or not names:
             continue
@@ -205,7 +205,7 @@ class RetrievalIndex:
         if k == 0:
             return []
         if key not in self.key_indices:
-            raise ValueError(f"Model has no comparable T1 retrieval row: {key}")
+            raise ValueError(f"Model has no comparable row-block retrieval row: {key}")
         keys, matrix, presence, n_views = self.keys, self.matrix, self.presence, self.n_views
         query_index = self.key_indices[key]
         query, query_valid = _unit_blocks(matrix[query_index:query_index + 1], n_views)

@@ -15,10 +15,10 @@ python -m zoo.cli build
 This reads `$ZOO_DATA/packages` under current measurement conventions and writes
 `$ZOO_DATA/builds/current`. `--packages PATH` selects another package tree;
 `--conventions ID` selects other settings. The build summary counts packages
-skipped for different conventions. Default T1-only and full packages use distinct
+skipped for different conventions. Default row-block-only and full packages use distinct
 tier convention IDs; the default build accepts full CPU-sidecar packages and
-CPU/GPU streaming T1 packages, and prefers full evidence
-when both exist for the same model. When both CPU and GPU T1-only packages exist, it selects
+CPU/GPU streaming row-block packages, and prefers full evidence
+when both exist for the same model. When both CPU and GPU row-block-only packages exist, it selects
 the CPU package deterministically. This preserves preliminary packages during
 later full-mode upgrades.
 
@@ -56,8 +56,8 @@ python -m zoo.cli build --manifests "$MANIFESTS" \
 ```
 
 `MANIFESTS` contains one manifest per pinned model. `FINGERPRINTS` contains
-canonical T1/T2 files; extra T1 block sizes remain alongside them. Multiple
-fingerprint directories may follow `--fingerprints`.
+canonical row-block and full tensor files; extra row-block heights remain
+alongside them. Multiple fingerprint directories may follow `--fingerprints`.
 
 Optional inputs:
 
@@ -96,17 +96,17 @@ Older generations remain available until explicitly cleaned up.
 | `scores` | Measured scores and revision verification |
 | `predictions` | Separate prediction records; empty in v0 |
 
-Eigenvalues remain in HDF5. For full packages, `models.spectra_t2` links to
+Eigenvalues remain in HDF5. For full packages, `models.full_weight_spectra` links to
 `esd/metrics.h5`; each `layers.h5_index` indexes that file's aligned `/layers`
 and `/eigs` records. `view_name` maps exact stored identities when possible and
-is empty otherwise. The stored-view T2 spectra remain beside the T2 fingerprint
-under their frozen filename, including second-round views absent from the
+is empty otherwise. Stored-view spectra remain beside their full tensor
+fingerprint under the descriptive filename, including second-round views absent from the
 original runner metrics. Legacy direct-input builds keep their original
 stored-view spectrum links; their `layers` table is empty. Older six-table zoo
 generations remain readable with an empty `layers` table. Artifact
-paths are relative to `ZOO_DATA`. Retrieval compares T1 row-block fingerprints
+paths are relative to `ZOO_DATA`. Retrieval compares sampled row-block fingerprints
 within the same architecture signature, giving comparable coordinates and
-shapes. Full-matrix T2 sketches have a different measurement scope.
+shapes. Full tensor sketches have a different measurement scope.
 
 ## Read the evidence
 
@@ -154,7 +154,8 @@ Local synthetic timings and exact before/after parity are recorded in the
 ## Validation status
 
 The 2026-11-02 scoped CLI smoke passed on 85 models: 43 measured checkpoints and
-42 metadata-only entries, retaining all 43 full-spectrum links. Rebuild it with:
+42 metadata-only entries, retaining all 43 full-spectrum links. The following
+rebuild uses the original historical path (`t2-k128`); keep that path unchanged:
 
 ```bash
 python -m zoo.cli build \
@@ -181,9 +182,9 @@ calibration is fabricated for it.
 
 ### Finished pilot artifact smoke (2026-11-03)
 
-The finished pilot has97/97 new T1 successes and241/287 new T2 successes;46
-T2 failures remain explicit. Six previous T2 bundles are reused, giving247
-complete pilot T2 bundles with full spectra and all128/256/512 companions.
+The finished pilot has97/97 new row-block successes and241/287 new full-weight successes;46
+full-weight failures remain explicit. Six previous full-weight bundles are reused, giving247
+complete pilot full-weight bundles with full spectra and all128/256/512 companions.
 
 The artifact-only snapshot at
 `runs/track-a-r3-r6-20261102.rcsy95ap/zoo` contains556 model records,89,286
@@ -205,12 +206,12 @@ complete formal calibration and required measurement coverage.
 
 ### Recovery checkpoint (2026-11-04)
 
-The Hub run closed with **284/287 new T2 successes**, six earlier T2 bundles
+The Hub run closed with **284/287 new full-weight successes**, six earlier full-weight bundles
 reused, and three explicit gaps: one NaN source and two timeout omissions.
 The owner stopped the optional retries; original sample rows and inclusion
-weights remain unchanged. T1 is97/97 complete.
+weights remain unchanged. Row-block extraction is 97/97 complete.
 
-The44-case formal delivery is complete. All87 current formal T2 identities
+The44-case formal delivery is complete. All87 current formal full-weight identities
 have verified manifest/fingerprint headers and HDF5 paths. This includes the
 three earlier Smol360 chain endpoints stored outside the original L12 pool.
 
@@ -249,7 +250,7 @@ command. CUDA follows the evidence CLI's assigned-device policy. Parent blocks
 share `$ZOO_DATA/cache/parent-blocks`; `--no-parent_cache` disables this cache.
 
 Each child package gets append-only `deltas/<parent safe>.delta.safetensors`
-addenda (`pair_delta_version=1`, evidence version 2). Tensors are `rows[n,2]`,
+addenda (`pair_delta_version=1`, evidence version 3). Tensors are `rows[n,2]`,
 `delta_scalars[n,3]` (identical fraction, relative update norm, rank) and
 `delta_top_sv[n,16]`. Metadata pins both identities and records per-view names,
 block heights, statuses and confidence. Missing/incompatible views remain gaps.
@@ -258,13 +259,15 @@ height. Existing addenda are reused, never silently overwritten; settings
 conflicts raise an error. Package core hashes and files stay unchanged; rebuild
 provenance hashes the addenda separately.
 
-`diff` uses an available matching pair measurement at the requested T1 block
+`diff` uses an available matching pair measurement at the requested row-block
 height. Rebuilds tag existing lineage evidence with `+row_block_delta`, retaining
 its estimand, direction, tier, score and calibration status. A measured update
 does not verify ancestry or predict skill changes.
 
-New artifacts use `EVIDENCE_VERSION=2` and builds `ZOO_VERSION=1`; numerical
-conventions remain NUMERICS7/FORMAT2.0. Model-Zoo reads evidence1 and old six-table
-builds (empty layers). Current default packages use evidence2; old conventions
-must be selected explicitly or evidence regenerated. Rebuild old zoo0 generations
-before using query clients that require the current ZOO_VERSION.
+New artifacts use `EVIDENCE_VERSION=3` and builds `ZOO_VERSION=2`; numerical
+conventions remain NUMERICS7/FORMAT2.0. Evidence readers accept versions 1, 2 and 3;
+zoo readers accept versions 0, 1 and 2, translating legacy numbered columns to
+`row_block_fingerprint`, `full_weight_fingerprint` and `full_weight_spectra`.
+Old six-table builds have an empty `layers` table. Current default packages use
+evidence version 3; select older conventions explicitly or regenerate evidence.
+Rebuild older generations for query clients that require the current `ZOO_VERSION`.

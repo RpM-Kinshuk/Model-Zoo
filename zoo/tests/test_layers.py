@@ -31,7 +31,7 @@ def test_layer_indices_resolve_through_model_spectrum_link(package_run):
     r = package_run
     package = publish_package(r.run, "lab/tiny", r.packages, r.root)
     tables = open_tables(build_zoo(packages=r.packages, out=r.root / "indexed", data_root=r.root))
-    path = r.root / tables["models"].iloc[0].spectra_t2
+    path = r.root / tables["models"].iloc[0].full_weight_spectra
     assert path == package / "esd/metrics.h5"
     with h5py.File(path) as h:
         for row in tables["layers"].itertuples():

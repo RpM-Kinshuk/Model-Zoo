@@ -58,7 +58,7 @@ together; ordinary finetune lineage hints do not add a second model to the
 budget. Standard safetensors files are preferred over PyTorch files. Sharded
 checkpoints use their small index JSON, not all similarly named files in the
 repository. The default `--max_weight_gib auto` reviews sizes/access during preparation and
-uses pool capacity at launch. Oversized jobs get a later supervised streaming T1 pass (one assigned GPU per job, explicit CPU opt-out); zero
+uses pool capacity at launch. Oversized jobs get a later supervised streaming row-block pass (one assigned GPU per job, explicit CPU opt-out); zero
 disables the size cap, not missing-file/size/access checks. Gated/private repositories
 need verified read access. These checks do not validate tensor layouts, predict
 RAM/VRAM requirements, or establish quantization support. Runtime integrity and
@@ -134,9 +134,10 @@ Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
 ### Full-mode evidence
 
 Evidence is on by default. Each model additionally writes
-`evidence/<safe>/<safe>.manifest.json`, T2 and T1 (128/256/512 rows) fingerprints,
-`<safe>.t2.spectra.h5`, and `evidence.json` with reuse/measurement counts and
-settings. The T2 spectra identify each layer as `runner` or `second_round`.
+`evidence/<safe>/<safe>.manifest.json`, fingerprints of full tensors and sampled
+128/256/512-row blocks,
+`<safe>.full_weights.spectra.h5`, and `evidence.json` with reuse/measurement counts and
+settings. Full tensor spectra identify each layer as `runner` or `second_round`.
 Runner spectra are reused only after exact stored-key, shape, dtype and
 256-row byte checks.
 
@@ -150,8 +151,8 @@ otherwise those deltas report `parent_unavailable`.
 The ESD CSV/H5 pair is saved before waiting for evidence, including during
 supervisor termination. A retry with a compatible pair skips the estimator and
 finishes evidence using saved HDF5 spectra. Scalar-only pairs can recover by
-measuring the missing spectra in the second round. Completion checks the T2
-marker and measurement/evidence settings; stale evidence is rebuilt without
+measuring the missing spectra in the second round. Completion checks the full tensor
+fingerprint marker and measurement/evidence settings; stale evidence is rebuilt without
 rewriting the compatible ESD pair. Superseded evidence is restored if rebuilding
 fails. The worker handles SIGTERM through its normal interruption cleanup.
 

@@ -14,7 +14,8 @@ from types import SimpleNamespace
 import h5py
 from safetensors import safe_open
 
-from evidence import EVIDENCE_VERSION
+from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
+from evidence.compatibility import canonical_mode, companion_spectra_path, find_fingerprint, historical_artifact_name
 from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
                                 measurement_config, safe_filename)
 from .schema import model_key, split_key
@@ -65,9 +66,10 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
     safe, folder = safe_filename(key), manifest_path.parent
     if manifest_path.name != safe + ".manifest.json":
         raise ValueError("Manifest filename does not match its pinned identity")
-    marker, spectra = folder / f"{safe}.t2.fingerprint.safetensors", folder / f"{safe}.t2.spectra.h5"
+    marker = find_fingerprint(folder, safe, "full_weights")
+    spectra = companion_spectra_path(marker)
     sources = {manifest_path.name: manifest_path}
-    cfg, kind = None, "t1_only"
+    cfg, kind = None, "row_blocks_only"
     pairs = [(Path(run) / "stats" / f"{safe_filename(label)}.csv",
               Path(run) / "metrics" / f"{safe_filename(label)}.h5") for label in (key, repo)]
     if in_package:
@@ -90,13 +92,13 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
         sources.update({marker.name: marker, spectra.name: spectra, "esd/stats.csv": csv, "esd/metrics.h5": h5})
     elif has_esd or spectra.exists() or list(folder.glob("*.staged")):
         return None
-    tiers = ("t1", "t1b128", "t1b512") if kind == "full" else ("t1",)
+    tiers = ("row_blocks", "row_blocks_128", "row_blocks_512") if kind == "full" else ("row_blocks",)
     for tier in tiers:
-        path = folder / f"{safe}.{tier}.fingerprint.safetensors"
+        path = find_fingerprint(folder, safe, tier)
         if not path.is_file():
             return None
         sources[path.name] = path
-    for path in folder.glob(f"{safe}.t1b*.fingerprint.safetensors"):
+    for path in folder.glob(f"{safe}.row_blocks_*.fingerprint.safetensors"):
         sources[path.name] = path
     fingerprint_metadata = []
     for name, path in sources.items():
@@ -104,13 +106,17 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
             with safe_open(path, framework="numpy") as handle:
                 meta = handle.metadata()
             fingerprint_metadata.append(meta)
-            if meta.get("repo_id") != repo or meta.get("revision") != revision or meta.get("evidence_version") != EVIDENCE_VERSION:
+            if meta.get("repo_id") != repo or meta.get("revision") != revision or meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS:
                 raise ValueError("Fingerprint identity or version disagrees with its manifest")
     for path in sorted((folder / "deltas").glob("*.delta.safetensors")):
         sources["deltas/" + path.name] = path
     summary_path = summary_path or folder / "evidence.json"
     summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
     scientific = conventions(cfg)
+    source_versions = {meta["evidence_version"] for meta in fingerprint_metadata}
+    if len(source_versions) != 1:
+        raise ValueError("Inconsistent fingerprint format versions")
+    scientific["evidence_version"] = source_versions.pop()
     scientific["evidence_tier"] = kind
     settings = summary.get("settings", {})
     special = summary.get("stratum") in ("lab", "anchor")
@@ -272,13 +278,13 @@ def package_inputs(packages, selected=None):
     rows, skipped, identities = [], 0, {}
     accepted = {selected}
     if selected == current_conventions_id():
-        t1 = conventions()
-        t1["evidence_tier"] = "t1_only"
-        accepted.add(conventions_id(t1))
-        # Streaming T1 may use a supervisor-assigned GPU even when full-mode
+        row_blocks = conventions()
+        row_blocks["evidence_tier"] = "row_blocks_only"
+        accepted.add(conventions_id(row_blocks))
+        # Streaming row-block may use a supervisor-assigned GPU even when full-mode
         # evidence defaults to CPU. Keep this policy explicit in its package.
-        t1["evidence"] = dict(t1["evidence"], device="gpu")
-        accepted.add(conventions_id(t1))
+        row_blocks["evidence"] = dict(row_blocks["evidence"], device="gpu")
+        accepted.add(conventions_id(row_blocks))
     for path in sorted(Path(packages).rglob("package.json")):
         # Private publication stages are invisible to readers.
         if any(part.startswith(".") for part in path.relative_to(packages).parts):
@@ -293,13 +299,18 @@ def package_inputs(packages, selected=None):
             raise ValueError("Invalid package identity")
         if meta["conventions"] != conventions(meta["conventions"]) or conventions_id(meta["conventions"]) != meta["conventions_id"]:
             raise ValueError("Package conventions do not match their identifier")
+        # Verify the original conventions/hash first; only normalize the public
+        # kind afterward, leaving historical filenames and inventory untouched.
+        meta = dict(meta, kind=canonical_mode(meta.get("kind")))
         safe = safe_filename(meta["model_key"])
-        required = {safe + ".manifest.json", safe + ".t1.fingerprint.safetensors"}
+        required = {safe + ".manifest.json", safe + ".row_blocks.fingerprint.safetensors"}
         if meta.get("kind") == "full":
-            required.update({safe + ".t2.fingerprint.safetensors", safe + ".t2.spectra.h5", safe + ".t1b128.fingerprint.safetensors", safe + ".t1b512.fingerprint.safetensors", "esd/stats.csv", "esd/metrics.h5"})
-        elif meta.get("kind") != "t1_only":
+            required.update({safe + ".full_weights.fingerprint.safetensors", safe + ".full_weights.spectra.h5", safe + ".row_blocks_128.fingerprint.safetensors", safe + ".row_blocks_512.fingerprint.safetensors", "esd/stats.csv", "esd/metrics.h5"})
+        elif meta.get("kind") != "row_blocks_only":
             raise ValueError("Unknown model package kind")
-        if not required.issubset(meta["files"]):
+        historical = meta["conventions"].get("evidence_version") != EVIDENCE_VERSION
+        if not all(name in meta["files"] or (historical and historical_artifact_name(name) in meta["files"])
+                   for name in required):
             raise ValueError("Incomplete package artifact inventory")
         for name, digest in meta["files"].items():
             artifact = (path.parent / name).resolve()
@@ -314,7 +325,7 @@ def package_inputs(packages, selected=None):
             if previous["kind"] == meta["kind"]:
                 old_device = previous["conventions"]["evidence"]["device"]
                 new_device = meta["conventions"]["evidence"]["device"]
-                if meta["kind"] != "t1_only" or old_device == new_device:
+                if meta["kind"] != "row_blocks_only" or old_device == new_device:
                     raise ValueError("Duplicate package identity and tier")
                 if new_device == "cpu":
                     rows[index] = (path.parent, meta)

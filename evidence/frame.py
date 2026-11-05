@@ -37,7 +37,7 @@ PILOT_HUB_PLAN = {'text:<1B': 40, 'text:1-3B': 40, 'text:3-9B': 60,
                   'audio': 20, 'embedding': 20, 'decision': 20}
 _FRAME_COLUMNS = ['repo_id', 'pipeline_tag', 'modality', 'is_adapter', 'system_one',
                   'is_decision', 'downloads', 'params', 'weight_format',
-                  'size_stratum', 'stratum', 't0_only', 'declared_relation',
+                  'size_stratum', 'stratum', 'metadata_only', 'declared_relation',
                   'declared_bases', 'created_quarter']
 
 
@@ -147,7 +147,7 @@ def build_frame(df) -> pd.DataFrame:
             'downloads': row.get('downloads') or 0, 'params': params,
             'weight_format': weight_format, 'size_stratum': size_stratum,
             'stratum': 'decision' if system_one else f'text:{size_stratum}' if modality == 'text' else modality,
-            't0_only': weight_format != 'safetensors', 'declared_relation': relation,
+            'metadata_only': weight_format != 'safetensors', 'declared_relation': relation,
             'declared_bases': sorted(bases), 'created_quarter': quarter,
         })
     frame = pd.DataFrame(result, columns=_FRAME_COLUMNS).sort_values('repo_id').reset_index(drop=True)

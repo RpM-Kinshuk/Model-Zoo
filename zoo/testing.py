@@ -18,7 +18,7 @@ SHA10, SHA11, SHA12 = "a" * 40, "b" * 40, "c" * 40
 
 
 def make_universe(root: Path) -> SimpleNamespace:
-    """Write twelve pinned model manifests and nine real T1 fingerprints.
+    """Write twelve pinned model manifests and nine real row-block fingerprints.
 
     The public-looking identities and commit pins are synthetic test fixtures.
     Source checkpoints remain under root/checkpoints for independent checks;
@@ -89,9 +89,9 @@ def make_universe(root: Path) -> SimpleNamespace:
         if tensors is not None:
             save_file(tensors, checkpoint / "model.safetensors")
         elif repo_id == "org/t0only":
-            (checkpoint / "pytorch_model.bin").write_bytes(b"synthetic T0-only fixture; never load")
+            (checkpoint / "pytorch_model.bin").write_bytes(b"synthetic metadata-only-only fixture; never load")
         elif repo_id == "org/parent-GGUF":
-            (checkpoint / "model.gguf").write_bytes(b"synthetic T0-only fixture; never decode")
+            (checkpoint / "model.gguf").write_bytes(b"synthetic metadata-only-only fixture; never decode")
         manifest = build_manifest(str(checkpoint), "main", HubReader(), api=None)
         manifest.update(repo_id=repo_id, revision=revision, license=license_id, declared_bases=bases,
                         base_model_relation="finetune" if bases else None)
@@ -105,6 +105,6 @@ def make_universe(root: Path) -> SimpleNamespace:
             manifest["decision"]["system_one"] = True
         write_manifest(manifest, manifests)
         if tensors is not None:
-            fingerprint_tensors(tensors.items(), fingerprints / f"{safe_filename(f'{repo_id}@{revision}')}.t1.fingerprint.safetensors",
+            fingerprint_tensors(tensors.items(), fingerprints / f"{safe_filename(f'{repo_id}@{revision}')}.row_blocks.fingerprint.safetensors",
                                 {"repo_id": repo_id, "revision": revision})
     return SimpleNamespace(root=root, manifests=manifests, fingerprints=fingerprints)

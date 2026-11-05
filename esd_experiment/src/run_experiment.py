@@ -393,8 +393,8 @@ def parse_args():
     
     parser.add_argument("--prefetch_models", type=lambda v: v if v == "auto" else int(v), default="auto", help="Models to download ahead; auto uses GPU pool size, 0 disables")
     parser.add_argument("--prefetch_max_gib", type=float, default=64)
-    parser.add_argument("--oversized_device", choices=["auto", "cpu"], default="auto", help="Streaming T1 device; auto uses one supervisor-assigned GPU per job")
-    parser.add_argument("--oversized_t1", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--oversized_models_device", choices=["auto", "cpu"], default="auto", help="Row-block evidence device for oversized models; auto uses one supervisor-assigned GPU per job")
+    parser.add_argument("--oversized_models_evidence", action=argparse.BooleanOptionalAction, default=True, help="Extract row-block evidence for models too large for full-mode analysis")
     add_evidence_arguments(parser)
     args = parser.parse_args()
     validate_evidence_arguments(args, parser)
@@ -1030,7 +1030,7 @@ def size_models(models, args):
             raise RuntimeError("Cannot read selected GPUs' total memory; set explicit sizing controls or restore GPU visibility") from exc
         if gpu_bytes <= 0:
             raise ValueError("Selected GPU memory must be positive")
-    ready, oversized = [], []
+    ready, oversized_models = [], []
     for _, row in models.iterrows():
         record = row.to_dict()
         try:
@@ -1042,11 +1042,11 @@ def size_models(models, args):
         pool = 1 if args.analysis_source == "checkpoint" else (len(args.gpus) if gpu_setting == "auto" else gpu_setting)
         resources = job_resources(weight, gpu_bytes or max(1, 2*weight), pool, int(getattr(args, "evidence_max_inflight_gib", 2)*GIB)) if weight else {}
         cap = (pool * gpu_bytes / 1.5 if gpu_bytes else 0) if weight_cap == "auto" else weight_cap * GIB
-        if (gpu_bytes and resources.get("oversized")) or (cap and weight > cap):
-            record.update(reason="too_large_for_full_mode", t1_status="pending")
-            oversized.append(record)
+        if (gpu_bytes and resources.get("oversized_model")) or (cap and weight > cap):
+            record.update(reason="too_large_for_full_mode", evidence_status="pending")
+            oversized_models.append(record)
             continue
-        resources.pop("oversized", None)
+        resources.pop("oversized_model", None)
         resources["num_gpus"] = 1 if args.analysis_source == "checkpoint" else (resources.get("num_gpus", 1) if gpu_setting == "auto" else gpu_setting)
         # Explicit caps continue to use live global config; automatic caps are per job.
         for key, flag in (("ram_limit_gib", "max_worker_ram_gib"), ("cache_limit_gib", "max_worker_cache_gib")):
@@ -1056,25 +1056,25 @@ def size_models(models, args):
             resources["stage_timeout_seconds"] = None
         record["_job_resources"] = resources
         ready.append(record)
-    return pd.DataFrame(ready, columns=list(models.columns) + (["_job_resources"] if "_job_resources" not in models else [])), pd.DataFrame(oversized)
+    return pd.DataFrame(ready, columns=list(models.columns) + (["_job_resources"] if "_job_resources" not in models else [])), pd.DataFrame(oversized_models)
 
 
-def run_oversized_evidence_jobs(models, output_dir, args, logger, stopped=lambda: False, dispatcher=None):
-    """Schedule supervised row-block extraction for models too large to load."""
+def run_oversized_models_evidence_jobs(models, output_dir, args, logger, stopped=lambda: False, dispatcher=None):
+    """Schedule supervised row-block extraction for oversized models."""
     if models.empty:
         return
-    if stopped() or not getattr(args, "oversized_t1", True) or not getattr(args, "evidence", True):
+    if stopped() or not getattr(args, "oversized_models_evidence", True) or not getattr(args, "evidence", True):
         status = "interrupted" if stopped() else "disabled"
-        models.assign(t1_status=status).to_csv(output_dir / "oversized_models.csv", index=False)
+        models.assign(evidence_status=status).to_csv(output_dir / "oversized_models.csv", index=False)
         return
-    job_directory = output_dir / "logs" / ("oversized-" + uuid4().hex)
+    job_directory = output_dir / "logs" / ("oversized-models-" + uuid4().hex)
     job_directory.mkdir(parents=True)
     config_path = output_dir / "gpu_config.json"
     if dispatcher is None:
         create_runtime_config(args, config_path)
         dispatcher = GPUDispatcher(str(config_path))
     jobs = []
-    cpu_only = getattr(args, "oversized_device", "auto") == "cpu"
+    cpu_only = getattr(args, "oversized_models_device", "auto") == "cpu"
     # Zero means inherit the supervisor's live limit; automatic streaming
     # budgets cover evidence buffers and metadata, without full-model storage.
     ram_limit_gib = 0
@@ -1082,19 +1082,19 @@ def run_oversized_evidence_jobs(models, output_dir, args, logger, stopped=lambda
         ram_limit_gib = max(16, getattr(args, "evidence_max_inflight_gib", 2) + 4)
     cache_limit_gib = 2 if getattr(args, "max_worker_cache_gib", "auto") == "auto" else 0
     for _, row in models.iterrows():
-        worker_id = f"row-block-{len(jobs):06d}"
+        worker_id = f"oversized-model-{len(jobs):06d}"
         request_path = job_directory / (worker_id + ".request.json")
         result_path = job_directory / (worker_id + ".json")
         model_options = {key: _normalize_text(row.get(key, ""))
                          for key in ("model_id", "revision_norm", "source_model", "stratum")}
         request_path.write_text(json.dumps(dict(options=vars(args), row=model_options, output_dir=str(output_dir)),
                                            default=str, allow_nan=False))
-        command = shlex.join([sys.executable, str(SCRIPT_DIR / "row_block_worker.py"),
+        command = shlex.join([sys.executable, str(SCRIPT_DIR / "oversized_model_worker.py"),
                               "--request", str(request_path), "--result", str(result_path)])
         jobs.append(WorkerJob(command, worker_id=worker_id, model_id=model_options["model_id"],
                               terminal_status_path=str(result_path), num_gpus=1, cpu_only=cpu_only,
                               ram_limit_gib=ram_limit_gib, cache_limit_gib=cache_limit_gib))
-    dispatch_thread = DispatchThread(name="Oversized row-block evidence", bash_command_list=jobs,
+    dispatch_thread = DispatchThread(name="Oversized models row-block evidence", bash_command_list=jobs,
                                     logger=logger, dispatcher=dispatcher, config_path=str(config_path),
                                     max_concurrent_jobs=getattr(args, "max_concurrent_jobs", 1),
                                     state_dir=output_dir / "logs", run_id=job_directory.name,
@@ -1105,9 +1105,9 @@ def run_oversized_evidence_jobs(models, output_dir, args, logger, stopped=lambda
         result_path = Path(job.terminal_status_path)
         outcome = (json.loads(result_path.read_text()) if result_path.is_file()
                    else dict(status="interrupted", reason="not_started"))
-        models.loc[index, "t1_status"] = outcome.get("t1_status") or ("failed" if outcome.get("status") == "failed" else "interrupted")
+        models.loc[index, "evidence_status"] = outcome.get("evidence_status") or ("failed" if outcome.get("status") == "failed" else "interrupted")
         if outcome.get("reason"):
-            models.loc[index, "t1_error"] = outcome["reason"]
+            models.loc[index, "evidence_error"] = outcome["reason"]
     models.to_csv(output_dir / "oversized_models.csv", index=False)
     if dispatcher.error:
         raise RuntimeError(dispatcher.error)
@@ -1116,16 +1116,16 @@ def run_oversized_evidence_jobs(models, output_dir, args, logger, stopped=lambda
 def extract_row_block_evidence(models, output_dir, args, logger, stopped=lambda: False, status_path=None):
     """Extract and publish row-block evidence without loading a whole model.
 
-    Used inside each supervised row-block worker; T1 is the artifact tier name.
+    Each supervised oversized-model worker calls this extraction routine.
     """
     status_path = Path(status_path) if status_path else output_dir / "oversized_models.csv"
     if models.empty:
         return
     if stopped():
-        models.assign(t1_status="interrupted").to_csv(status_path, index=False)
+        models.assign(evidence_status="interrupted").to_csv(status_path, index=False)
         return
-    if not getattr(args, "oversized_t1", True) or not getattr(args, "evidence", True):
-        models = models.assign(t1_status="disabled")
+    if not getattr(args, "oversized_models_evidence", True) or not getattr(args, "evidence", True):
+        models = models.assign(evidence_status="disabled")
         models.to_csv(status_path, index=False)
         return
     from types import SimpleNamespace
@@ -1138,7 +1138,7 @@ def extract_row_block_evidence(models, output_dir, args, logger, stopped=lambda:
     class InterruptibleReader(HubReader):
         def read(self, *read_args):
             if stopped():
-                raise InterruptedError("Oversized T1 interrupted")
+                raise InterruptedError("Oversized model row-block evidence interrupted")
             return super().read(*read_args)
 
     for index, row in models.iterrows():
@@ -1147,16 +1147,16 @@ def extract_row_block_evidence(models, output_dir, args, logger, stopped=lambda:
         try:
             options = SimpleNamespace(**vars(args))
             options.cache_self = False
-            device = _compute_device(getattr(args, "oversized_device", "auto"))
+            device = _compute_device(getattr(args, "oversized_models_device", "auto"))
             options.evidence_device = "gpu" if device.type == "cuda" else "cpu"
             options.source_model = _normalize_text(row.get("source_model", ""))
             options.stratum = _normalize_text(row.get("stratum", ""))
             repo, revision = identity(row["model_id"], _normalize_text(row.get("revision_norm", "")))
             sidecar = create_sidecar(options, output_dir, repo, revision)
             write_manifest(sidecar.manifest, sidecar.out_dir)
-            path = sidecar.out_dir / (safe_filename(f"{repo}@{revision}") + ".t1.fingerprint.safetensors")
+            path = sidecar.out_dir / (safe_filename(f"{repo}@{revision}") + ".row_blocks.fingerprint.safetensors")
             parent_identity = {key: sidecar.parent[key] for key in ("repo_id", "revision")} if sidecar.parent else None
-            complete = _complete(path, sidecar.manifest, "t1", sidecar.sketch_k, parent=parent_identity)
+            complete = _complete(path, sidecar.manifest, "row_blocks", sidecar.sketch_k, parent=parent_identity)
             if complete:
                 fp = load_fingerprint(path)
                 sampled = any(item.get("reason") == "expert_not_sampled" for item in fp.coverage)
@@ -1167,25 +1167,25 @@ def extract_row_block_evidence(models, output_dir, args, logger, stopped=lambda:
                 elif options.evidence_device != "cpu":
                     complete = False
             if not complete:
-                fingerprint_model(sidecar.manifest, InterruptibleReader(local_cache=True), "t1", sidecar.out_dir,
+                fingerprint_model(sidecar.manifest, InterruptibleReader(local_cache=True), "row_blocks", sidecar.out_dir,
                                   parent=sidecar.parent, parent_cache=sidecar.block_cache,
                                   sketch_k=sidecar.sketch_k, all_experts=sidecar.all_experts,
                                   cache_self=sidecar.cache_self, compute_device=str(device),
                                   prefetch_groups=2, prefetch_bytes=max(1, int(args.evidence_max_inflight_gib * 1024**3)//2))
             if stopped():
-                raise InterruptedError("Oversized T1 interrupted")
-            (sidecar.out_dir / "evidence.json").write_text(json.dumps(dict(settings=evidence_settings(options), stratum=options.stratum, gaps=0, oversized_device=getattr(args, "oversized_device", "auto"))))
+                raise InterruptedError("Oversized model row-block evidence interrupted")
+            (sidecar.out_dir / "evidence.json").write_text(json.dumps(dict(settings=evidence_settings(options), stratum=options.stratum, gaps=0, oversized_models_device=getattr(args, "oversized_models_device", "auto"))))
             publish_model(options, output_dir, row["model_id"], revision)
-            models.loc[index, "t1_status"] = "published" if getattr(args, "publish", False) else "measured"
-            logger.info(f"Oversized T1 ready: {repo}@{revision}")
+            models.loc[index, "evidence_status"] = "published" if getattr(args, "publish", False) else "measured"
+            logger.info(f"Oversized model row-block evidence ready: {repo}@{revision}")
         except InterruptedError:
-            models.loc[index, "t1_status"] = "interrupted"
+            models.loc[index, "evidence_status"] = "interrupted"
             models.to_csv(status_path, index=False)
             return
         except Exception as exc:
-            models.loc[index, "t1_status"] = "failed"
-            models.loc[index, "t1_error"] = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"Oversized T1 failed: {row['model_id']}: {type(exc).__name__}")
+            models.loc[index, "evidence_status"] = "failed"
+            models.loc[index, "evidence_error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"Oversized model row-block evidence failed: {row['model_id']}: {type(exc).__name__}")
         models.to_csv(status_path, index=False)
 
 def main():
@@ -1295,14 +1295,14 @@ def main():
         raise SystemExit(2) from exc
     
     try:
-        model_df, oversized = size_models(model_df, args)
-        if not oversized.empty:
-            oversized.to_csv(output_dir / "oversized_models.csv", index=False)
-            logger.info(f"{len(oversized)} oversized models queued for row-block T1 after GPU jobs")
+        model_df, oversized_models = size_models(model_df, args)
+        if not oversized_models.empty:
+            oversized_models.to_csv(output_dir / "oversized_models.csv", index=False)
+            logger.info(f"{len(oversized_models)} oversized models queued for row-block evidence after GPU jobs")
     except (ValueError, RuntimeError) as exc:
         raise SystemExit(f"Cannot size workers; no jobs started: {exc}") from exc
     if len(model_df) == 0:
-        run_oversized_evidence_jobs(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
+        run_oversized_models_evidence_jobs(oversized_models, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
         logger.info("No models to process (all completed, skipped, or blocked by preflight)")
         outcomes = collect_run_outcomes(output_dir, measurement_config(args), evidence=args.evidence, evidence_options=args)
         logger.info(f"Successfully analyzed: {outcomes.success_count} models")
@@ -1347,7 +1347,7 @@ def main():
         raise SystemExit(1)
     
     logger.info("=" * 80)
-    run_oversized_evidence_jobs(oversized, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
+    run_oversized_models_evidence_jobs(oversized_models, output_dir, args, logger, lambda: dispatcher.shutdown_event.is_set() or dispatcher.drain_event.is_set(), dispatcher=dispatcher)
     if dispatcher.shutdown_event.is_set():
         raise SystemExit(1)
     logger.info("Experiment completed!")

@@ -24,6 +24,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import ZOO_VERSION, READABLE_ZOO_VERSIONS
+from evidence.compatibility import is_baseline_fingerprint, normalize_model_table, normalize_view_table
 from .lineage import declared_edges, merge_edges, shared_tensor_edges, similarity_edges, with_pair_delta_evidence
 from .retrieval import build_retrieval
 from .schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
@@ -155,7 +156,7 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
             safe = safe_filename(package["model_key"])
             manifests.append(folder / f"{safe}.manifest.json")
             fingerprints.extend(folder / name for name in package["files"]
-                                if name.endswith((".t1.fingerprint.safetensors", ".t2.fingerprint.safetensors")))
+                                if is_baseline_fingerprint(name))
             package_sources.append(folder / "package.json")
             package_sources.extend(folder / name for name in package["files"])
         sources = [packages]
@@ -182,7 +183,7 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
     try:
         tables = build_tables(manifests, fingerprints, root, frame=frame, score_tables=score_tables)
         tables["layers"] = build_layers(selected_packages)
-        for relative in tables["models"].spectra_t2:
+        for relative in tables["models"].full_weight_spectra:
             if relative:
                 path = (root / relative).resolve()
                 if not path.is_relative_to(root):
@@ -234,5 +235,10 @@ def open_tables(zoo: Path) -> dict[str, pd.DataFrame]:
             for row in records:
                 if row["labels"] is not None:
                     row["labels"] = dict(row["labels"])
-        tables[name] = pd.DataFrame(records, columns=columns)
+        table = pd.DataFrame(records)
+        if name == "models":
+            table = normalize_model_table(table)
+        elif name == "views":
+            table = normalize_view_table(table)
+        tables[name] = table.reindex(columns=columns)
     return tables

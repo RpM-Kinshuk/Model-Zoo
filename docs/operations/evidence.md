@@ -1,7 +1,7 @@
 # Weight evidence
 
 Read checkpoint weights without loading or running a model. Compare measured
-weights for lineage; use T2 when you need full spectra.
+weights for lineage; use `full_weights` when you need full spectra.
 
 ## Quick start
 
@@ -10,7 +10,7 @@ commands from the Model-Zoo root. Set `ZOO_DATA` to your data directory and
 supply `HF_TOKEN` through the environment when access requires it.
 
 ```bash
-python -m evidence.cli fingerprint org/model --tier t1 --out "$ZOO_DATA/example" --json
+python -m evidence.cli fingerprint org/model --measurement_mode row_blocks --out "$ZOO_DATA/example" --json
 python -m evidence.cli diff org/child org/parent --json
 python -m evidence.cli check org/child --null "$ZOO_DATA/runs/pilot/calibration.json"
 ```
@@ -24,17 +24,24 @@ Without compatible calibration, relatedness stays `uncalibrated`.
 `check` uses the first declared base: exit **0** for consistent, undetermined or
 uncalibrated; **1** for inconsistent; **2** for errors. Other commands use 0/2.
 
-## Choose a tier
+## Choose the measurement scope
 
-| Tier | Reads | Stores |
+| Evidence scope | Reads | Stores |
 | --- | --- | --- |
-| T0 | Metadata, configs and tensor headers | Pinned manifest, shapes, formats and coverage |
-| T1 | One deterministic row block per view, plus needed scales/factors | Sketch, typed block hash, block spectrum and optional parent delta |
-| T2 | Full supported tensors | Full spectra, fingerprint and requested free T1 blocks |
+| `metadata_only` | Metadata, configs and tensor headers | Pinned manifest, shapes, formats and coverage |
+| `row_blocks` | One deterministic row block per view, plus needed scales/factors | Sketch, typed block hash, block spectrum and optional parent delta |
+| `full_weights` | Full supported tensors | Full spectra, fingerprint and requested row-block companions |
 
-T1 defaults: 256 rows, sketch size 64, seed 20261028. Larger sketches contain
-the smaller sketches as prefixes. T1 bytes vary with model shape and encoding;
-the pilot measures the cost rather than assuming a fixed saving.
+Row-block defaults: 256 rows, sketch size 64, seed 20261028. Larger sketches
+contain the smaller sketches as prefixes. Bytes read for row blocks vary with
+model shape and encoding; the pilot measures the cost rather than assuming a
+fixed saving.
+
+The fingerprint and batch CLI accepts `--measurement_mode row_blocks|full_weights`;
+`metadata_only` describes manifests and coverage, rather than a tensor measurement
+mode. Use `--also_row_block_sizes 128,256,512` to select companion heights for
+full tensor measurements. Generic `tier` metadata and evidence-tier fields retain
+their field names and carry these descriptive values.
 
 ## Supported views
 
@@ -52,7 +59,7 @@ which **matrix** those values describe.
 | --- | --- |
 | `matrix` | Ordinary 2D tensor; fused projections remain fused |
 | `head` | Small output/classification matrix |
-| `conv_flat` | Higher-dimensional weight; T2 keeps the collector's convolution convention |
+| `conv_flat` | Higher-dimensional weight; full tensor measurements keep the collector's convolution convention |
 | `expert_slice` | Individual expert matrix, with orientation resolved from config |
 | `lora_product` | Scaled LoRA update from paired factors |
 
@@ -61,7 +68,7 @@ the update, rather than claiming the adapter is a full model. MoE defaults to
 eight deterministic experts per layer; use `--all_experts` for all experts.
 Diffusers view names include the component folder to prevent collisions.
 GPTQ, AWQ, bitsandbytes, MLX packed quantization and GGUF remain recorded gaps.
-`.bin`/ONNX-only checkpoints are T0-only; pickle weights are never loaded.
+`.bin`/ONNX-only checkpoints provide metadata only; pickle weights are never loaded.
 
 ### Coverage reasons
 
@@ -92,23 +99,29 @@ access (`no_access`), missing manifests and extraction errors.
 | File | Contents |
 | --- | --- |
 | `<safe>.manifest.json` | Selected files, tensor offsets, config facts and coverage |
-| `<safe>.t1.fingerprint.safetensors` | T1 measurements |
-| `<safe>.t2.fingerprint.safetensors` | T2 measurements |
-| `<safe>.t1b128.fingerprint.safetensors` | Extra T1 block height; similarly for 512 |
-| `<safe>.t2.spectra.h5` | Full per-view spectra, retained for the final database |
+| `<safe>.row_blocks.fingerprint.safetensors` | Sampled row-block measurements |
+| `<safe>.full_weights.fingerprint.safetensors` | Full tensor measurements |
+| `<safe>.row_blocks_128.fingerprint.safetensors` | Extra row-block height; similarly for 512 |
+| `<safe>.full_weights.spectra.h5` | Full per-view spectra, retained for the final database |
 | `summary.json`, `failures.csv` | Current per-model results and historical failures |
 
 Fingerprints store `sketch [n,k,k]`, `rows [n,2]`, `shape [n,2]`, delta scalars
-and top singular values. T1 also stores concatenated `spectrum_values` and
-`spectrum_offsets [n+1]`. Metadata holds names, geometry, components, hashes,
+and top singular values. Row-block fingerprints also store concatenated
+`spectrum_values` and `spectrum_offsets [n+1]`. Metadata holds names, geometry, components, hashes,
 coverage, pinned identity, settings and measured counters. Hashes include dtype;
 derived views use decoded F32 values.
 
-Spectra are sorted **squared singular values**. T2 HDF5 stores them in `/eigs`,
-aligned with `/layers/longname`; `/layers` also holds fit results. Attributes
-record format, measurement settings and numerics version 7. Keep the T2
-fingerprint and spectra file together. The database's `spectra_t2` field points
-to the full-spectrum artifact relative to its data root.
+Spectra are sorted **squared singular values**. Full tensor HDF5 files store
+them in `/eigs`, aligned with `/layers/longname`; `/layers` also holds fit results.
+Attributes record format, measurement settings and numerics version 7. Keep the
+full tensor fingerprint and spectra file together. The database's
+`full_weight_spectra` field points to the full-spectrum artifact relative to its
+data root.
+
+The model table uses `row_block_fingerprint`, `full_weight_fingerprint` and
+`full_weight_spectra` for artifact links. Readers translate legacy numbered
+values, filenames and columns at the compatibility boundary. Historical run
+paths remain unchanged; use their recorded names when rebuilding those runs.
 
 `HF_TOKEN` stays in the environment, never in manifests, configs or reports.
 Raw weight blocks and parent caches are never published. Retain fingerprints,
@@ -132,9 +145,9 @@ python -m evidence.cli sample --frame "$RUN/frame.csv" --plan pilot \
 Prepare two input CSVs with `repo_id,revision`; preserve frame fields such as
 `stratum`, `params` and `inclusion_prob`:
 
-- `t2-models.csv`: lab models, certified independent pretrains, Hub related
+- `full_weights-models.csv`: lab models, certified independent pretrains, Hub related
   pairs, and ten models per stratum above 9B.
-- `t1-models.csv`: the remaining Hub pilot models.
+- `row_blocks-models.csv`: the remaining Hub pilot models.
 
 Use the lab's extractor-input export for local paths and pinned Hub references.
 Create `all-models.csv` as the unique union of these inputs. Planned lab rows
@@ -147,23 +160,23 @@ python -m evidence.cli manifest --models "$RUN/all-models.csv" \
   --out "$RUN/manifests" --workers 2 --include_declared_bases
 ```
 
-### 3. Measure T2, then the remaining T1 models
+### 3. Measure full tensors, then sample the remaining models
 
-Use one combined T2 input so its current summary describes the whole requested
-spectral cohort. Free T1 companions are written beside T2 outputs.
+Use one combined input for full tensor measurements so its summary describes
+the requested spectral cohort. Row-block companions are written beside the full tensor outputs.
 
 ```bash
-python -m evidence.cli batch --models "$RUN/t2-models.csv" \
-  --manifests "$RUN/manifests" --tier t2 --out "$RUN/t2" --workers 2
+python -m evidence.cli batch --models "$RUN/full_weights-models.csv" \
+  --manifests "$RUN/manifests" --measurement_mode full_weights --out "$RUN/full_weights" --workers 2
 
-python -m evidence.cli batch --models "$RUN/t1-models.csv" \
-  --manifests "$RUN/manifests" --tier t1 --out "$RUN/t1" --workers 2 \
+python -m evidence.cli batch --models "$RUN/row_blocks-models.csv" \
+  --manifests "$RUN/manifests" --measurement_mode row_blocks --out "$RUN/row_blocks" --workers 2 \
   --sketch_k 64
 ```
 
-Batch runs compute declared-parent deltas on 256-row blocks by default. T2 also
-writes T1 companions at 128, 256 and 512 rows; full-matrix delta status is
-`not_computed`. Use `--delta_blocks 256,512` for additional measured heights,
+Batch runs compute declared-parent deltas on 256-row blocks by default. The
+`full_weights` mode also writes row-block companions at 128, 256 and 512 rows;
+full-matrix delta status is `not_computed`. Use `--delta_blocks 256,512` for additional measured heights,
 or `--full_delta` for lab validation (full deltas are never cached).
 
 The private parent cache defaults to `$ZOO_DATA/cache/parent-blocks`, or
@@ -176,7 +189,7 @@ and eight seeded experts per layer. Explicit `--sketch_k`, `--all_experts` and
 `--no-all_experts` override this choice.
 
 To restore the former batch behavior, pass `--no-with_parent --no-parent_cache
---sketch_k 64 --no-all_experts --also_t1_blocks none`.
+--sketch_k 64 --no-all_experts --also_row_block_sizes none`.
 
 Resume with the same inputs, settings and output directories. Compatible outputs
 are skipped; temporary files are cleaned up. Denied identities stay skipped
@@ -199,7 +212,7 @@ lab = Path(os.environ["LAB_TABLES"])
 pairs = lineage_pairs(lab / "edges.csv", run / "manifests")
 pairs.to_csv(run / "pairs.csv", index=False)
 write_g0_report(run, run / "g0.md")
-write_calibration(pairs, run / "t1", run / "calibration.json", sketch_k=64)
+write_calibration(pairs, run / "row_blocks", run / "calibration.json", sketch_k=64)
 PY
 ```
 
@@ -236,12 +249,13 @@ the visible assignment.
 `--workers auto` starts one process per assigned GPU, or on CPU
 `min(8, max(1, cpu_count // 8))`. An explicit worker count is distributed
 round-robin over the selected GPUs. `cuda:<i>` selects one GPU; `cuda` uses all
-visible GPUs. T1 moves sketches, block spectra and parent deltas to the selected
-device while hashes retain the original host bytes. CUDA row-block reads use a
+visible GPUs. Row-block measurement moves sketches, block spectra and parent
+deltas to the selected device while hashes retain the original host bytes. CUDA row-block reads use a
 two-group prefetch window, bounded by the prefetch byte budget.
 
-For T2, the source loader also fetches the next group's requested parent row
-blocks, including cache hits, while the current group's spectra are measured.
+For full tensor measurement, the source loader also fetches the next group's
+requested parent row blocks, including cache hits, while the current group's
+spectra are measured.
 The per-group admission budget includes child sources and parent read/decode
 workspaces. Groups exceeding that budget use on-demand reads. Explicit lab
 full-matrix deltas stay on demand and are never cached.
@@ -255,17 +269,17 @@ unambiguous whole matrix with the same stored key, shape, dtype and exact
 The spectra file records `runner` or `second_round` for every layer.
 
 All outputs remain in a private staging directory until completion. Spectra
-publish before the T2 completion marker; cancellation and failed promotion
+publish before the full-weight completion marker; cancellation and failed promotion
 remove new outputs and restore any files from an earlier incomplete attempt.
 A completed bundle is never replaced. Use one sidecar per model output directory.
-Runner/worker integration is the next implementation step; this API alone does
-not enable evidence in existing worker commands.
+Full-mode runner workers enable the sidecar by default; `--no-evidence` disables it.
 
 
-Full-mode evidence now writes version2, adding explicit unrequested/unavailable
-parent-delta statuses without changing sketch, block-hash or spectrum numerics.
-Version1 fingerprints remain readable. Candidate-pair deltas and their CLI are
-covered in the [zoo guide](zoo.md#candidate-pair-delta-pass).
+New evidence writes version 3 with descriptive scope values and filenames.
+Versions 1, 2 and 3 remain readable, including older numbered artifact names.
+Version 2 introduced explicit unrequested/unavailable parent-delta statuses.
+Sketch, block-hash and spectrum numerics remain unchanged. Candidate-pair deltas
+and their CLI are covered in the [zoo guide](zoo.md#candidate-pair-delta-pass).
 
 
 Parent cache operations publish complete files atomically. Hot reads do not

@@ -22,8 +22,8 @@ from .safetensors_header import _DTYPE_BYTES
 
 def _paths(out_dir, manifest):
     safe = safe_filename(f"{manifest['repo_id']}@{manifest['revision']}")
-    marker = Path(out_dir) / f"{safe}.t2.fingerprint.safetensors"
-    return marker, marker.with_name(marker.name + ".staged"), marker.with_name(f"{safe}.t2.spectra.h5")
+    marker = Path(out_dir) / f"{safe}.full_weights.fingerprint.safetensors"
+    return marker, marker.with_name(marker.name + ".staged"), marker.with_name(f"{safe}.full_weights.spectra.h5")
 
 
 def _metadata(path):
@@ -31,7 +31,7 @@ def _metadata(path):
         return handle.metadata()
 
 
-def publish_t2(out_dir: Path, manifest: dict, results: list[tuple[str, dict]], measurement: dict) -> Path:
+def publish_full_weight_spectra(out_dir: Path, manifest: dict, results: list[tuple[str, dict]], measurement: dict) -> Path:
     """Publish complete spectra first, then the matching staged fingerprint."""
     marker, staged, spectra_path = _paths(out_dir, manifest)
     if marker.exists():
@@ -79,13 +79,13 @@ class EvidenceSidecar:
     def __init__(self, manifest: dict, out_dir: Path, *, parent: dict | None = None,
                  block_cache=None, cache_self: bool = False, device: str = "cpu",
                  max_inflight_bytes: int = 2 * 1024**3, sketch_k: int = 64,
-                 all_experts: bool = False, also_t1_blocks: tuple[int, ...] = (128, 256, 512)):
+                 all_experts: bool = False, also_row_block_sizes: tuple[int, ...] = (128, 256, 512)):
         if type(max_inflight_bytes) is not int or max_inflight_bytes < 1:
             raise ValueError("max_inflight_bytes must be positive")
         self.manifest, self.out_dir = manifest, Path(out_dir)
         self.parent, self.block_cache, self.cache_self = parent, block_cache, cache_self
         self.device, self.max_inflight_bytes = device, max_inflight_bytes
-        self.sketch_k, self.all_experts, self.also_t1_blocks = sketch_k, all_experts, also_t1_blocks
+        self.sketch_k, self.all_experts, self.also_row_block_sizes = sketch_k, all_experts, also_row_block_sizes
         self._cancelled, self._lock, self._state_lock = Event(), RLock(), Lock()
         self._pool = self._future = self._stage = None
         self._finished = False
@@ -106,10 +106,10 @@ class EvidenceSidecar:
 
     def _run(self):
         write_manifest(self.manifest, self._stage)
-        return fingerprint_model(self.manifest, _CancellableReader(self._cancelled), "t2", self._stage,
+        return fingerprint_model(self.manifest, _CancellableReader(self._cancelled), "full_weights", self._stage,
                                  parent=self.parent, parent_cache=self.block_cache, cache_self=self.cache_self,
                                  compute_device=self.device, sketch_k=self.sketch_k, all_experts=self.all_experts,
-                                 also_t1_blocks=self.also_t1_blocks, write_spectra=False,
+                                 also_row_block_sizes=self.also_row_block_sizes, write_spectra=False,
                                  prefetch_groups=2, prefetch_bytes=max(1, self.max_inflight_bytes // 2))
 
     def finish(self, esd, loaded_block, measure, measurement) -> dict:
@@ -135,7 +135,7 @@ class EvidenceSidecar:
                             if "module_name" in result else key)
                 runner.setdefault(identity, []).append(result)
             hashes = {}
-            for path in self._stage.glob("*.t1.fingerprint.safetensors"):
+            for path in self._stage.glob("*.row_blocks.fingerprint.safetensors"):
                 block_metadata = _metadata(path)
                 hashes.update(zip(json.loads(block_metadata["names"]), json.loads(block_metadata["sha256"])))
             results, counts = [], dict(reused=0, measured=0, gaps=0)
@@ -198,7 +198,7 @@ class EvidenceSidecar:
                         flush()
                 flush()
             self._check()
-            publish_t2(self._stage, self.manifest, results, measurement)
+            publish_full_weight_spectra(self._stage, self.manifest, results, measurement)
             marker, _, _ = _paths(self.out_dir, self.manifest)
             promoted, backups = [], []
             with self._lock:

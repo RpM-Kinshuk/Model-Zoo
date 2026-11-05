@@ -4,11 +4,11 @@ import pandas as pd
 from evidence.frame import build_frame, draw_stratified, load_hub_stats
 
 
-def test_build_frame_covers_modalities_and_t0_only(hub_stats_sample):
+def test_build_frame_covers_modalities_and_metadata_only(hub_stats_sample):
     frame = build_frame(hub_stats_sample)
     assert {"text", "vision-language", "vision", "audio", "image-generation", "video", "embedding"} <= set(frame.modality)
     assert frame.system_one.any() and frame.loc[frame.system_one, "stratum"].eq("decision").all()
-    assert frame.loc[frame.weight_format.isin(["gguf", "bin"]), "t0_only"].all()
+    assert frame.loc[frame.weight_format.isin(["gguf", "bin"]), "metadata_only"].all()
     assert frame.loc[frame.params == 7.6e9, "size_stratum"].eq("3-9B").all()
 
 def test_draw_records_inclusion_probability(hub_stats_sample):
@@ -29,7 +29,7 @@ def test_no_weight_exclusions_and_additional_modalities_are_explicit(hub_stats_s
     assert {'3d', 'robotics'} <= set(frame.modality)
     adapter = frame.set_index('repo_id').loc['fixture/diffusion-1']
     assert adapter.is_adapter and adapter.modality == 'image-generation'
-    assert frame.loc[frame.repo_id == 'fixture/embedding-1', 't0_only'].all()
+    assert frame.loc[frame.repo_id == 'fixture/embedding-1', 'metadata_only'].all()
 
 
 def test_parquet_loader_projects_columns(tmp_path, hub_stats_sample):

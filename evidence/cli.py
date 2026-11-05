@@ -15,6 +15,7 @@ import time
 from measurement_config import is_commit_sha, safe_filename
 
 from . import EVIDENCE_VERSION
+from .compatibility import companion_manifest_path, normalize_manifest, normalize_frame_table
 from .block_cache import BlockCache
 from .delta import _compute_device
 from .compare import check_verdict, diff_fingerprints
@@ -126,7 +127,7 @@ def _complete(path, manifest, tier, k, height=ROW_BLOCK, parent=None, *, delta_b
                         sketch_k=k, row_block=height, sketch_seed=SKETCH_SEED, parent=parent,
                         evidence_version=EVIDENCE_VERSION)
         if parent:
-            should_compute = full_delta if tier == "t2" else height in delta_blocks
+            should_compute = full_delta if tier == "full_weights" else height in delta_blocks
             if should_compute and "not_computed" in fp.delta["status"]:
                 return False
             if not should_compute and any(status != "not_computed" for status in fp.delta["status"]):
@@ -213,7 +214,7 @@ def _batch_job(job):
             raise AccessDenied("Checkpoint access denied")
         if manifest["access"] != "granted":
             result = _record(row, "batch", _READER, started, before)
-            result.update(status="skipped", reason="t0_only", message="No readable checkpoint weights",
+            result.update(status="skipped", reason="metadata_only", message="No readable checkpoint weights",
                           revision=manifest["revision"], view_counts={})
             return result, None
         parent = None
@@ -230,9 +231,9 @@ def _batch_job(job):
         out, tier, k = Path(options["out"]), options["tier"], options["sketch_k"]
         path = _artifact(manifest, out, tier)
         companions = [(path, tier, ROW_BLOCK)]
-        if tier == "t2":
-            companions += [(_artifact(manifest, out, "t1" if h == ROW_BLOCK else f"t1b{h}"),
-                            "t1" if h == ROW_BLOCK else f"t1b{h}", h) for h in options["also_t1_blocks"]]
+        if tier == "full_weights":
+            companions += [(_artifact(manifest, out, "row_blocks" if h == ROW_BLOCK else f"row_blocks_{h}"),
+                            "row_blocks" if h == ROW_BLOCK else f"row_blocks_{h}", h) for h in options["also_row_block_sizes"]]
         complete = all(_complete(p, manifest, t, k, h, parent_id,
                                  delta_blocks=options["delta_blocks"], full_delta=options["full_delta"]) for p, t, h in companions)
         # Expert selection is stored in coverage, not in the frozen metadata.
@@ -256,7 +257,7 @@ def _batch_job(job):
                                      delta_blocks=options["delta_blocks"], full_delta=options["full_delta"],
                                      cache_self=options["cache_self"],
                                      all_experts=options["all_experts"],
-                                     also_t1_blocks=tuple(options["also_t1_blocks"]),
+                                     also_row_block_sizes=tuple(options["also_row_block_sizes"]),
                                      compute_device=_DEVICE or options.get("compute_device", "cpu"))
         fp = load_fingerprint(path)
         result = _record(row, "batch", _READER, started, before)
@@ -288,7 +289,7 @@ def _manifests(directory):
     result = []
     if Path(directory).is_dir():
         for path in sorted(Path(directory).glob("*.manifest.json")):
-            result.append(json.loads(path.read_text()))
+            result.append(normalize_manifest(json.loads(path.read_text())))
     return result
 
 
@@ -488,8 +489,8 @@ def _single(args, factory, api):
     a = load_fingerprint(first) if first.is_file() and first.suffix == ".safetensors" else None
     ma = None if a else _make_manifest(args.a, "", reader, api)
     if a and not args.b:
-        manifest_path = first.with_name(first.name.split(f".{a.meta['tier']}.fingerprint.safetensors")[0] + ".manifest.json")
-        ma = json.loads(manifest_path.read_text())
+        manifest_path = companion_manifest_path(first)
+        ma = normalize_manifest(json.loads(manifest_path.read_text()))
     target_b = args.b or _base(ma)
     second = Path(target_b)
     b = load_fingerprint(second) if second.is_file() and second.suffix == ".safetensors" else None
@@ -499,9 +500,9 @@ def _single(args, factory, api):
         root = _default_out().parent
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="comparison-", dir=root) as temporary:
-            tier = a.meta["tier"] if a else b.meta["tier"] if b else "t1"
-            if tier not in ("t1", "t2"):
-                raise ValueError("Build comparison targets at t1 or t2")
+            tier = a.meta["tier"] if a else b.meta["tier"] if b else "row_blocks"
+            if tier not in ("row_blocks", "full_weights"):
+                raise ValueError("Build comparison targets at row_blocks or full_weights")
             k = a.meta["sketch_k"] if a else b.meta["sketch_k"] if b else SKETCH_K_DEFAULT
             if a is None:
                 if ma["access"] != "granted":
@@ -530,7 +531,7 @@ def _parser():
     commands = parser.add_subparsers(dest="command", required=True)
     single = commands.add_parser("fingerprint")
     single.add_argument("target")
-    single.add_argument("--tier", choices=("t1", "t2"), default="t1")
+    single.add_argument("--measurement_mode", dest="tier", choices=("row_blocks", "full_weights"), default="row_blocks")
     single.add_argument("--out")
     single.add_argument("--sketch_k", type=int, default=SKETCH_K_DEFAULT)
     single.add_argument("--all_experts", action="store_true")
@@ -566,11 +567,11 @@ def _parser():
             command.add_argument("--include_declared_bases", action="store_true")
         else:
             command.add_argument("--manifests", required=True)
-            command.add_argument("--tier", choices=("t1", "t2"), required=True)
+            command.add_argument("--measurement_mode", dest="tier", choices=("row_blocks", "full_weights"), required=True)
             command.add_argument("--sketch_k", default="auto")
             command.add_argument("--all_experts", action=argparse.BooleanOptionalAction, default="auto")
             command.add_argument("--compute_device", default="auto", help="Spectrum and parent-delta device: cpu or cuda:<index>")
-            command.add_argument("--also_t1_blocks", default=None)
+            command.add_argument("--also_row_block_sizes", default=None)
             command.add_argument("--delta_blocks", default="256")
             command.add_argument("--full_delta", action="store_true")
             command.add_argument("--with_parent", action=argparse.BooleanOptionalAction, default=True)
@@ -587,10 +588,10 @@ def main(argv: list[str], *, reader_factory=None, api=None) -> int:
         if args.command in ("manifest", "batch"):
             args.devices, args.workers = _execution_policy(getattr(args, "compute_device", "cpu"), args.workers)
             if args.command == "batch":
-                raw = args.also_t1_blocks
+                raw = args.also_row_block_sizes
                 if raw is None:
-                    raw = "128,256,512" if args.tier == "t2" else "none"
-                args.also_t1_blocks = tuple(sorted(set(int(h) for h in raw.split(",") if h and h != "none")))
+                    raw = "128,256,512" if args.tier == "full_weights" else "none"
+                args.also_row_block_sizes = tuple(sorted(set(int(h) for h in raw.split(",") if h and h != "none")))
                 args.delta_blocks = tuple(sorted(set(int(h) for h in args.delta_blocks.split(",") if h)))
                 if any(h < 1 for h in args.delta_blocks):
                     raise ValueError("Delta block heights must be positive")
@@ -602,9 +603,9 @@ def main(argv: list[str], *, reader_factory=None, api=None) -> int:
                     args.parent_cache = None
                 elif args.parent_cache is None:
                     args.parent_cache = Path(os.environ.get("ZOO_DATA", args.out)) / "cache/parent-blocks"
-                if args.tier == "t1" and args.also_t1_blocks:
-                    raise ValueError("Additional T1 block outputs require tier t2")
-                if any(h < 1 for h in args.also_t1_blocks):
+                if args.tier == "row_blocks" and args.also_row_block_sizes:
+                    raise ValueError("Additional row-block block outputs require tier full_weights")
+                if any(h < 1 for h in args.also_row_block_sizes):
                     raise ValueError("Block heights must be positive")
             return _run_many(args, reader_factory, api)
         if args.command == "frame":
@@ -615,7 +616,7 @@ def main(argv: list[str], *, reader_factory=None, api=None) -> int:
             return 0
         if args.command == "sample":
             import pandas as pd
-            frame = pd.read_csv(args.frame)
+            frame = normalize_frame_table(pd.read_csv(args.frame))
             sample = draw_stratified(frame, PILOT_HUB_PLAN, args.seed)
             _dataframe_csv(Path(args.out), sample)
             print(json.dumps({"n_models": len(sample)}))

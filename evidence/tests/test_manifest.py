@@ -1,4 +1,4 @@
-"""Offline T0 manifests and file selection."""
+"""Offline metadata-only manifests and file selection."""
 
 import pytest
 import json
@@ -43,7 +43,7 @@ def test_manifest_from_sharded_repo(fake_api, fake_reader):
 def test_manifest_no_access_and_bin_only(fake_api, denying_reader, bin_only_api):
     assert build_manifest("org/gated", SHA, denying_reader, fake_api)["access"] == "no_access"
     m = build_manifest("org/convnext", SHA, denying_reader, bin_only_api)
-    assert m["access"] == "t0_only" and m["weight_format"] == "bin" and m["tensors"] == []
+    assert m["access"] == "metadata_only" and m["weight_format"] == "bin" and m["tensors"] == []
 
 def test_kohya_adapter_detected_without_config(fake_reader, kohya_api):
     m = build_manifest("org/pixel-lora", SHA, fake_reader, kohya_api)
@@ -85,7 +85,7 @@ def test_diffusers_keeps_one_file_per_component():
 
 def test_local_identity_routing_and_config_facts(tiny_checkpoint, monkeypatch, tmp_path):
     def no_network(*args, **kwargs):
-        raise AssertionError("Local T0 must never use the network")
+        raise AssertionError("Local metadata-only must never use the network")
 
     monkeypatch.setenv("ZOO_DATA", str(tmp_path))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")

@@ -54,13 +54,13 @@ def declared_edges(models: pd.DataFrame) -> pd.DataFrame:
 
 
 def shared_tensor_edges(views: pd.DataFrame, dup_groups: dict) -> pd.DataFrame:
-    """Count identical hashes only among aligned T1 blocks, excluding duplicates."""
-    first = views[views.tier == "t1"]
+    """Count identical hashes only among aligned row-block blocks, excluding duplicates."""
+    first = views[views.tier == "row_blocks"]
     groups = {}
     for view in first.itertuples():
         own = groups.setdefault(view.model_key, {})
         if view.name in own:
-            raise ValueError(f"Duplicate T1 view names: {view.model_key}")
+            raise ValueError(f"Duplicate row-block view names: {view.model_key}")
         own[view.name] = view
     # A pair with no aligned identical hash cannot produce this edge. Group
     # duplicate classes before expansion to avoid enumerating within-class pairs.
@@ -126,7 +126,7 @@ def similarity_edges(zoo_dir: Path, models: pd.DataFrame, data_root: Path,
         raise ValueError("Duplicate model keys in lineage input")
     root = Path(data_root).resolve()
     records = {row.model_key: row for row in models.itertuples()
-               if isinstance(row.fingerprint_t1, str) and row.fingerprint_t1}
+               if isinstance(row.row_block_fingerprint, str) and row.row_block_fingerprint}
     groups = defaultdict(list)
     for key, model in sorted(records.items()):
         groups[model.arch_signature].append(key)
@@ -135,7 +135,7 @@ def similarity_edges(zoo_dir: Path, models: pd.DataFrame, data_root: Path,
         paths = _paths(zoo_dir, signature)
         present = [path.exists() or path.is_symlink() for path in paths]
         if not any(present):
-            continue  # Singletons and signatures without common T1 views have no index.
+            continue  # Singletons and signatures without common row-block views have no index.
         if not all(present):
             raise ValueError("Incomplete retrieval index: matrix and metadata are required")
         if not k:

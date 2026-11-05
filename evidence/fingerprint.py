@@ -25,6 +25,7 @@ from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION,
 from net_esd.core import compute_esd_for_weight, _svdvals_for_measurement
 
 from . import EVIDENCE_VERSION
+from .compatibility import companion_spectra_path, normalize_fingerprint_metadata, normalize_manifest
 from .block_cache import BlockCache
 from .delta import block_delta, _compute_device
 from .hub import HubReader
@@ -344,7 +345,7 @@ class _Records:
         padded = np.zeros((self.k, self.k), np.float32)
         padded[:sketch.shape[0], :sketch.shape[1]] = sketch
         spectrum = np.empty(0, np.float32)
-        if self.tier != "t2":
+        if self.tier != "full_weights":
             if factors is None:
                 singular = _svdvals_for_measurement(block.float()) if block.is_cuda else torch.linalg.svdvals(block.float())
             else:
@@ -373,7 +374,7 @@ class _Records:
             "delta_scalars": np.asarray([[record["delta"][key] for key in ("frac_identical", "rel_update_norm", "rank")] for record in records], dtype=np.float32).reshape(n, 3),
             "delta_top_sv": np.asarray([record["delta"]["top_singular_values"] for record in records], dtype=np.float32).reshape(n, 16),
         }
-        if self.tier != "t2":
+        if self.tier != "full_weights":
             tensors.update(spectrum_values=np.concatenate(spectra) if n else np.empty(0, np.float32),
                            spectrum_offsets=np.asarray([0, *np.cumsum([len(s) for s in spectra])], dtype=np.int64))
         metadata = dict(meta, tier=self.tier, coverage=self.coverage,
@@ -594,7 +595,7 @@ def _measure_prefetched(views, sources, parent_sources, parent_views, parent_cac
         loader.close()
 
 
-def _measure_t1(views, sources, parent_sources, parent_views, cache, records, manifest,
+def _measure_row_blocks(views, sources, parent_sources, parent_views, cache, records, manifest,
                 device, window, max_bytes, delta_blocks, full_delta, cache_self):
     groups = [list(group) for _, group in groupby(
         sorted(views, key=lambda view: (view.sources, view.name)), key=lambda view: view.sources)]
@@ -638,15 +639,16 @@ def _measure_t1(views, sources, parent_sources, parent_views, cache, records, ma
 def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Path,
                       parent: dict | None = None, parent_cache: BlockCache | Path | None = None,
                       sketch_k: int = SKETCH_K_DEFAULT, all_experts: bool = False,
-                      also_t1_blocks: tuple[int, ...] = (), read_threads: int = 8,
+                      also_row_block_sizes: tuple[int, ...] = (), read_threads: int = 8,
                       compute_device: str = "cpu", prefetch_groups: int | None = None,
                       prefetch_bytes: int = 512*1024**2,
                       delta_blocks: tuple[int, ...] = (ROW_BLOCK,), full_delta: bool = False,
                       cache_self: bool = False, write_spectra: bool = True) -> Path:
-    """Measure one pinned manifest, publishing the final T2 marker last."""
-    if tier not in ("t1", "t2") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
+    """Measure one pinned manifest, publishing the final full-weight marker last."""
+    manifest = normalize_manifest(manifest)
+    if tier not in ("row_blocks", "full_weights") or not 1 <= sketch_k <= SKETCH_K_MAX or read_threads < 1:
         raise ValueError("Invalid tier, sketch size, or read thread count")
-    if any(type(height) is not int or height <= 0 for height in also_t1_blocks):
+    if any(type(height) is not int or height <= 0 for height in also_row_block_sizes):
         raise ValueError("Block heights must be positive integers")
     if any(type(height) is not int or height <= 0 for height in delta_blocks):
         raise ValueError("Delta block heights must be positive integers")
@@ -673,25 +675,25 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 parent_sources = _Sources(parent, reader, pool)
                 planned, _ = _plan_nonempty_views(parent_sources.entries, parent.get("config", {}), parent.get("adapter_config"), all_experts)
                 parent_views = {view.name: view for view in planned}
-            heights = [None] if tier == "t2" else [ROW_BLOCK]
-            if tier == "t2":
-                heights += sorted(set(also_t1_blocks))
+            heights = [None] if tier == "full_weights" else [ROW_BLOCK]
+            if tier == "full_weights":
+                heights += sorted(set(also_row_block_sizes))
                 if write_spectra:
-                    spectra = _Spectra(out_dir / f"{safe}.t2.spectra.h5", device)
-            records = {height: _Records(coverage, sketch_k, "t2" if height is None else ("t1" if height == ROW_BLOCK else f"t1b{height}")) for height in heights}
-            if tier == "t2" and (device.type == "cuda" or window):
+                    spectra = _Spectra(out_dir / f"{safe}.full_weights.spectra.h5", device)
+            records = {height: _Records(coverage, sketch_k, "full_weights" if height is None else ("row_blocks" if height == ROW_BLOCK else f"row_blocks_{height}")) for height in heights}
+            if tier == "full_weights" and (device.type == "cuda" or window):
                 _measure_prefetched(views, sources, parent_sources, parent_views, parent_cache,
                                     heights, records, spectra, manifest, device, window, prefetch_bytes,
                                     delta_blocks, full_delta, cache_self)
                 views = []
-            if tier == "t1":
-                _measure_t1(views, sources, parent_sources, parent_views, parent_cache, records,
+            if tier == "row_blocks":
+                _measure_row_blocks(views, sources, parent_sources, parent_views, parent_cache, records,
                             manifest, device, window, prefetch_bytes, delta_blocks, full_delta, cache_self)
                 views = []
             previous_sources, full = None, None
             # Grouping bounds the full-source cache to one weight/factor group.
             for view in sorted(views, key=lambda view: (view.sources, view.name)):
-                if tier == "t2" and previous_sources != view.sources:
+                if tier == "full_weights" and previous_sources != view.sources:
                     full = None
                     full = sources.full(view)
                     previous_sources = view.sources
@@ -715,7 +717,7 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
                 result = records[height]
                 path = out_dir / f"{safe}.{result.tier}.fingerprint.safetensors"
                 result.write(path, _metadata(manifest, parent, sketch_k, height, stats, time.monotonic() - started))
-            if tier == "t2":
+            if tier == "full_weights":
                 if write_spectra:
                     spectra.close(publish=True)
                     spectra = None
@@ -730,13 +732,13 @@ def fingerprint_model(manifest: dict, reader: HubReader, tier: str, out_dir: Pat
 
 def fingerprint_tensors(named_tensors: Iterable[tuple[str, torch.Tensor]], out_path: Path,
                         identity: dict, sketch_k: int = SKETCH_K_DEFAULT) -> Path:
-    """Write plain T1 views directly from tensors without checkpoint I/O."""
+    """Write plain row-block views directly from tensors without checkpoint I/O."""
     if not all(identity.get(key) for key in ("repo_id", "revision")):
         raise ValueError("identity requires repo_id and revision")
     if not 1 <= sketch_k <= SKETCH_K_MAX:
         raise ValueError("Invalid sketch size")
     started = time.monotonic()
-    records = _Records([], sketch_k, "t1")
+    records = _Records([], sketch_k, "row_blocks")
     names = set()
     for name, tensor in named_tensors:
         if name in names:
@@ -772,10 +774,10 @@ def load_fingerprint(path: Path) -> Fingerprint:
         meta = {key: value if key in {"repo_id", "revision", "tier", "evidence_version"} else json.loads(value)
                 for key, value in handle.metadata().items()}
         tensors = {key: handle.get_tensor(key) for key in handle.keys()}
+    meta = normalize_fingerprint_metadata(meta)
     names = meta["names"]
-    if meta["tier"] == "t2":
-        suffix = ".t2.fingerprint.safetensors"
-        spectra_path = path.with_name(path.name.removesuffix(suffix) + ".t2.spectra.h5")
+    if meta["tier"] == "full_weights":
+        spectra_path = companion_spectra_path(path)
         with h5py.File(spectra_path, "r") as handle:
             indices = {name: index for index, name in enumerate(handle["layers/longname"].asstr()[:])}
             spectra = [np.asarray(handle["eigs"][indices[name]], dtype=np.float32) for name in names]

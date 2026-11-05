@@ -12,7 +12,7 @@ from safetensors.torch import load_file
 
 from evidence.fingerprint import fingerprint_model, load_fingerprint
 from evidence.hub import HubReader
-from evidence.sidecar import EvidenceSidecar, publish_t2
+from evidence.sidecar import EvidenceSidecar, publish_full_weight_spectra
 from measurement_config import measurement_config, safe_filename
 from net_esd.core import compute_esd_for_weight
 
@@ -49,10 +49,10 @@ def loader(manifest):
     return lambda name, bounds: tensors[name][bounds[0]:bounds[1]]
 
 
-def test_sidecar_outputs_match_standalone_t2(local_manifest, tmp_path):
+def test_sidecar_outputs_match_standalone_full_weights(local_manifest, tmp_path):
     standalone = tmp_path / "standalone"
-    expected_path = fingerprint_model(local_manifest, HubReader(), "t2", standalone,
-                                      also_t1_blocks=(128, 256, 512))
+    expected_path = fingerprint_model(local_manifest, HubReader(), "full_weights", standalone,
+                                      also_row_block_sizes=(128, 256, 512))
     out = tmp_path / "sidecar"
     sidecar = EvidenceSidecar(local_manifest, out)
     sidecar.start()
@@ -100,14 +100,14 @@ def test_finish_remeasures_views_whose_loaded_block_differs(local_manifest, tmp_
         assert provenance[second_round[0]] == "second_round"
 
 
-def test_t2_marker_published_after_spectra(local_manifest, tmp_path, monkeypatch):
+def test_full_weights_marker_published_after_spectra(local_manifest, tmp_path, monkeypatch):
     import evidence.sidecar as module
     out = tmp_path / "out"
     original, markers = module.os.replace, []
     def replace(source, destination):
         destination = Path(destination)
-        if destination.parent == out and destination.name.endswith(".t2.fingerprint.safetensors"):
-            assert destination.with_name(destination.name.replace(".t2.fingerprint.safetensors", ".t2.spectra.h5")).is_file()
+        if destination.parent == out and destination.name.endswith(".full_weights.fingerprint.safetensors"):
+            assert destination.with_name(destination.name.replace(".full_weights.fingerprint.safetensors", ".full_weights.spectra.h5")).is_file()
             assert list(out.glob("*.manifest.json"))
             markers.append(destination)
         return original(source, destination)
@@ -141,12 +141,12 @@ def test_cancel_publishes_nothing(local_manifest, tmp_path, monkeypatch):
 
 def test_write_spectra_false_stages_marker_without_measuring(local_manifest, tmp_path, monkeypatch):
     monkeypatch.setattr("evidence.fingerprint.compute_esd_for_weight", lambda *args: pytest.fail("spectrum measured"))
-    path = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path,
-                             write_spectra=False, also_t1_blocks=(256,))
-    assert path.exists() and not path.name.endswith(".t2.fingerprint.safetensors")
+    path = fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path,
+                             write_spectra=False, also_row_block_sizes=(256,))
+    assert path.exists() and not path.name.endswith(".full_weights.fingerprint.safetensors")
     assert not list(tmp_path.glob("*.h5"))
-    assert not list(tmp_path.glob("*.t2.fingerprint.safetensors"))
-    assert list(tmp_path.glob("*.t1.fingerprint.safetensors"))
+    assert not list(tmp_path.glob("*.full_weights.fingerprint.safetensors"))
+    assert list(tmp_path.glob("*.row_blocks.fingerprint.safetensors"))
 
 
 @pytest.mark.parametrize("kind", ["slice", "shape", "dtype"])
@@ -165,14 +165,14 @@ def test_finish_rejects_unsafe_runner_reuse(local_manifest, tmp_path, kind):
     assert sidecar.finish(results, loaded, measure, config()) == dict(reused=0, measured=2, gaps=0)
 
 
-def test_publish_t2_does_not_replace_existing_completed_evidence(local_manifest, tmp_path):
-    existing = fingerprint_model(local_manifest, HubReader(), "t2", tmp_path)
+def test_publish_full_weight_spectra_does_not_replace_existing_completed_evidence(local_manifest, tmp_path):
+    existing = fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path)
     old_bytes = existing.read_bytes()
-    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path, write_spectra=False)
+    fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path, write_spectra=False)
     results = [(name, dict(result, spectrum_source="second_round")) for name, result in
                measure([(name, tensor) for name, tensor in weights(local_manifest).items() if tensor.ndim == 2]).items()]
     with pytest.raises(FileExistsError):
-        publish_t2(tmp_path, local_manifest, results, config())
+        publish_full_weight_spectra(tmp_path, local_manifest, results, config())
     assert existing.read_bytes() == old_bytes
 
 
@@ -181,7 +181,7 @@ def test_publish_failure_leaves_no_completion_marker(local_manifest, tmp_path, m
     out = tmp_path / "out"
     original = module.os.replace
     def replace(source, destination):
-        if Path(destination).parent == out and str(destination).endswith(".t2.fingerprint.safetensors"):
+        if Path(destination).parent == out and str(destination).endswith(".full_weights.fingerprint.safetensors"):
             raise OSError("interrupted publication")
         return original(source, destination)
     monkeypatch.setattr(module.os, "replace", replace)
@@ -208,7 +208,7 @@ def test_cancel_during_final_marker_rename_rolls_back(local_manifest, tmp_path, 
     entered, release, errors = Event(), Event(), []
     original = module.os.replace
     def replace(source, destination):
-        if Path(destination).parent == out and str(destination).endswith(".t2.fingerprint.safetensors"):
+        if Path(destination).parent == out and str(destination).endswith(".full_weights.fingerprint.safetensors"):
             entered.set()
             assert release.wait(3)
         return original(source, destination)
@@ -239,12 +239,12 @@ def test_failed_promotion_restores_existing_incomplete_files(local_manifest, tmp
     out = tmp_path / "out"
     out.mkdir()
     safe = safe_filename(f"{local_manifest['repo_id']}@{local_manifest['revision']}")
-    old = {f"{safe}.manifest.json": b"original manifest", f"{safe}.t1.fingerprint.safetensors": b"original T1"}
+    old = {f"{safe}.manifest.json": b"original manifest", f"{safe}.row_blocks.fingerprint.safetensors": b"original row-block"}
     for name, data in old.items():
         (out / name).write_bytes(data)
     original = module.os.replace
     def replace(source, destination):
-        if Path(destination).parent == out and str(destination).endswith(".t2.fingerprint.safetensors"):
+        if Path(destination).parent == out and str(destination).endswith(".full_weights.fingerprint.safetensors"):
             raise OSError("interrupted publication")
         return original(source, destination)
     monkeypatch.setattr(module.os, "replace", replace)
@@ -273,11 +273,11 @@ def test_sidecar_streams_expert_views_instead_of_full_fused_sources(moe_manifest
 
 
 def test_published_spectrum_device_describes_supplied_results(local_manifest, tmp_path):
-    fingerprint_model(local_manifest, HubReader(), "t2", tmp_path, write_spectra=False)
+    fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path, write_spectra=False)
     supplied = [(name, dict(result, spectrum_source="runner", compute_device="cuda:1"))
                 for name, result in measure([(name, tensor) for name, tensor in weights(local_manifest).items()
                                             if tensor.ndim == 2]).items()]
-    publish_t2(tmp_path, local_manifest, supplied, config())
+    publish_full_weight_spectra(tmp_path, local_manifest, supplied, config())
     with h5py.File(next(tmp_path.glob("*.h5"))) as h:
         assert h.attrs["compute_device"] == "cuda:1"
         assert set(h["layers/compute_device"].asstr()[:]) == {"cuda:1"}

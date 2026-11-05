@@ -19,7 +19,7 @@ def test_job_resources_auto_from_weight_bytes():
     assert resource["ram_limit_gib"] == 16
     assert resource["cache_limit_gib"] == 24
     assert resource["stage_timeout_seconds"]["fingerprint"] == 28800
-    assert job_resources(40*gib, 24*gib, 2, 2*gib)["oversized"]
+    assert job_resources(40*gib, 24*gib, 2, 2*gib)["oversized_model"]
 
 
 def test_prefetch_admission_fallback_and_owned_cache(tmp_path):
@@ -89,9 +89,9 @@ def test_sizing_defaults_explicit_controls_and_checkpoint(tmp_path, monkeypatch)
     monkeypatch.setattr(gpustat.GPUStatCollection, "new_query", lambda: SimpleNamespace(gpus=[{"memory.total": 24*1024}]*2))
     rows = pd.DataFrame([dict(model_id="org/a", revision_norm="a"*40, source_model="", base_model_relation="", download_bytes=20*1024**3),
                          dict(model_id="org/b", revision_norm="b"*40, source_model="", base_model_relation="", download_bytes=40*1024**3)])
-    ready, large = runner.size_models(rows, args)
+    ready, oversized_models = runner.size_models(rows, args)
     assert ready.iloc[0]._job_resources["num_gpus"] == 2
-    assert large.iloc[0].reason == "too_large_for_full_mode"
+    assert oversized_models.iloc[0].reason == "too_large_for_full_mode"
     args.num_gpus_per_job, args.max_worker_ram_gib, args.max_worker_cache_gib = 2, 33, 44
     args.stage_timeout_seconds = dict(load=99)
     ready, _ = runner.size_models(rows.iloc[:1], args)
@@ -102,11 +102,11 @@ def test_sizing_defaults_explicit_controls_and_checkpoint(tmp_path, monkeypatch)
     assert cfg["max_worker_ram_gib"] == 33 and cfg["max_worker_cache_gib"] == 44
     assert cfg["stage_timeout_seconds"] == dict(load=99)
     args.analysis_source, args.num_gpus_per_job = "checkpoint", "auto"
-    ready, large = runner.size_models(rows, args)
-    assert large.empty and all(row["num_gpus"] == 1 for row in ready._job_resources)
+    ready, oversized_models = runner.size_models(rows, args)
+    assert oversized_models.empty and all(row["num_gpus"] == 1 for row in ready._job_resources)
 
 
-def test_oversized_models_get_real_t1_package(tmp_path, monkeypatch):
+def test_oversized_models_get_real_row_blocks_package(tmp_path, monkeypatch):
     import sys
     import json
     import pandas as pd
@@ -124,8 +124,8 @@ def test_oversized_models_get_real_t1_package(tmp_path, monkeypatch):
     monkeypatch.setenv("ZOO_DATA", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "models.csv", "--output_dir", str(tmp_path)])
     args = runner.parse_args()
-    args.oversized_device = "cpu"
-    args.evidence_device = "gpu"  # T1 device must override the full-mode sidecar setting.
+    args.oversized_models_device = "cpu"
+    args.evidence_device = "gpu"  # row-block device must override the full-mode sidecar setting.
     folder = tmp_path / "evidence" / runner.safe_filename(manifest["repo_id"] + "@" + manifest["revision"])
     from evidence.manifest import write_manifest
     write_manifest(manifest, folder)
@@ -136,14 +136,14 @@ def test_oversized_models_get_real_t1_package(tmp_path, monkeypatch):
     models = pd.DataFrame([dict(model_id=manifest["repo_id"], revision_norm=manifest["revision"], reason="too_large_for_full_mode", source_model=parent["repo_id"] + "@" + parent["revision"])])
     runner.extract_row_block_evidence(models, tmp_path, args, logging.getLogger(__name__))
     result = pd.read_csv(tmp_path / "oversized_models.csv")
-    assert result.t1_status.tolist() == ["published"]
+    assert result.evidence_status.tolist() == ["published"]
     packages = list((tmp_path / "packages").rglob("package.json"))
-    assert len(packages) == 1 and json.loads(packages[0].read_text())["kind"] == "t1_only"
+    assert len(packages) == 1 and json.loads(packages[0].read_text())["kind"] == "row_blocks_only"
     assert json.loads(packages[0].read_text())["conventions"]["evidence"]["device"] == "cpu"
     # Resume uses the compatible block fingerprint; it does not reread weights.
-    monkeypatch.setattr("evidence.fingerprint.fingerprint_model", lambda *args, **kw: pytest.fail("repeated T1 measurement"))
+    monkeypatch.setattr("evidence.fingerprint.fingerprint_model", lambda *args, **kw: pytest.fail("repeated row-block measurement"))
     runner.extract_row_block_evidence(models, tmp_path, args, logging.getLogger(__name__))
-    assert pd.read_csv(tmp_path / "oversized_models.csv").t1_status.tolist() == ["published"]
+    assert pd.read_csv(tmp_path / "oversized_models.csv").evidence_status.tolist() == ["published"]
 
 
 def test_prefetch_shutdown_before_tracker_registration_cleans_cache(tmp_path):
@@ -172,14 +172,14 @@ def test_prefetch_worker_ids_cannot_escape_run_directory(tmp_path):
         tracker.close()
 
 
-def test_oversized_stop_does_not_start_evidence(tmp_path, monkeypatch):
+def test_oversized_models_stop_does_not_start_evidence(tmp_path, monkeypatch):
     import pandas as pd
     import run_experiment as runner
     import evidence_bridge
     monkeypatch.setattr(evidence_bridge, "create_sidecar", lambda *args: pytest.fail("started after stop"))
-    runner.run_oversized_evidence_jobs(pd.DataFrame([dict(model_id="org/a")]), tmp_path, SimpleNamespace(),
+    runner.run_oversized_models_evidence_jobs(pd.DataFrame([dict(model_id="org/a")]), tmp_path, SimpleNamespace(),
                              logging.getLogger(__name__), stopped=lambda: True)
-    assert pd.read_csv(tmp_path / "oversized_models.csv").t1_status.tolist() == ["interrupted"]
+    assert pd.read_csv(tmp_path / "oversized_models.csv").evidence_status.tolist() == ["interrupted"]
 
 
 def test_per_job_limits_override_live_globals(tmp_path, monkeypatch):
@@ -209,7 +209,7 @@ def test_prefetch_load_timeout_zero_preserves_disabled_limit(tmp_path, monkeypat
     prefetch._download(job, tmp_path / "cache", threading.Event())
 
 
-def test_oversized_jobs_use_supervision_without_prefetch(tmp_path, monkeypatch):
+def test_oversized_models_jobs_use_supervision_without_prefetch(tmp_path, monkeypatch):
     import pandas as pd
     import run_experiment as runner
     calls = []
@@ -218,24 +218,24 @@ def test_oversized_jobs_use_supervision_without_prefetch(tmp_path, monkeypatch):
             calls.append(kw)
             for job in kw['bash_command_list']:
                 assert job.cpu_only and job.ram_limit_gib >= 16
-                assert 'row_block_worker.py' in job.command and not job.prefetch_files
+                assert 'oversized_model_worker.py' in job.command and not job.prefetch_files
         def start(self):
             pass
         def wait_for_completion(self):
             for job in calls[0]['bash_command_list']:
-                Path(job.terminal_status_path).write_text('{"status":"success","t1_status":"published"}')
+                Path(job.terminal_status_path).write_text('{"status":"success","evidence_status":"published"}')
     monkeypatch.setattr(runner, 'DispatchThread', Dispatch)
-    args = SimpleNamespace(oversized_t1=True, evidence=True, oversized_device='cpu', max_concurrent_jobs=2,
+    args = SimpleNamespace(oversized_models_evidence=True, evidence=True, oversized_models_device='cpu', max_concurrent_jobs=2,
                            worker_cache_root=str(tmp_path/'cache'), max_worker_ram_gib='auto', max_worker_cache_gib='auto', stage_timeout_seconds='auto')
     dispatcher = SimpleNamespace(error=None, shutdown_event=threading.Event(), drain_event=threading.Event())
     rows = pd.DataFrame([dict(model_id='org/a', revision_norm='a'*40), dict(model_id='org/b', revision_norm='b'*40)])
-    runner.run_oversized_evidence_jobs(rows, tmp_path, args, logging.getLogger(__name__), dispatcher=dispatcher)
+    runner.run_oversized_models_evidence_jobs(rows, tmp_path, args, logging.getLogger(__name__), dispatcher=dispatcher)
     assert len(calls[0]['bash_command_list']) == 2
     assert calls[0]['prefetch_models'] == 0
-    assert pd.read_csv(tmp_path/'oversized_models.csv').t1_status.tolist() == ['published','published']
+    assert pd.read_csv(tmp_path/'oversized_models.csv').evidence_status.tolist() == ['published','published']
 
 
-def test_oversized_cpu_workers_publish_through_real_supervisor(tmp_path, monkeypatch):
+def test_oversized_models_cpu_workers_publish_through_real_supervisor(tmp_path, monkeypatch):
     import pandas as pd
     import torch
     from safetensors.torch import save_file
@@ -247,7 +247,7 @@ def test_oversized_cpu_workers_publish_through_real_supervisor(tmp_path, monkeyp
     monkeypatch.setenv('ZOO_DATA', str(tmp_path))
     monkeypatch.setenv('HF_HUB_OFFLINE', '1')
     monkeypatch.setattr(sys, 'argv', ['runner','--model_list','unused.csv','--output_dir',str(tmp_path),
-                                    '--oversized_device','cpu','--max_concurrent_jobs','2','--cpu_threads_per_gpu','1',
+                                    '--oversized_models_device','cpu','--max_concurrent_jobs','2','--cpu_threads_per_gpu','1',
                                     '--worker_cache_root',str(tmp_path/'cache')])
     args = runner.parse_args()
     rows = []
@@ -259,9 +259,9 @@ def test_oversized_cpu_workers_publish_through_real_supervisor(tmp_path, monkeyp
         folder = tmp_path/'evidence'/runner.safe_filename(manifest['repo_id']+'@'+manifest['revision'])
         write_manifest(manifest, folder)
         rows.append(dict(model_id=manifest['repo_id'],revision_norm=manifest['revision']))
-    runner.run_oversized_evidence_jobs(pd.DataFrame(rows), tmp_path, args, logging.getLogger(__name__))
+    runner.run_oversized_models_evidence_jobs(pd.DataFrame(rows), tmp_path, args, logging.getLogger(__name__))
     result = pd.read_csv(tmp_path/'oversized_models.csv')
-    assert result.t1_status.tolist() == ['published','published']
+    assert result.evidence_status.tolist() == ['published','published']
     assert len(list((tmp_path/'packages').rglob('package.json'))) == 2
     assert not list((tmp_path/'cache').rglob('hub'))  # private caches removed after process exit
 

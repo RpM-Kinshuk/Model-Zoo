@@ -1,4 +1,4 @@
-"""T0 checkpoint metadata, using pinned files without loading model weights."""
+"""metadata-only checkpoint metadata, using pinned files without loading model weights."""
 
 from collections import Counter
 from dataclasses import asdict, replace
@@ -260,7 +260,7 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
     local = root.is_dir()
     if not local and not is_commit_sha(revision):
         raise ValueError("Manifests require a pinned 40-character commit SHA")
-    manifest = dict(repo_id=source, revision=revision, gated=False, access="t0_only", license=None,
+    manifest = dict(repo_id=source, revision=revision, gated=False, access="metadata_only", license=None,
                     declared_bases=[], base_model_relation=None, is_adapter=False,
                     weight_format="other", params_by_dtype={}, files=[], skipped_files=[], tensors=[],
                     config={}, adapter_config=None, view_counts={}, gguf={}, evidence_version=EVIDENCE_VERSION)

@@ -46,7 +46,7 @@ def staged_zoo(tables, tmp_path):
 def null_dict():
     import numpy as np
     from evidence.sketch import SKETCH_SEED
-    return dict(statistic="median_cosine", sketch_k=64, row_block=256, tier="t1",
+    return dict(statistic="median_cosine", sketch_k=64, row_block=256, tier="row_blocks",
                 sketch_seed=SKETCH_SEED, n_pairs=1000,
                 null_quantiles=np.linspace(-0.1, 0.3, 101).tolist(), related_threshold=.9)
 

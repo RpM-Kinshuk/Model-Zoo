@@ -1,12 +1,12 @@
 """Offline pilot diagnostics over measured fingerprints and lab truth.
 
-Run layout: manifests/, t1/, t2/, and pairs.csv (the output of lineage_pairs).
+Run layout: manifests/, row_blocks/, full_weights/, and pairs.csv (the output of lineage_pairs).
 Alternatively lab/edges.csv and adjacent models.csv can supply pairs. Summaries
-are read from t1/summary.json; its current rows supersede historical failures.csv.
-The requested spectral cohort is t2/summary.json's current model identities;
+are read from row_blocks/summary.json; its current rows supersede historical failures.csv.
+The requested spectral cohort is full_weights/summary.json's current model identities;
 without that declaration, spectral metrics are descriptive with unavailable
-coverage. Default T1 companions in sibling t2/ supply comparisons/calibration,
-but their full-read counters never supply standalone T1 throughput.
+coverage. Default row-block companions in sibling full_weights/ supply comparisons/calibration,
+but their full-read counters never supply standalone row-block throughput.
 Missing lab pins use unmapped:lab/<id> endpoints. Source annotations of the form
 |missing_manifest_ids=<JSON list> persist inventory mapping gaps through CSV.
 Missing measurements stay explicit. Planned inventory rows never become evidence.
@@ -29,6 +29,7 @@ import torch
 from net_esd.core import _fit_tail_chunk, _KS_CHUNK_SIZE
 from measurement_config import safe_filename
 from .compare import pair_similarity
+from .compatibility import canonical_mode, companion_spectra_path, measurement_directory
 from .fingerprint import load_fingerprint
 from .sketch import SKETCH_SEED
 
@@ -189,7 +190,7 @@ def _fingerprints(directory, tier):
         try:
             fp = load_fingerprint(path)
         except FileNotFoundError:
-            # A T2 fingerprint without its required spectra companion is an
+            # A full-weight fingerprint without its required spectra companion is an
             # incomplete measurement. Requested-pair/coverage counts expose it.
             continue
         if fp.meta["tier"] != tier:
@@ -217,8 +218,8 @@ def _merge_fingerprints(primary, secondary, tier):
     return result
 
 
-def _baseline_t1(directory, t2_directory=None):
-    return _merge_fingerprints(directory, t2_directory or Path(directory).parent / "t2", "t1")
+def _baseline_row_blocks(directory, full_weights_directory=None):
+    return _merge_fingerprints(directory, full_weights_directory or measurement_directory(Path(directory).parent, "full_weights"), "row_blocks")
 
 
 def _truth(pairs):
@@ -312,44 +313,44 @@ def _false_matches(pairs, fps, threshold):
                 false_matches_note="Directional immediate-parent retrieval: sibling/grandparent/independent and reverse descendants are negatives; unlabelled candidates are unverified, so cannot certify G0.")
 
 
-def tier_agreement(pairs, t1_dir, t2_dir) -> dict:
+def tier_agreement(pairs, row_blocks_dir, full_weights_dir) -> dict:
     """Compare the same measured truth pairs at nested k=64, without sklearn."""
     truth = _truth(pairs)
-    fps1, fps2 = _baseline_t1(t1_dir, t2_dir), _fingerprints(t2_dir, "t2")
+    fps1, fps2 = _baseline_row_blocks(row_blocks_dir, full_weights_dir), _fingerprints(full_weights_dir, "full_weights")
     s1, s2 = _pair_scores(truth, fps1), _pair_scores(truth, fps2)
-    joined = s1.merge(s2, on=["a", "b", "label"], suffixes=("_t1", "_t2"))
+    joined = s1.merge(s2, on=["a", "b", "label"], suffixes=("_row_blocks", "_full_weights"))
     output = dict(n_pairs_requested=len(truth), n_pairs_measured=len(joined),
                   n_missing_pairs=len(truth) - len(joined), sketch_k=64,
                   n_missing_manifest_models=len(_missing_mapping_ids(pairs)),
                   missing_manifest_model_ids=_missing_mapping_ids(pairs))
-    for tier in ("t1", "t2"):
+    for tier in ("row_blocks", "full_weights"):
         scores = joined[f"score_{tier}"]
         positives = scores[joined.label == "parent"]
         output[f"auroc_{tier}"] = _auroc(positives, scores[joined.label == "independent"])
         for negative in ("sibling", "grandparent"):
             output[f"auroc_parent_vs_{negative}_{tier}"] = _auroc(positives, scores[joined.label == negative])
     related = joined[joined.label != "independent"]
-    output["spearman_within_related"] = _spearman(related.score_t1, related.score_t2)
-    threshold = _threshold(joined.loc[joined.label == "parent", "score_t2"])
-    output["threshold_t2_tpr_0_9"] = threshold
-    output["decision_agreement"] = (float(np.mean((joined.score_t1 >= threshold) == (joined.score_t2 >= threshold)))
+    output["spearman_within_related"] = _spearman(related.score_row_blocks, related.score_full_weights)
+    threshold = _threshold(joined.loc[joined.label == "parent", "score_full_weights"])
+    output["threshold_full_weights_tpr_0_9"] = threshold
+    output["decision_agreement"] = (float(np.mean((joined.score_row_blocks >= threshold) == (joined.score_full_weights >= threshold)))
                                     if threshold is not None and len(joined) else None)
-    independent = joined.loc[joined.label == "independent", "score_t1"].to_numpy()
+    independent = joined.loc[joined.label == "independent", "score_row_blocks"].to_numpy()
     output.update(null_mean=float(np.mean(independent)) if len(independent) else None,
                   null_sd=float(np.std(independent, ddof=1)) if len(independent) > 1 else None,
                   null_quantiles=np.quantile(independent, [0, .5, .9, .95, .99, 1]).tolist() if len(independent) else [],
                   n_independent_pairs=len(independent))
-    threshold_t1 = _threshold(joined.loc[joined.label == "parent", "score_t1"])
-    output["threshold_t1_tpr_0_9"] = threshold_t1
-    output["achieved_tpr_t1"] = (float(np.mean(joined.loc[joined.label == "parent", "score_t1"] >= threshold_t1))
-                                  if threshold_t1 is not None else None)
-    output.update(_false_matches(truth, fps1, threshold_t1))
+    threshold_row_blocks = _threshold(joined.loc[joined.label == "parent", "score_row_blocks"])
+    output["threshold_row_blocks_tpr_0_9"] = threshold_row_blocks
+    output["achieved_tpr_row_blocks"] = (float(np.mean(joined.loc[joined.label == "parent", "score_row_blocks"] >= threshold_row_blocks))
+                                  if threshold_row_blocks is not None else None)
+    output.update(_false_matches(truth, fps1, threshold_row_blocks))
     curve, curve_counts = {}, {}
     for height in (128, 256, 512):
         if height == 256:
             scores = s1
         else:
-            alternate = _merge_fingerprints(t1_dir, t2_dir, f"t1b{height}")
+            alternate = _merge_fingerprints(row_blocks_dir, full_weights_dir, f"row_blocks_{height}")
             scores = _pair_scores(truth, alternate)
         curve_counts[height] = dict(requested=len(truth), measured=len(scores), missing=len(truth) - len(scores))
         curve[height] = (_auroc(scores.loc[scores.label == "parent", "score"],
@@ -402,19 +403,19 @@ def _alpha(spectrum, config):
     return best_alpha
 
 
-def spectra_agreement(t1_dir, t2_dir) -> dict:
-    first, second = _baseline_t1(t1_dir, t2_dir), _fingerprints(t2_dir, "t2")
-    summary_path = Path(t2_dir) / "summary.json"
+def spectra_agreement(row_blocks_dir, full_weights_dir) -> dict:
+    first, second = _baseline_row_blocks(row_blocks_dir, full_weights_dir), _fingerprints(full_weights_dir, "full_weights")
+    summary_path = Path(full_weights_dir) / "summary.json"
     declared = summary_path.exists()
     requested = {_key(row) for row in _json(summary_path).get("models", [])} if declared else set(second)
-    cohort_source = "t2/summary.json" if declared else "available T2 outputs only; requested cohort undeclared"
+    cohort_source = "full_weights/summary.json" if declared else "available full-weight outputs only; requested cohort undeclared"
     alphas, correlations, skipped = [], [], Counter()
     n_requested = sum(len(first[key].names) for key in requested & first.keys())
     matched = requested & first.keys() & second.keys()
     for key in sorted(matched):
         a, b = first[key], second[key]
-        # T2 stores the fit configuration with the full spectra artifact.
-        spectra_path = Path(t2_dir) / f"{safe_filename(key)}.t2.spectra.h5"
+        # full-weight stores the fit configuration with the full spectra artifact.
+        spectra_path = companion_spectra_path(b.path)
         with h5py.File(spectra_path, "r") as handle:
             config = json.loads(handle.attrs["measurement_config_json"])
         right = {name: j for j, name in enumerate(b.names)}
@@ -446,7 +447,7 @@ def spectra_agreement(t1_dir, t2_dir) -> dict:
                 median_per_matrix_spearman=float(np.median(correlations)) if correlations else None,
                 n_matrices=len(correlations), n_alpha_pairs=len(alphas), skipped=dict(skipped),
                 n_models_requested=len(requested), n_models_matched=len(matched),
-                n_t1_only_models=len(first.keys() - requested),
+                n_row_blocks_only_models=len(first.keys() - requested),
                 cohort_declared=declared, cohort_source=cohort_source,
                 n_matrices_requested=n_requested,
                 measurement_coverage_complete=(declared and len(requested) > 0 and len(matched) == len(requested)
@@ -465,20 +466,20 @@ def _number(value):
 
 def throughput_report(run_dir) -> pd.DataFrame:
     root = Path(run_dir)
-    summary = root / "t1" / "summary.json"
+    summary = measurement_directory(root, "row_blocks") / "summary.json"
     records = _json(summary).get("models", []) if summary.exists() else []
     manifests = {_key(m): m for m in (_json(p) for p in (root / "manifests").glob("*.manifest.json"))}
     if not records:
-        for fp in _fingerprints(root / "t1", "t1").values():
+        for fp in _fingerprints(measurement_directory(root, "row_blocks"), "row_blocks").values():
             records.append(dict(fp.meta, status="complete", stratum="unknown", reason=""))
-        failures = root / "t1" / "failures.csv"
+        failures = measurement_directory(root, "row_blocks") / "failures.csv"
         if failures.exists():
             records.extend(pd.read_csv(failures, keep_default_na=False).assign(status="failed", stratum="unknown").to_dict("records"))
     indexed = {}
     for record in records:
         identity = (record["repo_id"], record.get("revision", record.get("requested_revision", "")))
         if identity in indexed:
-            raise ValueError("Duplicate identities in current T1 summary")
+            raise ValueError("Duplicate identities in current row-block summary")
         indexed[identity] = record
     groups = defaultdict(list)
     for record in indexed.values():
@@ -486,9 +487,9 @@ def throughput_report(run_dir) -> pd.DataFrame:
     output = []
     for stratum, rows in sorted(groups.items()):
         complete = [r for r in rows if r.get("status") in ("complete", "skipped")
-                    and r.get("reason", "") in ("", "already_complete")]
+                    and canonical_mode(r.get("reason", "")) in ("", "already_complete")]
         excluded = [r for r in rows if r.get("reason") in
-                    ("no_access", "packed_format", "unsupported_packed", "unsupported_quantization", "t0_only")]
+                    ("no_access", "packed_format", "unsupported_packed", "unsupported_quantization", "metadata_only")]
         eligible = [r for r in rows if r not in excluded]
         failed = [r for r in eligible if r.get("status") == "failed"]
         result = dict(stratum=stratum, n_models=len(rows), n_completed=len(complete), n_eligible=len(eligible),
@@ -536,7 +537,7 @@ def throughput_report(run_dir) -> pd.DataFrame:
     return pd.DataFrame(output)
 
 
-def write_calibration(pairs, t1_dir, out: Path, sketch_k: int = 64) -> None:
+def write_calibration(pairs, row_blocks_dir, out: Path, sketch_k: int = 64) -> None:
     """Write every independent observation as an equal-mass empirical quantile."""
     if type(sketch_k) is not int or sketch_k < 1:
         raise ValueError("Invalid calibration sketch_k")
@@ -544,7 +545,7 @@ def write_calibration(pairs, t1_dir, out: Path, sketch_k: int = 64) -> None:
         raise ValueError("Calibration requires complete lab manifest mapping")
     truth = _truth(pairs)
     independent = truth[truth.label == "independent"]
-    fps = _baseline_t1(t1_dir)
+    fps = _baseline_row_blocks(row_blocks_dir)
     scores = _pair_scores(independent, fps, sketch_k)
     if len(scores) < 2 or len(scores) != len(independent):
         raise ValueError("Calibration needs at least two fully measured independent pairs")
@@ -579,8 +580,8 @@ def write_g0_report(run_dir: Path, out: Path) -> None:
         pairs = lineage_pairs(root / "lab" / "edges.csv", root / "manifests")
     else:
         pairs = pd.DataFrame(columns=["a", "b", "label", "source"])
-    agreement = tier_agreement(pairs, root / "t1", root / "t2")
-    spectral = spectra_agreement(root / "t1", root / "t2")
+    agreement = tier_agreement(pairs, measurement_directory(root, "row_blocks"), measurement_directory(root, "full_weights"))
+    spectral = spectra_agreement(measurement_directory(root, "row_blocks"), measurement_directory(root, "full_weights"))
     throughput = throughput_report(root)
     lines = ["# G0 pilot report", "", "Missing evidence is FAIL (unavailable), not an observed scientific failure.",
              "Synthetic fixtures/planned inventory cannot authorize G0; the person decides the gate.", ""]
@@ -596,15 +597,15 @@ def write_g0_report(run_dir: Path, out: Path) -> None:
           f"all {agreement['n_pairs_requested']} truth pairs measured at both tiers")
     lines.append(f"  Missing lab manifest mappings: {agreement['n_missing_manifest_models']} "
                  f"{agreement['missing_manifest_model_ids']}")
-    for name, minimum in (("auroc_t1", .98), ("spearman_within_related", .9), ("decision_agreement", .9)):
+    for name, minimum in (("auroc_row_blocks", .98), ("spearman_within_related", .9), ("decision_agreement", .9)):
         check(name, agreement[name], lambda x, m=minimum: x >= m and complete_pairs, f">= {minimum}")
-    gap = agreement["auroc_t1"] - agreement["auroc_t2"] if agreement["auroc_t1"] is not None and agreement["auroc_t2"] is not None else None
-    check("auroc_t1_minus_t2", gap, lambda x: x >= -.01 and complete_pairs, ">= -0.01")
+    gap = agreement["auroc_row_blocks"] - agreement["auroc_full_weights"] if agreement["auroc_row_blocks"] is not None and agreement["auroc_full_weights"] is not None else None
+    check("auroc_row_blocks_minus_full_weights", gap, lambda x: x >= -.01 and complete_pairs, ">= -0.01")
     check("false_matches_per_query", agreement["false_matches_per_query"],
           lambda x: x <= .05 and agreement["candidate_pool_size"] >= 5000 and agreement["n_unlabelled_candidates"] == 0 and complete_pairs,
           f"<= 0.05 at TPR0.9; requires 5000 verified candidates/query; actual min pool={agreement['candidate_pool_size']}, unlabelled={agreement['n_unlabelled_candidates']}")
-    lines.append(f"  T1 threshold={agreement['threshold_t1_tpr_0_9']}; achieved T1 parent TPR={agreement['achieved_tpr_t1']}; "
-                 f"decision-agreement common T2 threshold={agreement['threshold_t2_tpr_0_9']}.")
+    lines.append(f"  row-block threshold={agreement['threshold_row_blocks_tpr_0_9']}; achieved row-block parent TPR={agreement['achieved_tpr_row_blocks']}; "
+                 f"decision-agreement common full-weight threshold={agreement['threshold_full_weights_tpr_0_9']}.")
     for name in ("median_abs_alpha_diff", "median_per_matrix_spearman"):
         check(name, spectral[name], (lambda x: x <= .1 and spectral["measurement_coverage_complete"])
               if name == "median_abs_alpha_diff" else (lambda x: x >= .8 and spectral["measurement_coverage_complete"]),
@@ -613,10 +614,10 @@ def write_g0_report(run_dir: Path, out: Path) -> None:
           lambda _: spectral["measurement_coverage_complete"],
           f"all {spectral['n_matrices_requested']} requested matrices have valid paired spectra/fits")
     lines.append(f"  Spectral cohort: {spectral['cohort_source']}; {spectral['n_models_matched']}/{spectral['n_models_requested']} "
-                 f"requested models matched, {spectral['n_t1_only_models']} models outside T2 cohort.")
+                 f"requested models matched, {spectral['n_row_blocks_only_models']} models outside full-weight cohort.")
     if throughput.empty:
         for name in ("fraction_of_model_bytes", "elapsed_seconds_p90_le_9b", "failure_rate", "unhandled_429", "projected_5000_seconds"):
-            check(name, None, bool, "requires measured T1 summaries")
+            check(name, None, bool, "requires measured row-block summaries")
     for row in throughput.to_dict("records"):
         stratum = row["stratum"]
         coverage = row["measurement_coverage_complete"] and stratum != "unknown"

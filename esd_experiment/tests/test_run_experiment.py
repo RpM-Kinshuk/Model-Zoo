@@ -83,6 +83,34 @@ def test_parse_args_accepts_max_concurrent_jobs(monkeypatch):
     assert args.max_check == 2
 
 
+@pytest.mark.parametrize("flags,enabled,device", [
+    ([], True, "auto"),
+    (["--oversized_models_evidence", "--oversized_models_device", "cpu"], True, "cpu"),
+    (["--no-oversized_models_evidence"], False, "auto"),
+])
+def test_parse_args_accepts_descriptive_oversized_model_controls(monkeypatch, flags, enabled, device):
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", "models.csv",
+                                    "--output_dir", "results", *flags])
+
+    args = run_experiment.parse_args()
+
+    assert args.oversized_models_evidence is enabled
+    assert args.oversized_models_device == device
+
+
+@pytest.mark.parametrize("flags", [
+    ["--oversized_t1"],
+    ["--no-oversized_t1"],
+    ["--oversized_device", "cpu"],
+])
+def test_parse_args_rejects_replaced_oversized_model_controls(monkeypatch, flags):
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", "models.csv",
+                                    "--output_dir", "results", *flags])
+
+    with pytest.raises(SystemExit):
+        run_experiment.parse_args()
+
+
 @pytest.mark.parametrize("flags,expected", [([], True), (["--save_eigs"], True), (["--no-save_eigs"], False)])
 def test_eigenvalue_storage_default_and_opt_out_reach_worker(monkeypatch, tmp_path, flags, expected):
     monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", "models.csv",
@@ -746,7 +774,7 @@ def test_checkpoint_mode_turns_evidence_off_with_notice(monkeypatch, tmp_path, c
     assert "evidence" in capsys.readouterr().out.lower()
 
 
-def test_completion_requires_t2_marker_with_evidence(tmp_path):
+def test_completion_requires_full_weights_marker_with_evidence(tmp_path):
     import json
     (tmp_path / "stats").mkdir()
     (tmp_path / "metrics").mkdir()
@@ -756,7 +784,7 @@ def test_completion_requires_t2_marker_with_evidence(tmp_path):
     folder = tmp_path / "evidence" / ("org--m__" + "a" * 40)
     folder.mkdir(parents=True)
     (folder / (folder.name + ".manifest.json")).write_text(json.dumps(dict(repo_id="org/m", revision="a" * 40)))
-    (folder / (folder.name + ".t2.fingerprint.safetensors")).write_bytes(b"marker")
+    (folder / (folder.name + ".full_weights.fingerprint.safetensors")).write_bytes(b"marker")
     assert run_experiment._completed_models_from_artifacts(tmp_path, evidence=True) == {"org/m"}
 
 

@@ -13,13 +13,13 @@ from zoo.testing import SHA1, SHA2, SHA3, SHA4, SHA5, SHA8, SHA9, SHA10, SHA11, 
 
 def test_models_and_coverage(tables):
     m = tables["models"].set_index("model_key")
-    assert m.loc["org/t0only@" + SHA8, "coverage_status"] == "t0_only"
+    assert m.loc["org/t0only@" + SHA8, "coverage_status"] == "metadata_only"
     assert m.loc["org/gated@" + SHA9, "coverage_status"] == "no_access"
-    assert m.loc["org/child@" + SHA2, "n_views"] > 0 and not Path(m.loc["org/child@" + SHA2, "fingerprint_t1"]).is_absolute()
+    assert m.loc["org/child@" + SHA2, "n_views"] > 0 and not Path(m.loc["org/child@" + SHA2, "row_block_fingerprint"]).is_absolute()
     assert m.loc["org/child-vocab@" + SHA3, "arch_signature"] == m.loc["org/parent@" + SHA1, "arch_signature"]
     assert list(tables["models"].model_key) == sorted(tables["models"].model_key)
     assert m.loc["org/decider@" + SHA11, "system_one"] and m.loc["org/decider@" + SHA11, "num_labels"] == 2
-    assert m.loc["org/parent-GGUF@" + SHA12, "coverage_status"] == "t0_only"
+    assert m.loc["org/parent-GGUF@" + SHA12, "coverage_status"] == "metadata_only"
 
 
 def test_duplicates_grouped(tables):
@@ -41,33 +41,33 @@ def _full_measurement(root):
     save_file({"linear.weight": torch.randn(512, 64, generator=generator)}, checkpoint / "model.safetensors")
     manifest = build_manifest(str(checkpoint), "main", HubReader(), None)
     write_manifest(manifest, root / "manifests")
-    fp = fingerprint_model(manifest, HubReader(), "t2", root / "fingerprints", also_t1_blocks=(256,))
+    fp = fingerprint_model(manifest, HubReader(), "full_weights", root / "fingerprints", also_row_block_sizes=(256,))
     return manifest, fp
 
 
 def test_full_spectra_pointer_and_tier_preference_fallback(tmp_path):
-    manifest, t2 = _full_measurement(tmp_path)
+    manifest, full_weights = _full_measurement(tmp_path)
     key = manifest["repo_id"] + "@" + manifest["revision"]
     combined = build_tables(tmp_path / "manifests", [tmp_path / "fingerprints"], tmp_path)
     row = combined["models"].set_index("model_key").loc[key]
-    assert row.fingerprint_t1 and row.fingerprint_t2 and row.spectra_t2
-    assert not Path(row.spectra_t2).is_absolute()
-    with h5py.File(tmp_path / row.spectra_t2) as handle:
+    assert row.row_block_fingerprint and row.full_weight_fingerprint and row.full_weight_spectra
+    assert not Path(row.full_weight_spectra).is_absolute()
+    with h5py.File(tmp_path / row.full_weight_spectra) as handle:
         assert len(handle["eigs"][0]) == 64  # Full matrix spectrum, not block fits.
         from safetensors.torch import load_file
         full_weight = load_file(tmp_path / "checkpoint" / "model.safetensors")["linear.weight"]
         assert sum(handle["eigs"][0]) == pytest.approx(full_weight.square().sum().item(), rel=1e-5)
-    assert combined["views"].tier.eq("t1").all() and combined["views"].r0.eq(128).all()
-    fallback = build_tables(tmp_path / "manifests", [t2], tmp_path)
+    assert combined["views"].tier.eq("row_blocks").all() and combined["views"].r0.eq(128).all()
+    fallback = build_tables(tmp_path / "manifests", [full_weights], tmp_path)
     fallback_row = fallback["models"].iloc[0]
-    assert not fallback_row.fingerprint_t1 and fallback_row.spectra_t2 == row.spectra_t2
-    assert fallback["views"].tier.eq("t2").all() and fallback["views"].r0.eq(0).all()
+    assert not fallback_row.row_block_fingerprint and fallback_row.full_weight_spectra == row.full_weight_spectra
+    assert fallback["views"].tier.eq("full_weights").all() and fallback["views"].r0.eq(0).all()
     assert fallback_row.dup_group == key
     assert manifest["repo_id"] in key
 
 
 def test_duplicate_input_and_orphan_identity_are_explicit_errors(universe, tmp_path):
-    path = next(universe.fingerprints.glob("*.t1.fingerprint.safetensors"))
+    path = next(universe.fingerprints.glob("*.row_blocks.fingerprint.safetensors"))
     copied = tmp_path / "other" / path.name
     copied.parent.mkdir()
     shutil.copy2(path, copied)
@@ -85,7 +85,7 @@ def test_coverage_frame_and_scores_keep_measurements_separate(universe, tmp_path
     from measurement_config import safe_filename
 
     key = "org/child@" + SHA2
-    fingerprint = universe.fingerprints / (safe_filename(key) + ".t1.fingerprint.safetensors")
+    fingerprint = universe.fingerprints / (safe_filename(key) + ".row_blocks.fingerprint.safetensors")
     # An extra unsupported tensor makes coverage partial without removing the
     # existing matrices or inventing a zero-valued view.
     from safetensors import safe_open
@@ -115,14 +115,14 @@ def test_coverage_frame_and_scores_keep_measurements_separate(universe, tmp_path
     assert set(result["scores"]) == set(SCORES_COLUMNS)
 
 
-def test_duplicate_groups_require_matching_t1_geometry_and_coordinates():
+def test_duplicate_groups_require_matching_row_blocks_geometry_and_coordinates():
     base = dict(view_index=0, name="weight", geometry="matrix", n_rows=512, n_cols=64,
-                r0=128, r1=384, block_sha256="a" * 64, tier="t1")
+                r0=128, r1=384, block_sha256="a" * 64, tier="row_blocks")
     rows = [dict(base, model_key="a"), dict(base, model_key="b"),
             dict(base, model_key="coords", r0=0, r1=256),
             dict(base, model_key="geometry", geometry="head"),
             dict(base, model_key="columns", n_cols=128),
-            dict(base, model_key="full", tier="t2")]
+            dict(base, model_key="full", tier="full_weights")]
     groups = duplicate_groups(pd.DataFrame(rows))
     assert groups["a"] == groups["b"] == "a"
     assert all(groups[key] == key for key in ("coords", "geometry", "columns", "full"))
@@ -140,7 +140,7 @@ def test_paths_cannot_escape_data_root_and_empty_inputs_stay_typed(universe, tmp
 
 @pytest.mark.parametrize("gated", ["unexpected", "false", ""])
 def test_unknown_hub_gating_strings_are_explicit_errors(tmp_path, gated):
-    manifest = dict(repo_id="org/model", revision=SHA1, access="t0_only", tensors=[], gated=gated)
+    manifest = dict(repo_id="org/model", revision=SHA1, access="metadata_only", tensors=[], gated=gated)
     (tmp_path / "model.manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="gated"):
         build_tables(tmp_path, [], tmp_path)

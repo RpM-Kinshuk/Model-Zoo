@@ -52,7 +52,7 @@ def test_declared_pins_and_ambiguous_bare_bases_and_relation_mapping():
 def _views():
     return pd.DataFrame([
         dict(model_key=key, view_index=i, name=f"layer.{i}", geometry="matrix", component="layer",
-             n_rows=512, n_cols=64, r0=128, r1=384, block_sha256=hashes[i], tier="t1")
+             n_rows=512, n_cols=64, r0=128, r1=384, block_sha256=hashes[i], tier="row_blocks")
         for key, hashes in [("a", ["same", "left"]), ("b", ["same", "right"])]
         for i in range(2)
     ], columns=VIEWS_COLUMNS)
@@ -66,8 +66,8 @@ def test_shared_hash_fraction_and_canonical_pair():
     assert shared_tensor_edges(views, {"a": "a", "b": "a"}).empty
 
 
-@pytest.mark.parametrize("field,value", [("tier", "t2"), ("geometry", "head"), ("n_cols", 128), ("r0", 127), ("r1", 383)])
-def test_shared_hash_requires_compatible_t1_views(field, value):
+@pytest.mark.parametrize("field,value", [("tier", "full_weights"), ("geometry", "head"), ("n_cols", 128), ("r0", 127), ("r1", 383)])
+def test_shared_hash_requires_compatible_row_blocks_views(field, value):
     views = _views()
     views.loc[(views.model_key == "b") & (views.view_index == 0), field] = value
     assert shared_tensor_edges(views, {}).empty
@@ -86,20 +86,20 @@ def _staged_pair(root, failure=None):
             sketches[1:] = 0
         if model_index and failure == "nonfinite":
             sketches[1, 63, 63] = np.nan
-        meta = dict(repo_id=key.split("@")[0], revision=key.split("@")[1], tier="t1",
+        meta = dict(repo_id=key.split("@")[0], revision=key.split("@")[1], tier="row_blocks",
                     evidence_version="1", sketch_seed=20261028, row_block=256, sketch_k=64,
                     names=[f"layer.{i}" for i in range(3)], geometry=["matrix"] * 3,
                     component=["layer"] * 3, sha256=[f"{model_index}-{i}" for i in range(3)],
                     delta_status=["no_parent"] * 3, delta_confidence=["none"] * 3, coverage=[])
-        path = root / f"{model_index}.t1.fingerprint.safetensors"
+        path = root / f"{model_index}.row_blocks.fingerprint.safetensors"
         arrays = dict(sketch=sketches, rows=np.tile([128, 384], (3, 1)), shape=np.tile([512, 64], (3, 1)),
                       delta_scalars=np.zeros((3, 3), dtype=np.float32), delta_top_sv=np.zeros((3, 0), dtype=np.float32),
                       spectrum_values=np.zeros(0, dtype=np.float32), spectrum_offsets=np.zeros(4, dtype=np.int64))
         save_file(arrays, path, metadata={name: value if name in {"repo_id", "revision", "tier", "evidence_version"} else json.dumps(value) for name, value in meta.items()})
-        models.append(dict(model_key=key, arch_signature="cfg:" + "a" * 12, fingerprint_t1=path.name))
+        models.append(dict(model_key=key, arch_signature="cfg:" + "a" * 12, row_block_fingerprint=path.name))
         for i, name in enumerate(meta["names"]):
             views.append(dict(model_key=key, view_index=i, name=name, geometry="matrix", component="layer",
-                              n_rows=512, n_cols=64, r0=128, r1=384, block_sha256=meta["sha256"][i], tier="t1"))
+                              n_rows=512, n_cols=64, r0=128, r1=384, block_sha256=meta["sha256"][i], tier="row_blocks"))
     models = pd.DataFrame(models)
     build_retrieval(root, models, pd.DataFrame(views), root)
     return models
@@ -136,7 +136,7 @@ def test_vocab_child_calibration_retains_aligned_layers(staged_zoo, tables, univ
 
 
 @pytest.mark.parametrize("field,value", [("sketch_k", 128), ("sketch_k", "64"), ("row_block", 128),
-    ("tier", "t2"), ("sketch_seed", 7), ("statistic", "mean_cosine"), ("n_pairs", 0),
+    ("tier", "full_weights"), ("sketch_seed", 7), ("statistic", "mean_cosine"), ("n_pairs", 0),
     ("null_quantiles", [0.3, -.1]), ("null_quantiles", [np.nan]), ("related_threshold", np.inf)])
 def test_invalid_or_incompatible_calibration_fails_clearly(tmp_path, null_dict, field, value):
     models = _staged_pair(tmp_path)
@@ -164,7 +164,7 @@ def test_merge_preserves_external_provenance_and_estimands(tmp_path):
 
 
 def test_empty_producers_keep_frozen_schema(tmp_path):
-    models = pd.DataFrame(columns=["model_key", "repo_id", "declared_bases", "base_model_relation", "fingerprint_t1"])
+    models = pd.DataFrame(columns=["model_key", "repo_id", "declared_bases", "base_model_relation", "row_block_fingerprint"])
     for e in [declared_edges(models), shared_tensor_edges(empty_table(VIEWS_COLUMNS), {}),
               similarity_edges(tmp_path, models, tmp_path), merge_edges()]:
         assert e.empty and list(e.columns) == LINEAGE_COLUMNS

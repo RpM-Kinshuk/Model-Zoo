@@ -1,9 +1,12 @@
 # Full-Mode Evidence and Model Packages Implementation Plan
 
+> Interfaces below use the descriptive evidence names adopted on 2026-11-05.
+> Dated measurements and existing report/run paths retain their historical identity.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Status (2026-11-05):** Owner checkpointa796b06. Gap audit restores
-supervised/parallel streaming T1 for oversized rows (one assigned GPU per job,
+supervised parallel streaming of row blocks for oversized rows (one assigned GPU per job,
 CPU opt-out), improves cache hot-read concurrency/scan cost and adds explicit
 per-change STATUS rows. Three-checkpoint fresh CPU/GPU parity passes, including
 26nonzero-rank delta views. Same-card GPU evidence contention is measured;
@@ -17,7 +20,7 @@ task's suggested message in `Zoo-Keeper/handoff/STATUS.md` (DIRECTIVES, "Git:
 agents never commit"; D10.1).
 
 **Goal:** Make each full-mode runner job write one complete model package
-(pinned manifest, T2 and T1 fingerprints, full per-layer eigenvalues and alpha
+(pinned manifest, fingerprints of full tensors and sampled row blocks, full per-layer eigenvalues and alpha
 metrics, declared-parent block deltas) while keeping GPUs busy across and within
 models, and build the zoo database from those packages, with defaults that
 already do the right thing.
@@ -43,9 +46,9 @@ pyarrow, huggingface-hub 1.11, gpustat, psutil, pytest.
 ## Decisions (2026-11-04)
 
 1. Every model eventually goes through full mode (load, GPU spectra, alpha).
-   The row-block (T1) streaming path serves preliminary studies and models too
+   The row-block streaming path serves preliminary studies and models too
    large to load.
-2. Full-mode runs write T2 plus the free T1 blocks at 128, 256 and 512 rows.
+2. Full-mode runs write full tensor fingerprints plus row-block companions at 128, 256 and 512 rows.
 3. Parent deltas use row blocks only (§6.3). The default height is 256; 512 is
    for lab models if the lab plan asks for it, because a b-row block cannot
    resolve LoRA rank ≥ b and the lab has rank-256 LoRAs. A full-matrix delta is
@@ -80,7 +83,8 @@ rows they own.
 | Likely parents cached | declared bases of the run, plus rows whose `stratum` is `lab` or `anchor` | `--cache_models CSV` adds rows | 1 |
 | `--sketch_k` | `auto`: 128 when `stratum` is `lab` or `anchor`, else 64 (§6.3) | integer | 1 |
 | `--all_experts` | `auto`: every expert for `lab` and `anchor`, else 8 seeded per layer (§5.3) | `--all_experts`, `--no-all_experts` | 1 |
-| `--also_t1_blocks` (T2 only) | `128,256,512` | `none` or a comma list | 1 |
+| `--measurement_mode` (`evidence.cli`) | `row_blocks` for fingerprint; required for batch | `row_blocks`, `full_weights` | 1 |
+| `--also_row_block_sizes` (`full_weights` only) | `128,256,512` | `none` or a comma list | 1 |
 | `--compute_device` (`evidence.cli`) | `auto`: the GPUs in `CUDA_VISIBLE_DEVICES` when it is set, else CPU | `cpu`, `cuda`, `cuda:<i>` | 2 |
 | `--workers` (`evidence.cli`) | `auto`: one per assigned GPU on CUDA; on CPU `min(8, max(1, cpu_count // 8))` | integer | 2 |
 | `cpu_threads_per_gpu` (gputracker) | `auto`: `cpu_count // physical GPUs on the node`, at least 1 | integer; `0` leaves thread variables unset | 5 |
@@ -89,7 +93,8 @@ rows they own.
 | `zoo deltas` inputs | `--zoo $ZOO_DATA/builds/current`, `--packages $ZOO_DATA/packages`, the parent cache | explicit paths | 7 |
 | GPUs per job | `auto`: from weight bytes and per-GPU memory read from gpustat, factor 1.5, up to the pool size | `--num_gpus_per_job N` fixes it | 8 |
 | Download ahead | on: one model per pool GPU, at most 64 GiB staged | `--prefetch_models 0`, `--prefetch_max_gib N` | 8 |
-| Models too large for the pool | T1-only package through the row-block path after the GPU queue | `--no-oversized_t1` | 8 |
+| `--oversized_models_evidence` | on: row-block packages after the GPU queue | `--no-oversized_models_evidence` | 8 |
+| `--oversized_models_device` | `auto`: one assigned idle GPU per job | `cpu` | 8 |
 | `--max_weight_gib` (today 6) | `auto`: the largest model the pool can load | number; `0` disables | 8 |
 | `--max_worker_cache_gib` (today 12) | `auto` per job: selected weight bytes × 1.1 + 2 GiB | number; `0` disables | 8 |
 | `--max_worker_ram_gib` (today 16) | `auto` per job: `max(16, 0.5 × weight GiB + 4)` (initial rule; tune in Task 9) | number; `0` disables | 8 |
@@ -109,9 +114,12 @@ Owner approved XF subject to checking fit with the practical 50k–100k+ model z
 and querying goal. Keep the frozen identities, stored-dtype hashes, nested
 sketches, reproducible row coordinates, explicit coverage and separate measured
 scores/predictions. Accept additive packages, layers and pair-delta addenda.
-Bump evidence1→2 and zoo0→1; numerical algorithms, tensor layouts and existing
-table columns stay unchanged. New pair files have their own version1 marker.
-Legacy readers remain available; current query clients require a rebuilt zoo1.
+Historical 2026-11-04 migration: evidence 1→2 and zoo 0→1, with numerical
+algorithms and tensor layouts unchanged. Pair files have their own version 1
+marker. The 2026-11-05 naming migration writes evidence version 3 and zoo version 2.
+Evidence readers accept versions 1/2/3 and zoo readers accept 0/1/2; legacy
+numbered values and columns translate at those boundaries. Current model columns
+are `row_block_fingerprint`, `full_weight_fingerprint` and `full_weight_spectra`.
 
 This is a suitable evidence foundation, not proof of 100k query scalability or
 performance prediction. [Model Zoos (NeurIPS2022)](https://arxiv.org/abs/2209.14764)
@@ -134,22 +142,25 @@ it does not introduce an unvalidated learned index or new inference claims.
 Owner-requested workflow amendment: consolidate equivalent tests and use one
 focused regression run per substantial batch. One final batch review, no
 per-task review loop or repeated full-suite runs. Task8 uses the existing
-fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
+fingerprint API directly for oversized-model row-block extraction instead of wrapping evidence.cli.
 
 ## Global Constraints
 
 - `net_esd/` is not modified. `compute_esd_for_weight` numerics stay at
   `NUMERICS_VERSION` 7; `FORMAT_VERSION` is unchanged.
 - Sketch spec unchanged (§6.3): seed 20261028; k = 64 (128 for lab and
-  anchors); T1 block b = 256 starting at `min((rows−256)//2, 1920)`; 8 seeded
-  experts per layer at T1; sketches stored in fp32.
+  anchors); row-block height b = 256 starting at `min((rows−256)//2, 1920)`; 8 seeded
+  experts per layer for row-block measurements; sketches stored in fp32.
 - Delta procedure unchanged (§6.3): `identical` when every element is
   bit-identical; `below_floor` when more than half are; otherwise Sinkhorn
   biwhitening (50 steps), threshold `1.1·(√rows + √cols)`, gap confidence at a
   ratio ≥ 1.5.
-- Frozen names: `<safe>.manifest.json`, `<safe>.<tier>.fingerprint.safetensors`
-  and `<safe>.t2.spectra.h5`, with `safe = safe_filename(f"{repo_id}@{revision}")`.
-  The T2 fingerprint is published last as the completion marker.
+- Current names: `<safe>.manifest.json`, `<safe>.row_blocks.fingerprint.safetensors`,
+  `<safe>.row_blocks_128.fingerprint.safetensors`, `<safe>.row_blocks_512.fingerprint.safetensors`,
+  `<safe>.full_weights.fingerprint.safetensors` and `<safe>.full_weights.spectra.h5`,
+  with `safe = safe_filename(f"{repo_id}@{revision}")`. Generic `tier` metadata
+  uses `metadata_only`, `row_blocks` or `full_weights` as appropriate.
+  The full-weight fingerprint is published last as the completion marker.
 - Devices: `auto` uses GPUs only when `CUDA_VISIBLE_DEVICES` assigns them, so a
   plain command never takes a shared node's GPUs. An explicit or assigned CUDA
   device that does not work is an error, never a silent CPU fallback.
@@ -161,13 +172,13 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 - Runs (DIRECTIVES D4.1): agents may run jobs that read at most 100 models'
   weights and finish within 2 hours; the person launches anything larger,
   listed under "Runs waiting for a person" in `STATUS.md`. Use the collector's
-  idle-GPU checks, keep caches bounded and delete T2 scratch after each model
+  idle-GPU checks, keep caches bounded and delete full-weight scratch after each model
   (D4.4).
 - These interface changes need approval at the fingerprint-format freeze (XF,
   due 2026-11-06) and a `STATUS.md` change-log row each: the package layout; the
   per-pair delta file; the `layers` table; the `not_computed` and
   `parent_unavailable` delta statuses; the `/layers/spectrum_source` dataset in
-  T2 spectra files.
+  full-weight spectra files.
 
 ## Review Focus
 
@@ -214,7 +225,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   (`_parser`, `main`, `_batch_job`)
 - Test: `evidence/tests/test_block_cache.py`, `evidence/tests/test_fingerprint.py`,
   `evidence/tests/test_cli.py`
-- Docs: `docs/operations/evidence.md` (the "Measure T2" command becomes the
+- Docs: `docs/operations/evidence.md` (the "Measure full-weight" command becomes the
   plain default command; cache notes)
 
 **Interfaces:**
@@ -227,21 +238,21 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 - Produces: `fingerprint_model(..., parent_cache: BlockCache | Path | None = None, delta_blocks: tuple[int, ...] = (ROW_BLOCK,), full_delta: bool = False, cache_self: bool = False)`.
   A `Path` is wrapped in a `BlockCache` with the 64 GiB default budget, so
   existing callers keep working. Deltas are computed only for measured heights
-  listed in `delta_blocks`. The full-matrix T2 record gets delta status
+  listed in `delta_blocks`. The full tensor record gets delta status
   `not_computed` unless `full_delta`. `cache_self` writes this model's
   `delta_blocks` rows to the cache.
 - Produces: the `batch` defaults and opt-outs in the Defaults table rows owned
   by Task 1 (`--with_parent/--no-with_parent`, `--delta_blocks`, `--full_delta`,
   `--parent_cache`, `--parent_cache_max_gib`, `--no-parent_cache`,
   `--cache_models`, `--sketch_k auto`, `--all_experts/--no-all_experts` with
-  `auto`, `--also_t1_blocks`). The `auto` rules read the models CSV `stratum`
+  `auto`, `--also_row_block_sizes`). The `auto` rules read the models CSV `stratum`
   column when present; without it, rows get the census values.
 
 - [ ] **Step 1: Write the failing tests**
-  - `test_t2_with_parent_has_no_full_matrix_delta`: every T2 record's
-    `delta_status` is `not_computed`; the 256-row T1 file has `ok`,
+  - `test_full_weights_with_parent_has_no_full_matrix_delta`: every full tensor record's
+    `delta_status` is `not_computed`; the 256-row fingerprint file has `ok`,
     `below_floor` or `identical`.
-  - `test_t2_parent_reads_only_row_blocks`: with a counting fake reader, parent
+  - `test_full_weights_parent_reads_only_row_blocks`: with a counting fake reader, parent
     bytes read ≤ the sum over views of `256 × cols × itemsize`, plus headers.
   - `test_parent_cache_holds_stored_dtype_row_blocks_only`: for a bf16 parent,
     cache bytes equal its 256-row blocks at 2 bytes per element.
@@ -254,15 +265,15 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
     `get` returns the correct block or `None`).
   - `test_batch_defaults_match_target`: parsed defaults give `with_parent`
     true, `delta_blocks == (256,)`, the cache under `$ZOO_DATA`, and
-    `also_t1_blocks == (128, 256, 512)` for T2 and `()` for T1.
+    `also_row_block_sizes == (128, 256, 512)` for `full_weights` and `()` for `row_blocks`.
   - `test_batch_auto_sketch_k_and_experts_follow_stratum`: `lab` and `anchor`
     rows get k = 128 and every expert; other rows get 64 and 8 seeded experts.
   - `test_opt_outs_reproduce_previous_batch_outputs`: `--no-with_parent
-    --no-parent_cache --sketch_k 64 --also_t1_blocks none` on the existing
+    --no-parent_cache --sketch_k 64 --also_row_block_sizes none` on the existing
     fixtures gives byte-identical files to today's defaults.
 - [ ] **Step 2:** Run `python -m pytest evidence/tests -q`. Expected: the new
   tests FAIL; existing tests pass.
-- [ ] **Step 3:** Implement. In both the prefetched and sequential T2 paths,
+- [ ] **Step 3:** Implement. In both the prefetched and sequential full-weight paths,
   stop calling `_parent_delta` and writing the cache at the full-matrix height;
   parent prefetch loads only the parent's row blocks.
 - [ ] **Step 4:** Run `python -m pytest evidence/tests -q`. Expected: all PASS.
@@ -272,7 +283,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 ### Task 2: Row-block measurement on GPUs with automatic devices
 
 **Files:**
-- Modify: `evidence/fingerprint.py` (T1 path of `fingerprint_model`),
+- Modify: `evidence/fingerprint.py` (row-block path of `fingerprint_model`),
   `evidence/delta.py` (`_compute_device` accepts `auto`), `evidence/cli.py`
   (`_init_worker`, `_run_many`, `--compute_device` and `--workers` defaults)
 - Test: `evidence/tests/test_fingerprint.py`, `evidence/tests/test_cli.py`,
@@ -281,8 +292,8 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 
 **Interfaces:**
 - Consumes: Task 1's `fingerprint_model` signature.
-- Produces: T1 with a CUDA device computes sketches, block spectra and deltas
-  on that device; block hashes still come from host bytes. On CUDA, T1 reads
+- Produces: row-block measurement with CUDA computes sketches, block spectra and
+  deltas on that device; block hashes still come from host bytes. On CUDA, it reads
   the next row blocks ahead with `SourcePrefetch` (window 2, bounded by
   `prefetch_bytes`).
 - Produces: `--compute_device auto` (default) resolves to the GPUs in
@@ -292,19 +303,19 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   Defaults table.
 
 - [ ] **Step 1: Write the failing tests**
-  - `test_t1_cuda_moves_sketch_spectrum_and_delta_to_device` (monkeypatched
+  - `test_row_blocks_cuda_moves_sketch_spectrum_and_delta_to_device` (monkeypatched
     CUDA, as in the existing device tests).
-  - `test_t1_cpu_is_byte_identical` (existing fixtures with `--compute_device cpu`).
+  - `test_row_blocks_cpu_is_byte_identical` (existing fixtures with `--compute_device cpu`).
   - `test_auto_uses_assigned_gpus_only` and
     `test_auto_without_visible_devices_uses_cpu` (Review Focus 5).
   - `test_assigned_devices_without_working_cuda_is_an_error`.
   - `test_workers_auto_spreads_over_assigned_gpus` (two visible devices: four
     workers, two per device) and `test_workers_auto_on_cpu`.
-  - `test_t1_prefetch_never_holds_more_than_window_groups`.
+  - `test_row_blocks_prefetch_never_holds_more_than_window_groups`.
 - [ ] **Step 2:** Run `python -m pytest evidence/tests -q`. Expected: the new
   tests FAIL.
 - [ ] **Step 3:** Implement: move each row block and its factors to the compute
-  device before `_Records.add`, as the T2 companions already do.
+  device before `_Records.add`, as the full-weight companions already do.
 - [ ] **Step 4:** Run `python -m pytest evidence/tests -q`. Expected: all PASS.
 - [ ] **Step 5:** Document the device rule. Record the suggested message
   `perf(evidence): GPU row blocks and automatic devices`.
@@ -328,20 +339,20 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   `RemoteFile.local_path: str | None = None`); a local hit needs no token.
   Missing files use today's HTTP path. Pins stay Hub commits.
 - Produces: `fingerprint_model(..., write_spectra: bool = True)`. With `False`,
-  T2 writes its T1 companions and stages the T2 fingerprint unpublished.
-  `publish_t2(out_dir: Path, manifest: dict, results: list[tuple[str, dict]], measurement: dict) -> Path`
-  writes `<safe>.t2.spectra.h5` in the collector layout, with a
+  `full_weights` writes its row-block companions and stages the full-weight fingerprint unpublished.
+  `publish_full_weight_spectra(out_dir: Path, manifest: dict, results: list[tuple[str, dict]], measurement: dict) -> Path`
+  writes `<safe>.full_weights.spectra.h5` in the collector layout, with a
   `/layers/spectrum_source` string dataset (`runner` or `second_round`) and the
-  worker's measurement config, then publishes the T2 fingerprint.
-- Produces: `EvidenceSidecar(manifest: dict, out_dir: Path, *, parent: dict | None = None, block_cache: BlockCache | None = None, cache_self: bool = False, device: str = "cpu", max_inflight_bytes: int = 2 * 1024**3, sketch_k: int = 64, all_experts: bool = False, also_t1_blocks: tuple[int, ...] = (128, 256, 512))`:
-  - `start() -> None` runs the T2 pass (`write_spectra=False`,
+  worker's measurement config, then publishes the full-weight fingerprint.
+- Produces: `EvidenceSidecar(manifest: dict, out_dir: Path, *, parent: dict | None = None, block_cache: BlockCache | None = None, cache_self: bool = False, device: str = "cpu", max_inflight_bytes: int = 2 * 1024**3, sketch_k: int = 64, all_experts: bool = False, also_row_block_sizes: tuple[int, ...] = (128, 256, 512))`:
+  - `start() -> None` runs the full-weight pass (`write_spectra=False`,
     `HubReader(local_cache=True)`) on one background thread.
   - `finish(esd: dict[str, dict], loaded_block: Callable[[str, tuple[int, int]], torch.Tensor | None], measure: Callable[[list[tuple[str, torch.Tensor]]], dict[str, dict]], measurement: dict) -> dict`
     waits for the pass. It maps each evidence view to a runner result by stored
     tensor key (`module_name.weight_attribute`, whole-weight results with equal
     shape only). It reuses that result only if `loaded_block` equals the stored
     256-row block bit for bit, sends the remaining views to `measure`, calls
-    `publish_t2`, and returns the counts `reused`, `measured` and `gaps`.
+    `publish_full_weight_spectra`, and returns the counts `reused`, `measured` and `gaps`.
   - `cancel() -> None` stops the pass and removes staged files.
 
 - [x] **Step 1: Write the failing tests**
@@ -349,13 +360,13 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
     `test_local_cache_hit_needs_no_token` and
     `test_local_cache_falls_back_to_http_for_missing_files`.
   - `test_manifest_from_local_download_matches_remote_manifest`.
-  - `test_sidecar_outputs_match_standalone_t2`: on the tiny checkpoint, a
+  - `test_sidecar_outputs_match_standalone_full_weights`: on the tiny checkpoint, a
     sidecar whose `measure` calls `compute_esd_for_weight` produces the same
     fingerprints and spectra as today's `fingerprint_model`.
   - `test_finish_reuses_runner_spectra_for_matching_views`: `reused` equals the
     number of views and `measure` is not called.
   - `test_finish_remeasures_views_whose_loaded_block_differs` (Review Focus 1).
-  - `test_t2_marker_published_after_spectra` and `test_cancel_publishes_nothing`.
+  - `test_full_weights_marker_published_after_spectra` and `test_cancel_publishes_nothing`.
 - [x] **Step 2:** Run `python -m pytest evidence/tests -q`. Expected: the new
   tests FAIL.
 - [x] **Step 3:** Implement `evidence/sidecar.py` and the reader, manifest and
@@ -398,7 +409,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   `sidecar.finish(...)`, then stage `save` (as today). In CPU-only runs (no CUDA,
   or `--device_map cpu`), the sidecar starts after ESD. Models that fall back to
   checkpoint analysis record `evidence: skipped_checkpoint_fallback`.
-- Completion requires the CSV/H5 pair and `<safe>.t2.fingerprint.safetensors`
+- Completion requires the CSV/H5 pair and `<safe>.full_weights.fingerprint.safetensors`
   (with `--no-evidence`, the pair alone, as today). A model with the pair but no
   evidence reruns with `--evidence_only`: it loads the model, skips ESD and
   reuses `metrics/*.h5`.
@@ -406,7 +417,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
 - [x] **Step 1: Write the failing tests**
   - `test_runner_defaults_enable_evidence` and
     `test_plain_worker_run_writes_package_files`: with no extra flags, a tiny
-    model gets the manifest; t2, t1, t1b128 and t1b512 fingerprints; and the
+    model gets the manifest; full_weights, row_blocks, row_blocks_128 and row_blocks_512 fingerprints; and the
     spectra file, with `reused` equal to the matched views.
   - `test_no_evidence_outputs_unchanged`: with `--no-evidence`, the CSV/H5
     bytes equal today's.
@@ -416,7 +427,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
     (Review Focus 2).
   - `test_interrupt_in_fingerprint_stage_publishes_nothing` (Review Focus 3).
   - `test_checkpoint_mode_turns_evidence_off_with_notice`,
-    `test_completion_requires_t2_marker_with_evidence` and
+    `test_completion_requires_full_weights_marker_with_evidence` and
     `test_prepare_writes_manifests_for_models_and_declared_bases`.
 - [x] **Step 2:** Run `python -m pytest esd_experiment/tests -q`. Expected: the
   new tests FAIL; existing tests pass after updating any that assumed evidence
@@ -481,11 +492,11 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   `NUMERICS_VERSION`, `FORMAT_VERSION` and `EVIDENCE_VERSION`. Contents: the
   frozen evidence files, `esd/stats.csv`, `esd/metrics.h5`, an optional
   `deltas/` folder, and `package.json` with `model_key`, `repo_id`, `revision`,
-  `kind` (`full` or `t1_only`), `conventions_id`, `conventions`, `files`
+  `kind` (`full` or `row_blocks_only`), `conventions_id`, `conventions`, `files`
   (name → sha256), `complete`, `evidence` (reused, measured, gaps),
-  `source_run` and `created`. A `t1_only` package (oversized models,
-  preliminary studies) holds the manifest and T1 fingerprints only and is
-  complete without `esd/` or T2 files.
+  `source_run` and `created`. A `row_blocks_only` package (oversized models,
+  preliminary studies) holds the manifest and row-block fingerprints only and is
+  complete without `esd/` or full-weight files.
 - Produces: `publish_package(run_dir: Path, model_id: str, packages_root: Path, data_root: Path) -> Path | None`
   (used by the worker after `save`) and
   `publish_packages(runs: list[Path], packages_root: Path, data_root: Path) -> list[Path]`
@@ -508,7 +519,7 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   `test_publish_is_idempotent`,
   `test_publish_never_overwrites_and_separates_conventions`,
   `test_publish_skips_incomplete_models`,
-  `test_publish_t1_only_package_without_esd_files`,
+  `test_publish_row_blocks_only_package_without_esd_files`,
   `test_worker_publishes_package_by_default`,
   `test_no_publish_keeps_run_folder_only`,
   `test_build_without_arguments_uses_packages_and_current_conventions`,
@@ -598,15 +609,19 @@ fingerprint API directly for oversized T1 instead of wrapping evidence.cli.
   failed prefetch leaves the worker to download, as today.
 - Produces: oversized models go to `<output_dir>/oversized_models.csv` with
   reason `too_large_for_full_mode`. After the GPU queue drains, they are
-  measured with `evidence.cli batch --tier t1` and published with Task 6's
-  `publish_package` as `t1_only` packages, unless `--no-oversized_t1`.
+  measured by supervised `oversized_model_worker.py` processes through the
+  fingerprint API (`row_blocks`) and published with Task 6's `publish_package`
+  as `row_blocks_only` packages, unless `--no-oversized_models_evidence`.
+  `run_oversized_models_evidence_jobs` schedules these processes;
+  `extract_row_block_evidence` extracts and publishes each model. Record
+  `evidence_status` and `evidence_error` separately from full ESD outcomes.
 
 - [x] **Step 1: Write the failing tests:**
   `test_job_resources_auto_from_weight_bytes`,
   `test_explicit_limits_apply_to_every_job`,
   `test_checkpoint_mode_sized_to_one_gpu`,
   `test_per_job_limits_override_global_config`,
-  `test_oversized_models_listed_and_get_t1_packages`,
+  `test_oversized_models_listed_and_get_row_blocks_packages`,
   `test_prefetch_on_by_default_within_byte_budget`,
   `test_prefetch_zero_downloads_in_worker_as_today`,
   `test_prefetched_cache_owned_and_removed_after_exit`,
@@ -637,15 +652,15 @@ Each run stays within D4.1 or is handed to the person through `STATUS.md`.
 - [ ] **Parity on real models:** `openai-community/gpt2`,
   `HuggingFaceTB/SmolLM2-135M` and the Smol135 dialogue LoRA r8 from the zoo
   guide's worked queries, through the runner and through
-  `python -m evidence.cli batch --tier t2`. Pass: identical block hashes,
-  sketches, T1 spectra and delta statuses and ranks; reused T2 spectra within a
+  `python -m evidence.cli batch --measurement_mode full_weights`. Pass: identical block hashes,
+  sketches, row-block spectra and delta statuses and ranks; reused full-weight spectra within a
   relative 1e-4 of each view's largest eigenvalue.
 - [ ] **Throughput:** the same 20 small models on 2 GPUs, with evidence on and
   with `--no-evidence`, sampling `nvidia-smi` every 5 s. Proposed pass (the
   owner may adjust): evidence adds at most 10% wall time, and the GPU busy
   fraction is no lower than without evidence. Use the measurements to confirm
   or adjust the `auto` RAM, cache and timeout rules.
-- [ ] **Row blocks, CPU against GPU:** the 97-model T1 pilot with
+- [ ] **Row blocks, CPU against GPU:** the 97-model row-block pilot with
   `--compute_device cpu` and with the pilot GPUs assigned through
   `CUDA_VISIBLE_DEVICES`. Report wall time, bytes read and GPU busy fraction;
   pass on the parity criteria above.
@@ -656,7 +671,7 @@ Each run stays within D4.1 or is handed to the person through `STATUS.md`.
 
 Owner authorized only if worthwhile (2026-11-04). Profile identified0.33–0.43s
 for26row-at-a-time HDF5 spectrum writes. Preserve the existing streaming writer
-and add an empty-file bulk writer used only by publish_t2 after complete-bundle
+and add an empty-file bulk writer used only by publish_full_weight_spectra after complete-bundle
 validation. Formats/numerics/coverage/atomic publication unchanged. Verify exact
 streaming/bulk dataset parity (including ragged spectra and missing metrics),
 sidecar validation/rollback tests, and before/after timings. Retain only with a
@@ -673,12 +688,12 @@ alone meets the10%GPU-overhead target. See the benchmark report for raw samples.
 
 - Oversized rows use independent WorkerJobs with the existing process supervisor,
   configured concurrency, RAM/cache caps, heartbeat/stage limits and private-cache
-  ownership. Streaming GPU by default, `--oversized_device cpu` opt-out. No full
+  ownership. Streaming GPU by default, `--oversized_models_device cpu` opt-out. No full
   checkpoint prefetch. The earlier inline-CPU amendment was an implementation
   simplification that lost parallelism/supervision; this corrects it.
-- T1 package settings record the resolved T1 device, independent of the full-mode
+- Row-block package settings record the resolved measurement device, independent of the full-mode
   `--evidence_device` flag. Default build accepts current full CPU-sidecar plus
-  CPU/GPU T1 profiles; it prefers full, then CPU T1 when both T1 variants exist.
+  CPU/GPU row-block profiles; it prefers full, then CPU row-block when both row-block variants exist.
 - Parent-cache reads use complete atomic inodes without the writer lock; stale
   filesystem errors are cache misses. Writers use one stat snapshot and avoid
   sorting below the cap. Global byte cap/LRU eviction remain; insertions still
@@ -700,13 +715,13 @@ alone meets the10%GPU-overhead target. See the benchmark report for raw samples.
 
 ### Readability pass (owner request, Nov5)
 
-Operational names describe purpose: `row_block_worker.py`,
-`run_oversized_evidence_jobs` (supervision), and `extract_row_block_evidence`
+Operational names describe purpose: `oversized_model_worker.py`,
+`run_oversized_models_evidence_jobs` (supervision), and `extract_row_block_evidence`
 (extraction/publication). Request/result paths, model options and outcomes have
-explicit local names. Existing artifact tiers, CLI flags and CSV fields retain
-their spelling. Root AGENTS.md records these clarity conventions. Rename and
-subprocess integration tests cover all updated call sites; no numerical or
-format changes.
+explicit local names. The initial readability pass preserved interfaces. The
+subsequent owner-requested naming migration uses descriptive CLI flags, filenames,
+CSV fields and evidence values; legacy readers preserve access to historical
+artifacts. Root AGENTS.md records these clarity conventions. Numerics remain unchanged.
 
 ### Bounded scaling follow-up (owner request, Nov5)
 

@@ -27,10 +27,10 @@ def test_selected_views_are_common_not_tall_and_evenly_spaced():
     rows = []
     for model in range(10):
         for view in range(40):
-            rows.append(dict(model_key=str(model), name=f"layer.{view:02d}", n_rows=512, tier="t1"))
-        rows.append(dict(model_key=str(model), name="embedding", n_rows=50000, tier="t1"))
+            rows.append(dict(model_key=str(model), name=f"layer.{view:02d}", n_rows=512, tier="row_blocks"))
+        rows.append(dict(model_key=str(model), name="embedding", n_rows=50000, tier="row_blocks"))
         if model < 8:
-            rows.append(dict(model_key=str(model), name="rare", n_rows=512, tier="t1"))
+            rows.append(dict(model_key=str(model), name="rare", n_rows=512, tier="row_blocks"))
     chosen = select_retrieval_views(pd.DataFrame(rows))
     assert len(chosen) == 32 and chosen == sorted(chosen)
     assert chosen[0] == "layer.00" and chosen[-1] == "layer.39"
@@ -108,7 +108,7 @@ def test_retrieval_rejects_mismatched_fingerprint_settings(tables, universe, tmp
 
     models = tables["models"].copy(deep=True)
     row_index = models.index[models.model_key == "org/parent@" + SHA1][0]
-    source = universe.root / models.loc[row_index, "fingerprint_t1"]
+    source = universe.root / models.loc[row_index, "row_block_fingerprint"]
     with safe_open(source, framework="numpy") as handle:
         metadata = dict(handle.metadata())
         arrays = {name: handle.get_tensor(name) for name in handle.keys()}
@@ -118,14 +118,14 @@ def test_retrieval_rejects_mismatched_fingerprint_settings(tables, universe, tmp
         metadata["sketch_seed"] = json.dumps(json.loads(metadata["sketch_seed"]) + 1)
     else:
         metadata["row_block"] = json.dumps(128)
-    changed = universe.root / "changed.t1.fingerprint.safetensors"
+    changed = universe.root / "changed.row_blocks.fingerprint.safetensors"
     save_file(arrays, changed, metadata=metadata)
-    models.loc[row_index, "fingerprint_t1"] = changed.relative_to(universe.root).as_posix()
+    models.loc[row_index, "row_block_fingerprint"] = changed.relative_to(universe.root).as_posix()
     with pytest.raises(ValueError, match="identity|settings|seed|row_block"):
         build_retrieval(tmp_path / "invalid", models, tables["views"], universe.root)
 
 
-def test_view_prevalence_counts_empty_t1_models(tables, universe, tmp_path):
+def test_view_prevalence_counts_empty_row_blocks_models(tables, universe, tmp_path):
     from evidence.fingerprint import fingerprint_tensors
 
     models = tables["models"].copy(deep=True)
@@ -133,16 +133,16 @@ def test_view_prevalence_counts_empty_t1_models(tables, universe, tmp_path):
     extra = []
     for index, revision in enumerate(("d" * 40, "e" * 40)):
         repo = f"org/empty-{index}"
-        path = universe.root / f"empty-{index}.t1.fingerprint.safetensors"
+        path = universe.root / f"empty-{index}.row_blocks.fingerprint.safetensors"
         fingerprint_tensors([], path, {"repo_id": repo, "revision": revision})
         extra.append(dict(template, model_key=repo + "@" + revision, repo_id=repo,
                           revision=revision, n_views=0,
-                          fingerprint_t1=path.relative_to(universe.root).as_posix()))
+                          row_block_fingerprint=path.relative_to(universe.root).as_posix()))
     models = pd.concat([models, pd.DataFrame(extra)], ignore_index=True)
     signature = template["arch_signature"]
     destination = tmp_path / "with-empty-fingerprints"
     build_retrieval(destination, models, tables["views"], universe.root)
-    # Eight measured models out of ten eligible same-signature T1 models do
+    # Eight measured models out of ten eligible same-signature row-block models do
     # not meet the90% rule, even though every observed view row has the name.
     assert not (destination / "retrieval" / f"{signature}.npy").exists()
 

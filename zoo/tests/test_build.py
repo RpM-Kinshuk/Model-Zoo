@@ -22,7 +22,7 @@ COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COL
 def test_build_writes_all_tables(built_zoo):
     t = open_tables(built_zoo)
     assert set(t) == {"models", "views", "coverage", "lineage", "scores", "predictions", "layers"}
-    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "1"
+    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "2"
     assert list((built_zoo / "retrieval").glob("*.npy"))
 
 
@@ -82,7 +82,7 @@ def test_all_empty_zoo_serializes_all_six_tables(tmp_path):
 def test_all_empty_label_maps_and_skipped_lists_serialize(tmp_path):
     manifests = tmp_path / "manifests"
     manifests.mkdir()
-    manifest = dict(repo_id="org/only", revision=SHA1, access="t0_only", declared_bases=[],
+    manifest = dict(repo_id="org/only", revision=SHA1, access="metadata_only", declared_bases=[],
                     decision=dict(labels={}, is_decision=False), tensors=[])
     (manifests / "only.manifest.json").write_text(json.dumps(manifest))
     out = build_zoo(manifests, [], tmp_path / "only", tmp_path)
@@ -95,7 +95,7 @@ def test_hub_gating_values_roundtrip_as_nullable_booleans_without_manifest_chang
     manifests.mkdir()
     values = {"auto": "auto", "manual": "manual", "true": True, "false": False, "unknown": None}
     for name, gated in values.items():
-        manifest = dict(repo_id=f"org/{name}", revision=SHA1, access="t0_only", tensors=[], gated=gated)
+        manifest = dict(repo_id=f"org/{name}", revision=SHA1, access="metadata_only", tensors=[], gated=gated)
         (manifests / f"{name}.manifest.json").write_text(json.dumps(manifest))
     before = _snapshot(manifests)
     out = build_zoo(manifests, [], tmp_path / "zoo", tmp_path)
@@ -122,7 +122,7 @@ def test_selected_input_provenance_excludes_raw_weights_and_is_deterministic(uni
     metadata = json.loads((out / "zoo.json").read_text())
     inputs = metadata["inputs"]
     files = {entry["path"]: entry["sha256"] for entry in inputs if entry["kind"] == "file"}
-    expected = list(universe.manifests.glob("*.manifest.json")) + list(universe.fingerprints.glob("*.t1.fingerprint.safetensors")) + [frame, null_path, external]
+    expected = list(universe.manifests.glob("*.manifest.json")) + list(universe.fingerprints.glob("*.row_blocks.fingerprint.safetensors")) + [frame, null_path, external]
     assert set(files) == {p.relative_to(universe.root).as_posix() for p in expected}
     for path in expected:
         assert files[path.relative_to(universe.root).as_posix()] == hashlib.sha256(path.read_bytes()).hexdigest()
