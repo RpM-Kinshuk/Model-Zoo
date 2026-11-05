@@ -293,3 +293,19 @@ python -m zoo_keeper.cli find --zoo "$ZOO_DATA/runs/track-a-roster-v2-calibratio
 skill queries exclude unverified associations. Explicit standalone evidence
 retains full spectra and has no collector ESD layer table. This internal
 snapshot does not decide G0/G1 or establish the5000-candidate retrieval gate.
+
+
+### Expanded calibrated pilot/formal snapshot (2026-11-05)
+
+`$ZOO_DATA/runs/track-a-expanded-r6-20261105/zoo` combines703distinct
+identities from the available628-model historical snapshot and approved
+formal166roster.474models have full-weight evidence; corrected current
+artifacts take precedence for identical keys. All six CLI commands pass and
+the frozen calibration is reused.24/150Raw leaderboard associations verify
+their revisions; default skill queries exclude unverified associations.
+
+`REPORT.md` and `G0-development-report.md` record the negative diagnostics:
+immediate-parent false matches8.276786/query in the small/incompletely labelled
+truth pool; median alpha difference0.427726 exceeds0.1 over24025matrix fits.
+Retain full-weight spectra. No5000-candidate,held-out parent recall,G0/G1 or
+per-query error-control claim. No new weights or measurements were needed.
