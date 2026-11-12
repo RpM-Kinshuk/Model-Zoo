@@ -198,7 +198,7 @@ unless `--retry_denied` is supplied; retries preserve resolved revision pins.
 ### 4. Write the G0 report and calibration
 
 Set `LAB_TABLES` to the directory containing the lab's `edges.csv`, `models.csv`
-and certified reference files. Track B's file handoff can be used before merge.
+and certified reference files. Use the main Zoo-Keeper lab tables and lab/REFERENCE-LABELS.md; no separate track checkout or merge is needed.
 
 ```bash
 export RUN LAB_TABLES
