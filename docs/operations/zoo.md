@@ -59,6 +59,12 @@ python -m zoo.cli build --manifests "$MANIFESTS" \
 canonical row-block and full tensor files; extra row-block heights remain
 alongside them. Multiple fingerprint directories may follow `--fingerprints`.
 
+Size/modality filters and download ordering use the selection frame's metadata.
+Supply `--frame` when building a catalog intended for those queries. Missing
+fields stay unknown and do not match a numeric or modality filter; a database
+can contain a measured model that such a filter cannot shortlist. A frame adds
+metadata, not benchmark scores or predictions.
+
 Optional inputs:
 
 | Option | Input |
