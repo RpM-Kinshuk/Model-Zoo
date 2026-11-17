@@ -18,12 +18,15 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
+import unicodedata
 from typing import Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QUERY_ROOT = PROJECT_ROOT.parent / "Zoo-Keeper"
 VERBOSE = False
+_FRAME_SIZE: os.terminal_size | None = None
 
 
 class Theme:
@@ -37,19 +40,8 @@ class Theme:
             return value
         return f"\x1b[{color}m{value}\x1b[0m"
 
-    def gradient(self, value: str) -> str:
-        if not self.enabled or len(value) < 2:
-            return value
-        palette = [(82, 220, 190), (80, 170, 255), (175, 115, 255), (255, 110, 180), (255, 194, 92)]
-        output = []
-        for index, character in enumerate(value):
-            position = index * (len(palette) - 1) / (len(value) - 1)
-            start = int(position)
-            fraction = position - start
-            left, right = palette[start], palette[min(start + 1, len(palette) - 1)]
-            red, green, blue = (round(a + (b - a) * fraction) for a, b in zip(left, right))
-            output.append(f"\x1b[38;2;{red};{green};{blue}m{character}")
-        return "".join(output) + "\x1b[0m"
+    def brand(self, value: str) -> str:
+        return self.paint(value, "38;5;73")
 
 
 THEME = Theme()
@@ -62,24 +54,37 @@ def _clear() -> None:
 
 
 def _width() -> int:
-    return max(32, min(shutil.get_terminal_size((84, 24)).columns, 120))
+    size = _FRAME_SIZE or shutil.get_terminal_size((84, 24))
+    return max(1, min(size.columns, 120))
 
 
 def _height() -> int:
-    return max(12, shutil.get_terminal_size((84, 24)).lines)
+    size = _FRAME_SIZE or shutil.get_terminal_size((84, 24))
+    return max(1, size.lines)
 
 
 def _center(text: str, width: int | None = None) -> str:
-    return text.center(width or _width())
+    width = width or _width()
+    fitted = _fit(text, width)
+    return " " * max(0, (width - _display_width(fitted)) // 2) + fitted
+
+
+def _pad(text: str, width: int) -> str:
+    fitted = _fit(text, width)
+    return fitted + " " * max(0, width - _display_width(fitted))
 
 
 def _panel(lines: Sequence[str], width: int | None = None) -> None:
     width = width or _width()
+    if width < 8:
+        for line in lines:
+            print(_fit(line, width))
+        return
+    inside_width = width - 4
     print(THEME.paint("╭" + "─" * (width - 2) + "╮", "38;5;240"))
     for line in lines:
-        wrapped = textwrap.wrap(line, width=width - 4, break_long_words=True, break_on_hyphens=False) or [""]
-        for part in wrapped:
-            print(THEME.paint("│", "38;5;240") + " " + part.ljust(width - 4) + " " + THEME.paint("│", "38;5;240"))
+        content = _pad(line, inside_width)
+        print(THEME.paint("│", "38;5;240") + " " + content + " " + THEME.paint("│", "38;5;240"))
     print(THEME.paint("╰" + "─" * (width - 2) + "╯", "38;5;240"))
 
 
@@ -261,7 +266,7 @@ def _ask(label: str, default: str = "", *, detail: str = "", technical: str = ""
     if detail:
         print(THEME.paint("  ↳ " + detail, "38;5;245"))
     if VERBOSE and technical:
-        print(THEME.paint("  ◦ " + technical, "38;5;109"))
+        print(THEME.paint("  ◦ " + technical, "38;5;67"))
     suffix = f" [{default}]" if default else ""
     answer = _read_input(f"{THEME.paint(label, '38;5;252')}{suffix}: ", completion).strip()
     return answer or default
@@ -273,7 +278,7 @@ def _ask_choice(label: str, choices: Sequence[str], default: str, *, detail: str
                       completion=choices).casefold()
         if answer in choices:
             return answer
-        print(THEME.paint("Choose one of: " + ", ".join(choices), "38;5;203"))
+        print(THEME.paint("Choose one of: " + ", ".join(choices), "38;5;167"))
 
 
 def _ask_nonnegative(label: str, default: str, *, allow_auto: bool = True, integer: bool = False,
@@ -291,7 +296,7 @@ def _ask_nonnegative(label: str, default: str, *, allow_auto: bool = True, integ
         if number >= 0 and (integer or math.isfinite(number)):
             return answer
         print(THEME.paint("Enter a finite number greater than or equal to zero" +
-                          (", or auto." if allow_auto else "."), "38;5;203"))
+                          (", or auto." if allow_auto else "."), "38;5;167"))
 
 
 def _ask_integer(label: str, default: str, minimum: int = 0, *,
@@ -305,7 +310,7 @@ def _ask_integer(label: str, default: str, minimum: int = 0, *,
             number = minimum - 1
         if number >= minimum:
             return str(number)
-        print(THEME.paint(f"Enter an integer greater than or equal to {minimum}.", "38;5;203"))
+        print(THEME.paint(f"Enter an integer greater than or equal to {minimum}.", "38;5;167"))
 
 
 def _ask_path(label: str, default: str = "", *, detail: str = "", technical: str = "") -> Path:
@@ -315,7 +320,7 @@ def _ask_path(label: str, default: str = "", *, detail: str = "", technical: str
         value = _ask(label, default, detail=detail, technical=technical, completion="path")
         if value:
             return _path(value)
-        print(THEME.paint("Please enter a path.", "38;5;203"))
+        print(THEME.paint("Please enter a path.", "38;5;167"))
 
 
 def _confirm(label: str = "Start this workflow?", *, detail: str = "", technical: str = "") -> bool:
@@ -354,10 +359,10 @@ def _run(command: Sequence[str], *, root: Path | None = None, cwd: Path = PROJEC
     try:
         outcome = subprocess.run(list(command), cwd=cwd, env=environment, check=False)
     except FileNotFoundError as error:
-        print(THEME.paint(f"Could not start command: {error}", "38;5;203"))
+        print(THEME.paint(f"Could not start command: {error}", "38;5;167"))
         return 127
     print()
-    color = "38;5;43" if outcome.returncode == 0 else "38;5;203"
+    color = "38;5;73" if outcome.returncode == 0 else "38;5;167"
     print(THEME.paint(f"Finished with exit code {outcome.returncode}.", color))
     return outcome.returncode
 
@@ -369,11 +374,11 @@ def _data_root(current: Path | None) -> Path:
                      detail="Enter an existing artifact directory; Tab completes local paths.",
                      completion="path")
         if not value:
-            print(THEME.paint("Set ZOO_DATA or enter a data directory to continue.", "38;5;203"))
+            print(THEME.paint("Set ZOO_DATA or enter a data directory to continue.", "38;5;167"))
             continue
         root = _path(value)
         if not root.is_dir():
-            print(THEME.paint(f"Directory not found: {root}", "38;5;203"))
+            print(THEME.paint(f"Directory not found: {root}", "38;5;167"))
             continue
         return root
 
@@ -502,12 +507,14 @@ def _animated_preflight(gpu_ids: Sequence[int], root: Path | None, cache_root: P
 
     worker = threading.Thread(target=scan, name="model-zoo-preflight", daemon=True)
     worker.start()
-    frames = ("✦", "✧", "✴", "✳")
+    frames = ("·", "✧", "·", "✧")
+    colors = ("38;5;67",) * len(frames)
     frame_index = 0
     while not complete.is_set():
-        frame = frames[frame_index % len(frames)]
+        index = frame_index % len(frames)
+        frame = frames[index]
         dots = "." * (frame_index % 4)
-        sys.stdout.write("\r" + THEME.paint(f"{frame} Reading local GPU, memory, and storage status{dots}   ", "38;5;117"))
+        sys.stdout.write("\r" + THEME.paint(f"{frame} Reading local GPU, memory, and storage status{dots}   ", colors[index]))
         sys.stdout.flush()
         complete.wait(0.12)
         frame_index += 1
@@ -520,27 +527,35 @@ def _animated_preflight(gpu_ids: Sequence[int], root: Path | None, cache_root: P
 
 
 def _header(root: Path | None) -> None:
+    global _FRAME_SIZE
+    _FRAME_SIZE = shutil.get_terminal_size((84, 24))
     _clear()
     width = _width()
     height = _height()
-    brand = "✦ MODEL ZOO ✦" if width < 62 else "✦  M O D E L  Z O O  ✦"
-    subtitle = "SPECTRA · LINEAGE" if width < 62 else "WEIGHT SPECTRA   ·   FINGERPRINTS   ·   LINEAGE"
-    print(THEME.gradient(_center(brand, width)))
-    print(THEME.paint(_center(subtitle, width), "38;5;109"))
-    if height >= 30:
-        print(THEME.paint(_center("research field console  /  " + ("verbose" if VERBOSE else "guided"), width), "38;5;245"))
-    _panel(_status(root, compact=height < 30))
-    print()
+    if height < 14:
+        return
+    brand = "MODEL ZOO" if width < 32 else "✦  MODEL ZOO  ✦"
+    print(THEME.brand(_center(_fit(brand, width), width)))
+    if height >= 18 and width >= 32:
+        subtitle = "SPECTRA · LINEAGE" if width < 58 else "WEIGHT SPECTRA · FINGERPRINTS · LINEAGE"
+        print(THEME.paint(_center(_fit(subtitle, width), width), "38;5;67"))
+    if height >= 20 and width >= 32:
+        _panel(_status(root, compact=True), width)
+    elif height >= 16:
+        data_state = f"DATA · {root}" if root else "DATA · set ZOO_DATA to connect a workspace"
+        print(THEME.paint(_fit(data_state, width), "38;5;245"))
+    if height >= 20:
+        print()
 
 
 def _prepare(root: Path | None) -> None:
-    print(THEME.paint("✦  PREPARE A COLLECTION  ✦", "1;38;5;214"))
+    print(THEME.paint("PREPARE A COLLECTION", "1;38;5;73"))
     print("Resolve exact model revisions first; preparation reads metadata and needs no GPU.\n")
     models = _ask_path("Input CSV", "models.csv",
                        detail="One Hugging Face repository per row; the required column is model_id.",
                        technical="Preparation writes pinned revisions and ready/held reasons to <run>/models.csv.")
     if not models.is_file():
-        print(THEME.paint(f"Input CSV not found: {models}", "38;5;203"))
+        print(THEME.paint(f"Input CSV not found: {models}", "38;5;167"))
         return
     default_run = PROJECT_ROOT / "analysis_runs" / "phase2" / "my_run"
     run_dir = _ask_path("Run output folder", str(default_run),
@@ -566,7 +581,7 @@ def _gpu_ids() -> list[int]:
             gpu_ids = []
         if gpu_ids and all(value >= 0 for value in gpu_ids) and len(set(gpu_ids)) == len(gpu_ids):
             return gpu_ids
-        print(THEME.paint("Enter unique, nonnegative GPU IDs such as 0 1 2 3.", "38;5;203"))
+        print(THEME.paint("Enter unique, nonnegative GPU IDs such as 0 1 2 3.", "38;5;167"))
 
 
 def _cache_default() -> Path:
@@ -597,11 +612,11 @@ def _ask_stage_timeouts() -> str:
             valid = False
         if valid:
             return answer
-        print(THEME.paint("Use auto or comma-separated stage=nonnegative-seconds values.", "38;5;203"))
+        print(THEME.paint("Use auto or comma-separated stage=nonnegative-seconds values.", "38;5;167"))
 
 
 def _infrastructure(root: Path | None = None) -> None:
-    print(THEME.paint("✦  LOCAL INFRASTRUCTURE SCAN  ✦", "1;38;5;43"))
+    print(THEME.paint("LOCAL INFRASTRUCTURE SCAN", "1;38;5;73"))
     print("A read-only look at this host before scheduling work.\n")
     gpu_ids = _gpu_ids()
     cache_root = _ask_path("Worker cache location", str(_cache_default()))
@@ -609,13 +624,13 @@ def _infrastructure(root: Path | None = None) -> None:
 
 
 def _launch(root: Path | None) -> None:
-    print(THEME.paint("02  PLAN A MEASUREMENT RUN", "1;38;5;214"))
+    print(THEME.paint("PLAN A MEASUREMENT RUN", "1;38;5;73"))
     print("We’ll size the worker pool, check local capacity, then review the exact launch.\n")
     run_dir = _ask_path("Prepared run folder", str(PROJECT_ROOT / "analysis_runs" / "phase2" / "my_run"),
                         detail="This folder should contain the pinned models.csv from preparation.")
     model_list = run_dir / "models.csv"
     if not model_list.is_file():
-        print(THEME.paint(f"No prepared model list found: {model_list}", "38;5;203"))
+        print(THEME.paint(f"No prepared model list found: {model_list}", "38;5;167"))
         return
 
     profile = _ask_choice(
@@ -749,11 +764,11 @@ def _launch(root: Path | None) -> None:
 
 
 def _analyze(root: Path | None) -> None:
-    print(THEME.paint("✦  SUMMARIZE A RUN  ✦", "1;38;5;214"))
+    print(THEME.paint("SUMMARIZE A RUN", "1;38;5;73"))
     run_dir = _ask_path("Run folder", str(PROJECT_ROOT / "analysis_runs" / "phase2" / "my_run"),
                         detail="Reads run results and writes the rebuildable summary.csv index.")
     if not run_dir.is_dir():
-        print(THEME.paint(f"Run folder not found: {run_dir}", "38;5;203"))
+        print(THEME.paint(f"Run folder not found: {run_dir}", "38;5;167"))
         return
     command = [sys.executable, str(PROJECT_ROOT / "esd_experiment" / "analyze_results.py"),
                "--results_dir", str(run_dir)]
@@ -761,18 +776,18 @@ def _analyze(root: Path | None) -> None:
 
 
 def _publish(root: Path | None) -> None:
-    print(THEME.paint("✦  PUBLISH COMPLETED EVIDENCE  ✦", "1;38;5;214"))
+    print(THEME.paint("PUBLISH COMPLETED EVIDENCE", "1;38;5;73"))
     print("Copy completed evidence into immutable, content-checked model packages.\n")
     run_text = _ask("Completed run folders",
                     detail="Use semicolons between paths; Tab completes the path currently being entered.",
                     completion="multi_path")
     runs = [_path(value.strip()) for value in run_text.split(";") if value.strip()]
     if not runs:
-        print(THEME.paint("Enter at least one run folder.", "38;5;203"))
+        print(THEME.paint("Enter at least one run folder.", "38;5;167"))
         return
     missing = [run for run in runs if not run.is_dir()]
     if missing:
-        print(THEME.paint("Run folder not found: " + ", ".join(map(str, missing)), "38;5;203"))
+        print(THEME.paint("Run folder not found: " + ", ".join(map(str, missing)), "38;5;167"))
         return
     selected_root = _data_root(root)
     command = [sys.executable, "-m", "zoo.cli", "publish", "--runs", *map(str, runs),
@@ -781,7 +796,7 @@ def _publish(root: Path | None) -> None:
 
 
 def _build(root: Path | None) -> None:
-    print(THEME.paint("✦  BUILD / REFRESH THE ZOO  ✦", "1;38;5;214"))
+    print(THEME.paint("BUILD / REFRESH THE ZOO", "1;38;5;73"))
     print("Assemble compatible packages into a new offline snapshot.\n")
     selected_root = _data_root(root)
     command = [sys.executable, "-m", "zoo.cli", "build", "--data_root", str(selected_root)]
@@ -789,7 +804,7 @@ def _build(root: Path | None) -> None:
 
 
 def _deltas(root: Path | None) -> None:
-    print(THEME.paint("✦  MEASURE MODEL DELTAS  ✦", "1;38;5;214"))
+    print(THEME.paint("MEASURE MODEL DELTAS", "1;38;5;73"))
     print("Compare detected lineage candidates using published row-block evidence.\n")
     selected_root = _data_root(root)
     workers = _ask("Workers", "auto", detail="Automatic worker sizing follows the detected candidate set.",
@@ -802,7 +817,7 @@ def _deltas(root: Path | None) -> None:
 
 
 def _query(root: Path | None) -> None:
-    print(THEME.paint("07  EXPLORE THE ZOO", "1;38;5;214"))
+    print(THEME.paint("EXPLORE THE ZOO", "1;38;5;73"))
     query_root = QUERY_ROOT if QUERY_ROOT.is_dir() else PROJECT_ROOT
     try:
         available = importlib.util.find_spec("zoo_keeper") is not None
@@ -839,7 +854,7 @@ def _query(root: Path | None) -> None:
         command = [sys.executable, "-m", "zoo_keeper.cli", "similar", model,
                    "-k", count, "--zoo", str(zoo_dir)]
     else:
-        print(THEME.paint("Choose 1 or 2.", "38;5;203"))
+        print(THEME.paint("Choose 1 or 2.", "38;5;167"))
         return
     _run(command, root=selected_root, cwd=query_root)
 
@@ -853,69 +868,252 @@ def _pause() -> None:
 
 def _menu_section(label: str) -> None:
     width = _width()
-    rule = "─" * max(4, width - len(label) - 8)
-    print(THEME.paint(f"  ── {label} {rule} ✧", "38;5;43"))
+    color = "38;5;67" if "PUBLISH" in label else "38;5;73"
+    title = f" {label} "
+    rule_width = max(0, width - _display_width(title))
+    print(THEME.paint(_fit(title + "─" * rule_width, width), color))
 
 
-def _menu_card(item: tuple[str, str, str], width: int, show_detail: bool) -> list[str]:
+_MENU_COLORS = {
+    "1": "38;5;73", "2": "38;5;73", "3": "38;5;73", "4": "38;5;67",
+    "5": "38;5;67", "6": "38;5;67", "7": "38;5;73", "8": "38;5;73",
+}
+
+
+def _display_width(text: str) -> int:
+    return sum(0 if unicodedata.combining(character) else
+               2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+               for character in text)
+
+
+def _fit(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if _display_width(text) <= width:
+        return text
+    output, used = [], 0
+    for character in text:
+        character_width = 0 if unicodedata.combining(character) else (
+            2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1)
+        if used + character_width > width - 1:
+            break
+        output.append(character)
+        used += character_width
+    return "".join(output) + "…"
+
+
+def _menu_card(item: tuple[str, str, str], width: int, show_detail: bool) -> list[tuple[str, str]]:
     number, title, description = item
-    lines = textwrap.wrap(f"[{number}]  {title}", width=width, break_long_words=False) or [title]
+    accent = _MENU_COLORS[number]
+    if width < 8:
+        return [(_fit(f"{number} {title}", width), accent)]
+    inside_width = width - 4
+    top = "╭" + "─" * (width - 2) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
+    title_line = "│ " + _pad(f"{number.zfill(2)}  {title}", inside_width) + " │"
+    lines = [(top, accent), (title_line, f"1;{accent}")]
     if show_detail:
-        lines.extend("· " + line for line in textwrap.wrap(description, width=max(16, width - 2),
-                                                              break_long_words=False))
+        detail_line = "│ " + _pad(description, inside_width) + " │"
+        lines.append((detail_line, "38;5;245"))
+    lines.append((bottom, accent))
     return lines
 
 
 def _menu_group(label: str, items: Sequence[tuple[str, str, str]]) -> None:
     width, height = _width(), _height()
     _menu_section(label)
-    horizontal = width >= 96 and height >= 28
-    show_detail = height >= (30 if horizontal else 36)
+    horizontal = width >= 92 and height >= 28
+    full_cards = width >= 64 and height >= 40
+    show_detail = height >= 44
     if horizontal:
-        cell_width = (width - 5) // 2
+        cell_width = (width - 2) // 2
+        trailing_space = " " * (width - cell_width * 2 - 2)
         for start in range(0, len(items), 2):
             left = _menu_card(items[start], cell_width, show_detail)
             right = _menu_card(items[start + 1], cell_width, show_detail) if start + 1 < len(items) else []
             for index in range(max(len(left), len(right))):
-                left_line = left[index] if index < len(left) else ""
-                right_line = right[index] if index < len(right) else ""
-                left_color = "38;5;245" if left_line.startswith("·") else "1;38;5;252"
-                right_color = "38;5;245" if right_line.startswith("·") else "1;38;5;252"
-                left_line = THEME.paint(left_line.ljust(cell_width), left_color)
-                right_line = THEME.paint(right_line, right_color)
-                print("  " + left_line + THEME.paint(" │ ", "38;5;240") + right_line)
-    elif width >= 72:
-        description_width = width - 38
+                left_line, left_color = left[index] if index < len(left) else (" " * cell_width, "38;5;240")
+                right_line, right_color = right[index] if index < len(right) else (" " * cell_width, "38;5;240")
+                line = THEME.paint(left_line, left_color) + "  " + THEME.paint(right_line, right_color) + trailing_space
+                print(line)
+    elif full_cards:
+        for item in items:
+            for line, color in _menu_card(item, width, show_detail):
+                print(THEME.paint(line, color))
+    elif width >= 48:
+        inner_width = width - 4
         for number, title, description in items:
-            title_cell = f"{title:<28}"
-            description_lines = textwrap.wrap(description, width=max(16, description_width),
-                                              break_long_words=False)
-            for index, line in enumerate(description_lines or [""]):
-                marker = THEME.paint(number if index == 0 else " ", "1;38;5;214")
-                label = THEME.paint(title_cell if index == 0 else " " * 28, "1;38;5;252")
-                print(f"  {marker}   {label}  {THEME.paint(line, '38;5;245')}")
+            accent = _MENU_COLORS[number]
+            content = _fit(f"{number.zfill(2)}  {title}  ·  {description}", inner_width)
+            row = "│ " + _pad(content, inner_width) + " │"
+            print(THEME.paint(row, accent))
     else:
         for number, title, description in items:
-            title_lines = textwrap.wrap(f"[{number}]  {title}", width=max(18, width - 4), break_long_words=True)
-            for line_index, line in enumerate(title_lines):
-                if line_index == 0:
-                    print("  " + THEME.paint("[" + number + "]", "1;38;5;214") +
-                          THEME.paint(line[len("[" + number + "]"):], "1;38;5;252"))
+            content = _fit(f"{number}. {title}", width)
+            print(THEME.paint(content, _MENU_COLORS[number]))
+
+
+def _draw_home(root: Path | None) -> None:
+    _header(root)
+    groups = [
+        ("COLLECT & MEASURE", [
+            ("1", "Prepare a collection", "Pin revisions · review ready/held rows"),
+            ("2", "Plan a measurement run", "Plan resources · review launch"),
+            ("3", "Summarize a run", "Refresh summary.csv"),
+        ]),
+        ("PUBLISH & ANALYZE", [
+            ("4", "Publish completed evidence", "Publish immutable model packages"),
+            ("5", "Build / refresh the zoo", "Build an offline query snapshot"),
+            ("6", "Measure model deltas", "Compare detected lineage candidates"),
+        ]),
+        ("EXPLORE & OPERATE", [
+            ("7", "Explore the zoo", "Search metadata · compare fingerprints"),
+            ("8", "Scan local infrastructure", "Scan GPUs · RAM · disk · Hub status"),
+        ]),
+    ]
+    if _height() < 12:
+        for _, items in groups:
+            for number, title, _ in items:
+                print(THEME.paint(_fit(f"{number}. {title}", _width()), _MENU_COLORS[number]))
+        return
+    for index, (label, items) in enumerate(groups):
+        _menu_group(label, items)
+        if _height() >= 22 and index < len(groups) - 1:
+            print()
+    if _height() >= 34:
+        print(THEME.paint(_fit("Runs use this host’s existing resources; no cloud instance is created.", _width()),
+                          "38;5;245"))
+    if VERBOSE and _height() >= 36:
+        print(THEME.paint(_fit("Verbose mode adds runner flags, defaults, and operational notes to prompts.", _width()),
+                          "38;5;67"))
+
+
+def _menu_prompt(width: int) -> str:
+    prompt = "Choose workflow · Tab for choices · q to quit › " if width >= 54 else "Workflow [1-8/q] > "
+    return _fit(prompt, width)
+
+
+def _read_menu_choice(root: Path | None) -> str:
+    """Read the home-menu choice while watching for terminal resizes and idle twinkles."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(_menu_prompt(_width()))
+
+    if os.name == "nt":
+        import msvcrt
+
+        def read_key(timeout: float) -> str | None:
+            deadline = time.monotonic() + timeout
+            while not msvcrt.kbhit():
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.02)
+            key = msvcrt.getwch()
+            if key in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                return ""
+            return key
+    else:
+        import select
+        import termios
+        import tty
+
+        file_descriptor = sys.stdin.fileno()
+        previous_mode = termios.tcgetattr(file_descriptor)
+        tty.setraw(file_descriptor)
+
+        def read_key(timeout: float) -> str | None:
+            ready, _, _ = select.select([file_descriptor], [], [], timeout)
+            return sys.stdin.read(1) if ready else None
+
+    candidates = ["1", "2", "3", "4", "5", "6", "7", "8", "q"]
+    buffer: list[str] = []
+    size = _FRAME_SIZE or shutil.get_terminal_size((84, 24))
+    prompt = _menu_prompt(_width())
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    next_twinkle = time.monotonic() + 1.7
+    twinkle_index = 0
+
+    def redraw_prompt() -> None:
+        sys.stdout.write("\r\x1b[2K" + prompt + "".join(buffer))
+        sys.stdout.flush()
+
+    try:
+        while True:
+            key = read_key(0.12)
+            current_size = shutil.get_terminal_size((84, 24))
+            if current_size != size:
+                _draw_home(root)
+                size = _FRAME_SIZE or current_size
+                prompt = _menu_prompt(_width())
+                redraw_prompt()
+                next_twinkle = time.monotonic() + 1.7
+
+            now = time.monotonic()
+            if now >= next_twinkle:
+                actual_width = max(1, current_size.columns)
+                if actual_width >= 36 and _height() >= 14:
+                    frames = ("·", "✧")
+                    colors = ("38;5;240", "38;5;67")
+                    sys.stdout.write("\x1b[s\x1b[1;" + str(actual_width) + "H" +
+                                     THEME.paint(frames[twinkle_index % 2], colors[twinkle_index % 2]) + "\x1b[u")
+                    sys.stdout.flush()
+                    twinkle_index += 1
+                next_twinkle = now + 1.7
+
+            if key is None or key == "":
+                continue
+            if key in ("\r", "\n"):
+                sys.stdout.write("\r\n")
+                return "".join(buffer)
+            if key in ("\x03", "\x04", "\x1a"):
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if not buffer:
+                    raise EOFError
+                continue
+            if key == "\x1b":
+                if os.name != "nt":
+                    read_key(0.01)
+                    read_key(0.01)
+                continue
+            if key in ("\b", "\x7f"):
+                if buffer:
+                    buffer.pop()
+                    redraw_prompt()
+                continue
+            if key in ("\t", "\x06"):
+                current = "".join(buffer)
+                matches = _completion_matches(current, candidates)
+                if matches:
+                    common = os.path.commonprefix(matches)
+                    if common.startswith(current) and len(common) > len(current):
+                        buffer.extend(common[len(current):])
+                    if len(matches) > 1:
+                        sys.stdout.write("\r\n")
+                        for line in textwrap.wrap("    ".join(matches), width=max(1, _width())):
+                            sys.stdout.write(line + "\r\n")
                 else:
-                    print("      " + THEME.paint(line, "1;38;5;252"))
-            if show_detail:
-                for line in textwrap.wrap(description, width=max(24, width - 8), break_long_words=False):
-                    print(THEME.paint("      " + line, "38;5;245"))
+                    sys.stdout.write("\r\nNo menu choices match.\r\n")
+                redraw_prompt()
+                continue
+            if key.isprintable():
+                buffer.append(key)
+                sys.stdout.write(key)
+                sys.stdout.flush()
+    finally:
+        if os.name != "nt":
+            termios.tcsetattr(file_descriptor, termios.TCSADRAIN, previous_mode)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global VERBOSE, _FRAME_SIZE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path,
                         help="Zoo artifact root (defaults to ZOO_DATA)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show technical notes and infrastructure details beside prompts")
     args = parser.parse_args(argv)
-    global VERBOSE
     VERBOSE = args.verbose
     root = args.data_root.expanduser().resolve() if args.data_root else None
     if root is None and os.environ.get("ZOO_DATA"):
@@ -931,34 +1129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "8": _infrastructure,
     }
     while True:
-        _header(root)
-        if _height() >= 30:
-            print(THEME.paint("FIELD GUIDE", "1;38;5;252"))
-        _menu_group("COLLECT & MEASURE", [
-            ("1", "Prepare a collection", "Pin revisions · review ready/held rows"),
-            ("2", "Plan a measurement run", "Plan resources · review launch"),
-            ("3", "Summarize a run", "Refresh summary.csv"),
-        ])
-        print()
-        _menu_group("PUBLISH & ANALYZE", [
-            ("4", "Publish completed evidence", "Publish immutable model packages"),
-            ("5", "Build / refresh the zoo", "Build an offline query snapshot"),
-            ("6", "Measure model deltas", "Compare detected lineage candidates"),
-        ])
-        print()
-        _menu_group("EXPLORE & OPERATE", [
-            ("7", "Explore the zoo", "Search metadata · compare fingerprints"),
-            ("8", "Scan local infrastructure", "Scan GPUs · RAM · disk · Hub status"),
-        ])
-        if _height() >= 28:
-            print(THEME.paint("  ✧  Runs use this host’s existing resources; no cloud instance is created.  ✧", "38;5;109"))
-        if VERBOSE and _height() >= 32:
-            print(THEME.paint("  Verbose mode is on: prompts include runner flags, defaults, and operational notes.", "38;5;109"))
-        print()
+        _draw_home(root)
         try:
-            choice = _read_input(f"{THEME.paint('Choose a workflow', '38;5;43')}  ·  Tab for choices  ·  q to quit  › ",
-                                 completion=["1", "2", "3", "4", "5", "6", "7", "8", "q"])
+            choice = _read_menu_choice(root)
             choice = choice.strip().casefold()
+            _FRAME_SIZE = None
         except (EOFError, KeyboardInterrupt):
             print("\nSee you next time.")
             return 0
@@ -967,7 +1142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         action = actions.get(choice)
         if action is None:
-            print(THEME.paint("Choose a number from 1 to 8, or q to quit.", "38;5;203"))
+            print(THEME.paint("Choose a number from 1 to 8, or q to quit.", "38;5;167"))
             _pause()
             continue
         try:
@@ -975,7 +1150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (KeyboardInterrupt, EOFError):
             print(THEME.paint("\nWorkflow cancelled.", "38;5;245"))
         except (OSError, ValueError) as error:
-            print(THEME.paint(f"Could not prepare workflow: {error}", "38;5;203"))
+            print(THEME.paint(f"Could not prepare workflow: {error}", "38;5;167"))
         _pause()
 
 
