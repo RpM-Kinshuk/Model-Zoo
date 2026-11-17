@@ -203,6 +203,9 @@ host scan reports selected GPU memory, available RAM, storage, writable cache
 placement, and whether a Hub token environment variable is set (its value stays
 hidden). Use `model-zoo --verbose` for
 flag-level notes beside each prompt.
+`--no-motion` starts still.
+`NO_COLOR` disables colors and starts with motion off. Use `--plain` for a
+numbered, scrolling menu; terminals without curses support use it automatically.
 Set `ZOO_DATA` first, or pass `--data-root /path/to/zoo-data`; the query screen
 uses Zoo-Keeper when its CLI is installed.
 

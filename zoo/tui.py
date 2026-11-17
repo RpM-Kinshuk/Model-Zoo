@@ -34,14 +34,36 @@ class Theme:
 
     def __init__(self) -> None:
         self.enabled = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+        self.palette = "dark"
+
+    @staticmethod
+    def automatic_palette() -> str:
+        """Use the terminal's advertised background when available."""
+        try:
+            background = int(os.environ.get("COLORFGBG", "").split(";")[-1])
+        except ValueError:
+            return "dark"
+        return "light" if background in (7, 15) or 231 <= background <= 255 else "dark"
 
     def paint(self, value: str, color: str) -> str:
         if not self.enabled:
             return value
-        return f"\x1b[{color}m{value}\x1b[0m"
+        if self.palette != "auto":
+            # Explicit palettes are tuned for the chosen background. Auto uses
+            # the terminal's own foreground, whose background is unknowable.
+            colors = {
+                "dark": {"73": "81", "67": "141", "240": "245", "245": "250", "252": "255", "167": "203"},
+                "light": {"73": "25", "67": "55", "240": "60", "245": "60", "252": "16", "167": "124"},
+            }
+            parts = color.split(";")
+            if len(parts) >= 3 and parts[-2] == "5":
+                parts[-1] = colors[self.palette].get(parts[-1], parts[-1])
+            return f"\x1b[{';'.join(parts)}m{value}\x1b[0m"
+        emphasis = "1" if color.startswith("1;") else ""
+        return f"\x1b[{emphasis}m{value}\x1b[0m" if emphasis else value
 
     def brand(self, value: str) -> str:
-        return self.paint(value, "38;5;73")
+        return self.paint(value, "1;38;5;73")
 
 
 THEME = Theme()
@@ -55,7 +77,8 @@ def _clear() -> None:
 
 def _width() -> int:
     size = _FRAME_SIZE or shutil.get_terminal_size((84, 24))
-    return max(1, min(size.columns, 120))
+    # Avoid the terminal's automatic wrap when a line fills its last column.
+    return max(1, min(size.columns - 1, 120))
 
 
 def _height() -> int:
@@ -74,7 +97,7 @@ def _pad(text: str, width: int) -> str:
     return fitted + " " * max(0, width - _display_width(fitted))
 
 
-def _panel(lines: Sequence[str], width: int | None = None) -> None:
+def _panel(lines: Sequence[str], width: int | None = None, *, wrap: bool = False) -> None:
     width = width or _width()
     if width < 8:
         for line in lines:
@@ -83,8 +106,28 @@ def _panel(lines: Sequence[str], width: int | None = None) -> None:
     inside_width = width - 4
     print(THEME.paint("╭" + "─" * (width - 2) + "╮", "38;5;240"))
     for line in lines:
-        content = _pad(line, inside_width)
-        print(THEME.paint("│", "38;5;240") + " " + content + " " + THEME.paint("│", "38;5;240"))
+        if not wrap:
+            content = _pad(line, inside_width)
+            print(THEME.paint("│", "38;5;240") + " " + content + " " + THEME.paint("│", "38;5;240"))
+            continue
+        # Keep commands and paths visible in full, including at narrow widths.
+        remaining = line
+        while remaining:
+            used = 0
+            end = 0
+            for character in remaining:
+                character_width = _display_width(character)
+                if used + character_width > inside_width:
+                    break
+                used += character_width
+                end += 1
+            if not end:
+                end = 1
+            content = _pad(remaining[:end], inside_width)
+            print(THEME.paint("│", "38;5;240") + " " + content + " " + THEME.paint("│", "38;5;240"))
+            remaining = remaining[end:]
+        if not line:
+            print(THEME.paint("│", "38;5;240") + " " * (inside_width + 2) + THEME.paint("│", "38;5;240"))
     print(THEME.paint("╰" + "─" * (width - 2) + "╯", "38;5;240"))
 
 
@@ -268,7 +311,8 @@ def _ask(label: str, default: str = "", *, detail: str = "", technical: str = ""
     if VERBOSE and technical:
         print(THEME.paint("  ◦ " + technical, "38;5;67"))
     suffix = f" [{default}]" if default else ""
-    answer = _read_input(f"{THEME.paint(label, '38;5;252')}{suffix}: ", completion).strip()
+    # Readline needs a plain prompt to calculate cursor and wrapping positions.
+    answer = _read_input(f"{label}{suffix}: ", completion).strip()
     return answer or default
 
 
@@ -343,7 +387,7 @@ def _preview(command: Sequence[str], *, root: Path | None = None, cwd: Path = PR
         *summary,
         "",
         _shell_command(command),
-    ])
+    ], wrap=True)
 
 
 def _run(command: Sequence[str], *, root: Path | None = None, cwd: Path = PROJECT_ROOT,
@@ -534,10 +578,12 @@ def _header(root: Path | None) -> None:
     height = _height()
     if height < 14:
         return
-    brand = "MODEL ZOO" if width < 32 else "✦  MODEL ZOO  ✦"
+    brand = "MODEL ZOO" if width < 32 else "✦  M O D E L   Z O O  ✦"
+    if width >= 58:
+        brand = "·  ✧    " + brand + "    ✧  ·"
     print(THEME.brand(_center(_fit(brand, width), width)))
     if height >= 18 and width >= 32:
-        subtitle = "SPECTRA · LINEAGE" if width < 58 else "WEIGHT SPECTRA · FINGERPRINTS · LINEAGE"
+        subtitle = "EXPLORE · DISCOVER" if width < 58 else "A UNIVERSE OF MODELS, READY TO EXPLORE"
         print(THEME.paint(_center(_fit(subtitle, width), width), "38;5;67"))
     if height >= 20 and width >= 32:
         _panel(_status(root, compact=True), width)
@@ -731,19 +777,12 @@ def _launch(root: Path | None) -> None:
         threshold, checks = "500", "2"
 
     _panel(_animated_preflight(gpu_ids, root, cache_root))
-    remote_code = _confirm(
-        "Allow reviewed Hugging Face repository Python code to execute?",
-        detail="Leave this off unless you reviewed the pinned repository code in this prepared model list.",
-        technical="--trust_remote_code runs repository Python; it is not a sandbox.",
-    )
     command = [sys.executable, str(PROJECT_ROOT / "esd_experiment" / "run_experiment.py"),
                "--model_list", str(model_list), "--output_dir", str(run_dir),
                "--gpus", *map(str, gpu_ids), "--worker_cache_root", str(cache_root),
                "--gpu_memory_threshold", threshold, "--max_check", checks]
     for flag, value in options.items():
         command.extend([flag, value])
-    if remote_code:
-        command.append("--trust_remote_code")
 
     summary = [
         f"GPU pool: {', '.join(map(str, gpu_ids))} · {options['--num_gpus_per_job']} GPU(s) per model",
@@ -757,7 +796,7 @@ def _launch(root: Path | None) -> None:
         f"stages {options.get('--stage_timeout_seconds', 'auto')} · "
         f"TERM grace {options.get('--termination_grace_seconds', '30')}s",
         f"Worker cache: {cache_root}",
-        f"Remote code: {'enabled for reviewed pins' if remote_code else 'disabled'}",
+        "Remote repository code: disabled",
         "Resource limits are per worker and sampled; they are not hard host quotas.",
     ]
     _run(command, root=root, summary=summary)
@@ -841,16 +880,16 @@ def _query(root: Path | None) -> None:
         term = _ask("Search text")
         if not term:
             return
-        limit = _ask("Maximum results", "10", detail="Examples: 10, 25, 50.",
-                     completion=["10", "25", "50"])
+        limit = _ask_integer("Maximum results", "10", minimum=1,
+                             detail="Examples: 10, 25, 50.")
         command = [sys.executable, "-m", "zoo_keeper.cli", "find", "--text", term,
                    "--limit", limit, "--zoo", str(zoo_dir)]
     elif choice == "2":
         model = _ask("Model id (org/name or repo@revision)")
         if not model:
             return
-        count = _ask("Nearest models", "5", detail="Examples: 5, 10, 25.",
-                     completion=["5", "10", "25"])
+        count = _ask_integer("Nearest models", "5", minimum=1,
+                             detail="Examples: 5, 10, 25.")
         command = [sys.executable, "-m", "zoo_keeper.cli", "similar", model,
                    "-k", count, "--zoo", str(zoo_dir)]
     else:
@@ -864,20 +903,6 @@ def _pause() -> None:
         _read_input("\nPress Enter to return to the console...")
     except EOFError:
         pass
-
-
-def _menu_section(label: str) -> None:
-    width = _width()
-    color = "38;5;67" if "PUBLISH" in label else "38;5;73"
-    title = f" {label} "
-    rule_width = max(0, width - _display_width(title))
-    print(THEME.paint(_fit(title + "─" * rule_width, width), color))
-
-
-_MENU_COLORS = {
-    "1": "38;5;73", "2": "38;5;73", "3": "38;5;73", "4": "38;5;67",
-    "5": "38;5;67", "6": "38;5;67", "7": "38;5;73", "8": "38;5;73",
-}
 
 
 def _display_width(text: str) -> int:
@@ -902,208 +927,24 @@ def _fit(text: str, width: int) -> str:
     return "".join(output) + "…"
 
 
-def _menu_card(item: tuple[str, str, str], width: int, show_detail: bool) -> list[tuple[str, str]]:
-    number, title, description = item
-    accent = _MENU_COLORS[number]
-    if width < 8:
-        return [(_fit(f"{number} {title}", width), accent)]
-    inside_width = width - 4
-    top = "╭" + "─" * (width - 2) + "╮"
-    bottom = "╰" + "─" * (width - 2) + "╯"
-    title_line = "│ " + _pad(f"{number.zfill(2)}  {title}", inside_width) + " │"
-    lines = [(top, accent), (title_line, f"1;{accent}")]
-    if show_detail:
-        detail_line = "│ " + _pad(description, inside_width) + " │"
-        lines.append((detail_line, "38;5;245"))
-    lines.append((bottom, accent))
-    return lines
-
-
-def _menu_group(label: str, items: Sequence[tuple[str, str, str]]) -> None:
-    width, height = _width(), _height()
-    _menu_section(label)
-    horizontal = width >= 92 and height >= 28
-    full_cards = width >= 64 and height >= 40
-    show_detail = height >= 44
-    if horizontal:
-        cell_width = (width - 2) // 2
-        trailing_space = " " * (width - cell_width * 2 - 2)
-        for start in range(0, len(items), 2):
-            left = _menu_card(items[start], cell_width, show_detail)
-            right = _menu_card(items[start + 1], cell_width, show_detail) if start + 1 < len(items) else []
-            for index in range(max(len(left), len(right))):
-                left_line, left_color = left[index] if index < len(left) else (" " * cell_width, "38;5;240")
-                right_line, right_color = right[index] if index < len(right) else (" " * cell_width, "38;5;240")
-                line = THEME.paint(left_line, left_color) + "  " + THEME.paint(right_line, right_color) + trailing_space
-                print(line)
-    elif full_cards:
-        for item in items:
-            for line, color in _menu_card(item, width, show_detail):
-                print(THEME.paint(line, color))
-    elif width >= 48:
-        inner_width = width - 4
-        for number, title, description in items:
-            accent = _MENU_COLORS[number]
-            content = _fit(f"{number.zfill(2)}  {title}  ·  {description}", inner_width)
-            row = "│ " + _pad(content, inner_width) + " │"
-            print(THEME.paint(row, accent))
-    else:
-        for number, title, description in items:
-            content = _fit(f"{number}. {title}", width)
-            print(THEME.paint(content, _MENU_COLORS[number]))
-
-
 def _draw_home(root: Path | None) -> None:
-    _header(root)
-    groups = [
-        ("COLLECT & MEASURE", [
-            ("1", "Prepare a collection", "Pin revisions · review ready/held rows"),
-            ("2", "Plan a measurement run", "Plan resources · review launch"),
-            ("3", "Summarize a run", "Refresh summary.csv"),
-        ]),
-        ("PUBLISH & ANALYZE", [
-            ("4", "Publish completed evidence", "Publish immutable model packages"),
-            ("5", "Build / refresh the zoo", "Build an offline query snapshot"),
-            ("6", "Measure model deltas", "Compare detected lineage candidates"),
-        ]),
-        ("EXPLORE & OPERATE", [
-            ("7", "Explore the zoo", "Search metadata · compare fingerprints"),
-            ("8", "Scan local infrastructure", "Scan GPUs · RAM · disk · Hub status"),
-        ]),
-    ]
-    if _height() < 12:
-        for _, items in groups:
-            for number, title, _ in items:
-                print(THEME.paint(_fit(f"{number}. {title}", _width()), _MENU_COLORS[number]))
-        return
-    for index, (label, items) in enumerate(groups):
-        _menu_group(label, items)
-        if _height() >= 22 and index < len(groups) - 1:
-            print()
-    if _height() >= 34:
-        print(THEME.paint(_fit("Runs use this host’s existing resources; no cloud instance is created.", _width()),
-                          "38;5;245"))
-    if VERBOSE and _height() >= 36:
-        print(THEME.paint(_fit("Verbose mode adds runner flags, defaults, and operational notes to prompts.", _width()),
-                          "38;5;67"))
+    """Static, accessible fallback for terminals without curses support."""
+    global _FRAME_SIZE
+    from zoo.terminal_home import WORKFLOWS
 
-
-def _menu_prompt(width: int) -> str:
-    prompt = "Choose workflow · Tab for choices · q to quit › " if width >= 54 else "Workflow [1-8/q] > "
-    return _fit(prompt, width)
+    _FRAME_SIZE = shutil.get_terminal_size((84, 24))
+    _clear()
+    print(THEME.brand(_fit("MODEL ZOO · Choose your next discovery", _width())))
+    for line in _status(root, compact=True):
+        print(_fit(line, _width()))
+    print()
+    for item in WORKFLOWS:
+        print(THEME.brand(_fit(f"{item.key}  {item.title}", _width())))
+    print(_fit("Enter a number · q quit", _width()))
 
 
 def _read_menu_choice(root: Path | None) -> str:
-    """Read the home-menu choice while watching for terminal resizes and idle twinkles."""
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        return input(_menu_prompt(_width()))
-
-    if os.name == "nt":
-        import msvcrt
-
-        def read_key(timeout: float) -> str | None:
-            deadline = time.monotonic() + timeout
-            while not msvcrt.kbhit():
-                if time.monotonic() >= deadline:
-                    return None
-                time.sleep(0.02)
-            key = msvcrt.getwch()
-            if key in ("\x00", "\xe0"):
-                msvcrt.getwch()
-                return ""
-            return key
-    else:
-        import select
-        import termios
-        import tty
-
-        file_descriptor = sys.stdin.fileno()
-        previous_mode = termios.tcgetattr(file_descriptor)
-        tty.setraw(file_descriptor)
-
-        def read_key(timeout: float) -> str | None:
-            ready, _, _ = select.select([file_descriptor], [], [], timeout)
-            return sys.stdin.read(1) if ready else None
-
-    candidates = ["1", "2", "3", "4", "5", "6", "7", "8", "q"]
-    buffer: list[str] = []
-    size = _FRAME_SIZE or shutil.get_terminal_size((84, 24))
-    prompt = _menu_prompt(_width())
-    sys.stdout.write(prompt)
-    sys.stdout.flush()
-    next_twinkle = time.monotonic() + 1.7
-    twinkle_index = 0
-
-    def redraw_prompt() -> None:
-        sys.stdout.write("\r\x1b[2K" + prompt + "".join(buffer))
-        sys.stdout.flush()
-
-    try:
-        while True:
-            key = read_key(0.12)
-            current_size = shutil.get_terminal_size((84, 24))
-            if current_size != size:
-                _draw_home(root)
-                size = _FRAME_SIZE or current_size
-                prompt = _menu_prompt(_width())
-                redraw_prompt()
-                next_twinkle = time.monotonic() + 1.7
-
-            now = time.monotonic()
-            if now >= next_twinkle:
-                actual_width = max(1, current_size.columns)
-                if actual_width >= 36 and _height() >= 14:
-                    frames = ("·", "✧")
-                    colors = ("38;5;240", "38;5;67")
-                    sys.stdout.write("\x1b[s\x1b[1;" + str(actual_width) + "H" +
-                                     THEME.paint(frames[twinkle_index % 2], colors[twinkle_index % 2]) + "\x1b[u")
-                    sys.stdout.flush()
-                    twinkle_index += 1
-                next_twinkle = now + 1.7
-
-            if key is None or key == "":
-                continue
-            if key in ("\r", "\n"):
-                sys.stdout.write("\r\n")
-                return "".join(buffer)
-            if key in ("\x03", "\x04", "\x1a"):
-                if key == "\x03":
-                    raise KeyboardInterrupt
-                if not buffer:
-                    raise EOFError
-                continue
-            if key == "\x1b":
-                if os.name != "nt":
-                    read_key(0.01)
-                    read_key(0.01)
-                continue
-            if key in ("\b", "\x7f"):
-                if buffer:
-                    buffer.pop()
-                    redraw_prompt()
-                continue
-            if key in ("\t", "\x06"):
-                current = "".join(buffer)
-                matches = _completion_matches(current, candidates)
-                if matches:
-                    common = os.path.commonprefix(matches)
-                    if common.startswith(current) and len(common) > len(current):
-                        buffer.extend(common[len(current):])
-                    if len(matches) > 1:
-                        sys.stdout.write("\r\n")
-                        for line in textwrap.wrap("    ".join(matches), width=max(1, _width())):
-                            sys.stdout.write(line + "\r\n")
-                else:
-                    sys.stdout.write("\r\nNo menu choices match.\r\n")
-                redraw_prompt()
-                continue
-            if key.isprintable():
-                buffer.append(key)
-                sys.stdout.write(key)
-                sys.stdout.flush()
-    finally:
-        if os.name != "nt":
-            termios.tcsetattr(file_descriptor, termios.TCSADRAIN, previous_mode)
+    return input("Workflow [1-8/q] > ")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1113,8 +954,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="Zoo artifact root (defaults to ZOO_DATA)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show technical notes and infrastructure details beside prompts")
+    parser.add_argument("--theme", choices=("auto", "dark", "light"), default="auto",
+                        help="Terminal background palette (default: detect background or use dark)")
+    parser.add_argument("--no-motion", action="store_true", help="Disable ambient animation")
+    parser.add_argument("--plain", action="store_true", help="Use numbered prompts without full-screen navigation")
     args = parser.parse_args(argv)
     VERBOSE = args.verbose
+    THEME.palette = THEME.automatic_palette() if args.theme == "auto" else args.theme
     root = args.data_root.expanduser().resolve() if args.data_root else None
     if root is None and os.environ.get("ZOO_DATA"):
         root = Path(os.environ["ZOO_DATA"]).expanduser().resolve()
@@ -1128,10 +974,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         "7": _query,
         "8": _infrastructure,
     }
+    motion = not args.no_motion and "NO_COLOR" not in os.environ
+    full_screen = (not args.plain and sys.stdin.isatty() and sys.stdout.isatty()
+                   and os.environ.get("TERM", "") not in {"", "dumb"})
     while True:
-        _draw_home(root)
         try:
-            choice = _read_menu_choice(root)
+            if full_screen:
+                from zoo.terminal_home import navigate
+                try:
+                    import curses
+                except ImportError:
+                    full_screen = False
+                    continue
+                try:
+                    choice, THEME.palette, motion = navigate(
+                        _status(root, compact=True), palette=THEME.palette,
+                        motion=motion, color=THEME.enabled)
+                except curses.error:
+                    full_screen = False
+                    continue
+            else:
+                _draw_home(root)
+                choice = _read_menu_choice(root)
             choice = choice.strip().casefold()
             _FRAME_SIZE = None
         except (EOFError, KeyboardInterrupt):
