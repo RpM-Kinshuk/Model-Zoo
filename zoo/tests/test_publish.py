@@ -18,10 +18,70 @@ def test_publish_creates_sharded_package_with_hashes(package_run):
     assert metadata["model_key"] == "lab/tiny@" + r.manifest["revision"]
     assert metadata["evidence"] == dict(reused=2, measured=0, gaps=0)
     assert "esd/stats.csv" in metadata["files"] and "esd/metrics.h5" in metadata["files"]
-    assert len(metadata["files"]) == 8
+    assert len(metadata["files"]) == 9
     for name, digest in metadata["files"].items():
         assert hashlib.sha256((path / name).read_bytes()).hexdigest() == digest
     assert not list(path.rglob("*.bin"))
+
+
+def test_publish_retains_source_snapshot_and_checks_its_identity(package_run):
+    from evidence.source_metadata import read_source_metadata, source_metadata_path
+    r = package_run
+    manifest_path = r.folder / (r.safe + ".manifest.json")
+    source = source_metadata_path(manifest_path)
+    assert source.is_file()
+    package = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    packaged = package / source.name
+    assert packaged.read_bytes() == source.read_bytes()
+    metadata = json.loads((package / "package.json").read_text())
+    assert metadata["files"][source.name] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert read_source_metadata(packaged)["identity"]["repo_id"] == "lab/tiny"
+
+
+def test_publish_rejects_present_invalid_source_snapshot(package_run):
+    import gzip
+    from evidence.source_metadata import source_metadata_path
+    r = package_run
+    source = source_metadata_path(r.folder / (r.safe + ".manifest.json"))
+    snapshot = json.loads(gzip.decompress(source.read_bytes()))
+    snapshot["identity"]["repo_id"] = "lab/wrong"
+    source.write_bytes(gzip.compress(json.dumps(snapshot).encode(), mtime=0))
+    with pytest.raises(ValueError, match="identity"):
+        publish_package(r.run, "lab/tiny", r.packages, r.root)
+
+
+def test_legacy_package_explicitly_records_missing_source_capture(package_run):
+    from evidence.source_metadata import source_metadata_path
+    r = package_run
+    source_metadata_path(r.folder / (r.safe + ".manifest.json")).unlink()
+    package = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    metadata = json.loads((package / "package.json").read_text())
+    assert metadata["source_metadata"]["status"] == "not_captured"
+
+
+def test_quarantine_and_prepared_rewrite_keep_original_hub_card(package_run):
+    from evidence.manifest import write_manifest
+    from evidence.source_metadata import SourceMetadataCapture, source_metadata_path, write_source_metadata
+    from evidence_bridge import _manifest, quarantine_evidence
+    r = package_run
+    manifest_path = r.folder / (r.safe + ".manifest.json")
+    capture = SourceMetadataCapture("lab/tiny", r.manifest["revision"], source_kind="hub_api")
+    capture.record_json("cardData.json", {"model-index": [{"name": "fixture", "results": []}]})
+    source = write_source_metadata(capture.snapshot(), manifest_path)
+    original = source.read_bytes()
+    backup = quarantine_evidence(r.run, "lab/tiny", r.manifest["revision"])
+    assert source.read_bytes() == original
+    prepared = _manifest(r.run, "lab/tiny", r.manifest["revision"])
+    staged = write_manifest(prepared, r.root / "prepared-stage")
+    assert source_metadata_path(staged).read_bytes() == original
+    # Restore the already measured fixture artifacts; no new model execution.
+    for path in backup.iterdir():
+        if path.name.endswith((".safetensors", ".h5")):
+            os.link(path, r.folder / path.name)
+    (r.folder / "evidence.json").write_bytes((backup / "evidence.json").read_bytes())
+    write_manifest(dict(prepared), r.folder)
+    package = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    assert (package / source.name).read_bytes() == original
 
 
 def test_publish_is_idempotent(package_run):

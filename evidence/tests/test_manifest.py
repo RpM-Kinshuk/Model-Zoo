@@ -123,7 +123,7 @@ def test_pin_and_atomic_manifest_name(fake_api, fake_reader, tmp_path):
     assert json.loads(target.read_text())["revision"] == SHA
     target.write_text("interrupted")
     assert json.loads(write_manifest(m, out_dir).read_text())["access"] == "granted"
-    assert len(list(out_dir.iterdir())) == 1
+    assert {path.suffix for path in out_dir.iterdir()} == {".json", ".gz"}
 
 
 def test_oversized_json_is_not_read(fake_api, fake_reader, manifest_repositories):

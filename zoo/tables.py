@@ -142,7 +142,14 @@ def _score_tables(tables, manifests):
             if row["revision_verified"] and row["source_revision"] != revision:
                 raise ValueError(f"Verified score has a mismatched source revision: {key}")
             combined.append(row)
-    return _rows(combined, SCORES_COLUMNS, ["model_key", "benchmark", "source", "source_revision", "harness"])
+    if not combined:
+        return empty_table(SCORES_COLUMNS)
+    result = pd.DataFrame(combined, columns=SCORES_COLUMNS)
+    # Construct from the original Python integers before pandas can round a
+    # mixed integer/None column through float64.
+    result["n_items"] = pd.array([row["n_items"] for row in combined], dtype="Int64")
+    return result.sort_values(["model_key", "benchmark", "source", "source_revision", "harness"],
+                              kind="stable").reset_index(drop=True)
 
 
 def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,

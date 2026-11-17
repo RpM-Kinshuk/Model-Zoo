@@ -35,7 +35,8 @@ def normalize_manifest(manifest):
     result = dict(manifest)
     if 'access' in result:
         result['access'] = canonical_mode(result['access'])
-    return result
+    from .source_metadata import carry_source_metadata
+    return carry_source_metadata(manifest, result)
 
 
 def normalize_model_table(frame):

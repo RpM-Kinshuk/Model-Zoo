@@ -47,6 +47,21 @@ def test_measured_score_imports_keep_revision_verification(universe, tmp_path):
     assert models.set_index("model_key").loc["org/child@" + SHA2, "downloads"] == 42
 
 
+def test_cli_no_score_flags_rebuild_retains_then_explicit_reset(universe, tmp_path):
+    source, mapping = tmp_path / "local.csv", tmp_path / "mapping.json"
+    source.write_text(f"key,bench,value\norg/child@{SHA2},local-task,0\n")
+    mapping.write_text(json.dumps(dict(model_key="key", benchmark="bench", value="value", source="local")))
+    out = tmp_path / "persistent"
+    args = ["build", "--manifests", str(universe.manifests), "--fingerprints", str(universe.fingerprints),
+            "--data_root", str(universe.root), "--out", str(out)]
+    assert main(args + ["--scores_csv", str(source), "--scores_mapping", str(mapping)]) == 0
+    source.unlink()
+    assert main(args) == 0
+    assert pd.read_parquet(out / "scores.parquet").value.tolist() == [0]
+    assert main(args + ["--reset_scores"]) == 0
+    assert pd.read_parquet(out / "scores.parquet").empty
+
+
 def test_optional_edge_and_calibration_paths_are_forwarded(universe, tmp_path, monkeypatch):
     import zoo.cli as cli
     captured = {}
@@ -94,6 +109,16 @@ def test_module_entrypoint_help():
                             cwd=Path(__file__).resolve().parents[2], text=True, capture_output=True,
                             env=dict(os.environ, HF_HUB_OFFLINE="1"))
     assert result.returncode == 0 and "build" in result.stdout and not result.stderr
+
+
+def test_explicit_missing_score_configuration_is_an_error(tmp_path):
+    manifests, fingerprints = tmp_path / "manifests", tmp_path / "fingerprints"
+    manifests.mkdir()
+    fingerprints.mkdir()
+    assert main(["build", "--manifests", str(manifests), "--fingerprints", str(fingerprints),
+        "--data_root", str(tmp_path), "--out", str(tmp_path / "out"),
+        "--score_sources", str(tmp_path / "missing.json")]) == 2
+    assert not (tmp_path / "out").exists()
 
 
 def test_build_without_arguments_uses_packages_and_current_conventions(package_run, monkeypatch):

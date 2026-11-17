@@ -93,8 +93,18 @@ def make_universe(root: Path) -> SimpleNamespace:
         elif repo_id == "org/parent-GGUF":
             (checkpoint / "model.gguf").write_bytes(b"synthetic metadata-only-only fixture; never decode")
         manifest = build_manifest(str(checkpoint), "main", HubReader(), api=None)
+        local_source_identity = {key: manifest[key] for key in ("repo_id", "revision")}
         manifest.update(repo_id=repo_id, revision=revision, license=license_id, declared_bases=bases,
                         base_model_relation="finetune" if bases else None)
+        # These invented Hub keys are test labels, not provenance aliases for
+        # the local content pin. Construct an explicitly synthetic observation.
+        from evidence.source_metadata import SourceMetadataCapture
+        capture = SourceMetadataCapture(repo_id, revision, source_kind="synthetic_fixture")
+        capture.record_bytes("config.json", (checkpoint / "config.json").read_bytes())
+        manifest.source_metadata = capture.snapshot()
+        manifest.source_metadata["fixture_source_identity"] = local_source_identity
+        manifest.source_metadata["identity_binding"] = dict(
+            kind="synthetic_fixture", basis="invented_test_identity_not_hub_provenance")
         if repo_id == "org/gated":
             manifest.update(access="no_access", gated=True)
         elif repo_id == "org/parent-GGUF":

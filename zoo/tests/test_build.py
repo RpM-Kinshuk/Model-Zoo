@@ -1,4 +1,6 @@
 import hashlib
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -122,7 +124,7 @@ def test_selected_input_provenance_excludes_raw_weights_and_is_deterministic(uni
     metadata = json.loads((out / "zoo.json").read_text())
     inputs = metadata["inputs"]
     files = {entry["path"]: entry["sha256"] for entry in inputs if entry["kind"] == "file"}
-    expected = list(universe.manifests.glob("*.manifest.json")) + list(universe.fingerprints.glob("*.row_blocks.fingerprint.safetensors")) + [frame, null_path, external]
+    expected = list(universe.manifests.glob("*.manifest.json")) + list(universe.manifests.glob("*.source-metadata.json.gz")) + list(universe.fingerprints.glob("*.row_blocks.fingerprint.safetensors")) + [frame, null_path, external]
     assert set(files) == {p.relative_to(universe.root).as_posix() for p in expected}
     for path in expected:
         assert files[path.relative_to(universe.root).as_posix()] == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -257,3 +259,340 @@ def test_open_tables_resolves_generation_once(built_zoo, universe, monkeypatch):
     assert len(calls) == 7 and set(calls) == {old}
     for name in expected:
         pd.testing.assert_frame_equal(expected[name], actual[name])
+
+
+def test_build_retains_raw_score_source_and_exact_row_bindings(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    raw = ("repo,bench,value,metric,harness,n,commit,unmapped_context\n"
+           f"org/parent,task,.5,acc,eval:bf16,10,{SHA1},keep-this\n"
+           "not/in-zoo,task,.3,acc,eval:bf16,,,unbound\n").encode()
+    source.write_bytes(raw)
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local", revision="commit", metric="metric", harness="harness", n_items="n"), models)
+    out = _build(universe, tmp_path / "with-scores", score_tables=[scores])
+    source.unlink()  # Only this pytest-created CSV; the generation must stand alone.
+    assert not source.exists()
+    context = json.loads((out / "score-sources/0.json").read_text())
+    assert (out / context["snapshot"]).read_bytes() == raw
+    recovered = list(csv.DictReader(io.StringIO((out / context["snapshot"]).read_text())))
+    assert len(recovered) == 2
+    assert recovered[0]["unmapped_context"] == "keep-this"
+    assert recovered[1]["unmapped_context"] == "unbound"
+    assert context["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert context["rows"][0]["scores"][0]["n_items"] == 10
+    bound = context["rows"][0]["scores"][0]
+    assert bound["model_key"] == recovered[0]["repo"] + "@" + recovered[0]["commit"]
+    assert bound["value"] == float(recovered[0]["value"])
+    assert context["rows"][1]["status"] == "unmatched_model"
+    stored = open_tables(out)["scores"]
+    assert stored.metric.tolist() == ["acc"] and stored.n_items.tolist() == [10]
+    assert stored.loc[stored.model_key.eq(bound["model_key"]), "value"].tolist() == [bound["value"]]
+    metadata = json.loads((out / "zoo.json").read_text())
+    files = {r["path"]:r["sha256"] for r in metadata["inputs"] if r["kind"] == "file"}
+    assert files[source.relative_to(universe.root).as_posix()] == context["sha256"]
+
+
+def test_changed_score_source_is_rejected_before_publication(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value\norg/parent,task,.5\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value", source="local"), models)
+    source.write_text("repo,bench,value\norg/parent,task,.9\n")
+    out = tmp_path / "changed"
+    with pytest.raises(ValueError, match="source.*changed|hash"):
+        _build(universe, out, score_tables=[scores])
+    assert not out.exists()
+
+
+def test_programmatic_score_table_marks_unavailable_source_context(universe, tmp_path):
+    scores = pd.DataFrame([dict(model_key="org/parent@" + SHA1, repo_id="org/parent", benchmark="test",
+        skill=None, value=.7, metric="accuracy", source="local", source_revision=SHA1,
+        revision_verified=True, harness=None, n_items=None)], columns=SCORES_COLUMNS)
+    out = _build(universe, tmp_path / "scores-only", score_tables=[scores])
+    context = json.loads((out / "score-sources/0.json").read_text())
+    assert context["status"] == "source_context_unavailable"
+    assert context["snapshot"] is None and context["rows"] is None
+
+
+def test_score_extension_preserves_inherited_evidence_and_context_only_scores(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text(f"repo,bench,value,revision\norg/parent,task,.5,{SHA1}\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local", revision="revision"), models)
+    parent = _build(universe, tmp_path / "parent", score_tables=[scores])
+    before = _snapshot(parent.resolve())
+    out = extend_scores(parent, [scores], tmp_path / "extended", universe.root,
+                        source_tables=[scores])
+    assert len(open_tables(out)["scores"]) == 2
+    for name, raw in before.items():
+        if name not in ["scores.parquet", "zoo.json", "collection.json"]:
+            assert (out / name).read_bytes() == raw
+    assert _snapshot(parent.resolve()) == before
+    next_index = max(int(p.stem) for p in (parent / "score-sources").glob("*.json")) + 1
+    assert (out / f"score-sources/{next_index}.csv").read_bytes() == source.read_bytes()
+    assert (out / f"score-sources/{next_index + 1}.csv").read_bytes() == source.read_bytes()
+    metadata = json.loads((out / "zoo.json").read_text())
+    assert metadata["inherited_generation"]["zoo_json_sha256"] == hashlib.sha256(before["zoo.json"]).hexdigest()
+
+
+def test_score_extension_rejects_context_not_in_parent_and_keeps_old_output(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    parent = _build(universe, tmp_path / "parent")
+    out = _build(universe, tmp_path / "out")
+    before = _snapshot(out.resolve())
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value\norg/parent,task,.5\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local"), open_tables(parent)["models"])
+    with pytest.raises(ValueError, match="inherited|context"):
+        extend_scores(parent, [], out, universe.root, source_tables=[scores])
+    assert _snapshot(out.resolve()) == before
+
+
+def test_stale_score_binding_attributes_cannot_describe_changed_scores(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value\norg/parent,task,.5\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value", source="local"), models)
+    scores.loc[0, "value"] = .9
+    with pytest.raises(ValueError, match="bindings"):
+        _build(universe, tmp_path / "stale", score_tables=[scores])
+
+
+@pytest.mark.parametrize("extension", [False, True])
+def test_score_source_mutation_during_build_prevents_publication(universe, tmp_path, monkeypatch, extension):
+    import zoo.build as builder
+    from zoo.scores import load_scores_csv
+    parent = _build(universe, tmp_path / "parent")
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value\norg/parent,task,.5\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value", source="local"), open_tables(parent)["models"])
+    original = builder._provenance
+    def mutate_after_hash(*args, **kwargs):
+        result = original(*args, **kwargs)
+        source.write_text("repo,bench,value\norg/parent,task,.9\n")
+        return result
+    monkeypatch.setattr(builder, "_provenance", mutate_after_hash)
+    out = tmp_path / "changed"
+    with pytest.raises(ValueError, match="source.*changed|hash"):
+        if extension:
+            builder.extend_scores(parent, [scores], out, universe.root)
+        else:
+            _build(universe, out, score_tables=[scores])
+    assert not out.exists()
+
+
+def test_parent_mutation_while_reading_is_rejected(universe, tmp_path, monkeypatch):
+    import zoo.build as builder
+    parent = _build(universe, tmp_path / "parent")
+    original = builder.open_tables
+    def mutate_after_read(path):
+        result = original(path)
+        changed = parent / "models.parquet"
+        changed.write_bytes(changed.read_bytes() + b"changed-during-read")
+        return result
+    monkeypatch.setattr(builder, "open_tables", mutate_after_read)
+    with pytest.raises(ValueError, match="Inherited generation changed"):
+        builder.extend_scores(parent, [], tmp_path / "changed", universe.root)
+
+
+def test_large_item_count_stays_exact_beside_unknown_through_build_and_read(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    count = 2**53 + 1
+    source.write_text(f"repo,bench,value,n\norg/parent,known,.5,{count}\norg/parent,unknown,.6,\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local", n_items="n"), models)
+    out = _build(universe, tmp_path / "exact-count", score_tables=[scores])
+    stored = pq.read_table(out / "scores.parquet").to_pylist()
+    assert next(r["n_items"] for r in stored if r["benchmark"] == "known") == count
+    assert next(r["n_items"] for r in stored if r["benchmark"] == "unknown") is None
+    read = open_tables(out)["scores"]
+    assert int(read.loc[read.benchmark.eq("known"), "n_items"].iloc[0]) == count
+
+
+def test_default_rebuild_retains_scores_sources_and_unbound_rows_without_original(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text(f"key,bench,value\norg/parent@{SHA1},task,0\norg/parent@{SHA1},task,0\nmissing@{'9'*40},task,.3\n")
+    mapping = dict(model_key="key", benchmark="bench", value="value", source="local")
+    scores = load_scores_csv(source, mapping, models)
+    out = _build(universe, tmp_path / "retained", score_tables=[scores])
+    before = pq.read_table(out / "scores.parquet").to_pylist()
+    source_count = len(list((out / "score-sources").glob("*.json")))
+    source.unlink()
+    _build(universe, out)
+    _build(universe, out)
+    assert pq.read_table(out / "scores.parquet").to_pylist() == before
+    assert len(list((out / "score-sources").glob("*.json"))) == source_count
+    descriptors = [p for p in (out / "score-sources").glob("*.json")
+                   if json.loads(p.read_text()).get("adapter") == "scores_csv"]
+    assert len(descriptors) == 1
+    context = json.loads(descriptors[0].read_text())
+    assert len(context["rows"]) == 3 and context["rows"][2]["status"] == "unmatched_model"
+    assert (out / context["snapshot"]).read_text().count("task,0") == 2
+    coverage = json.loads((out / "score-coverage.json").read_text())
+    assert any(r["model_key"] == "org/parent@" + SHA1 and r["status"] == "available" for r in coverage["records"])
+
+
+def test_same_source_is_idempotent_but_distinct_sources_remain_separate(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value,unused\norg/parent,task,.5,a\n")
+    mapping = dict(repo_id="repo", benchmark="bench", value="value", source="local")
+    scores = load_scores_csv(source, mapping, models)
+    out = _build(universe, tmp_path / "idempotent", score_tables=[scores])
+    source_count = len(list((out / "score-sources").glob("*.json")))
+    _build(universe, out, score_tables=[scores])
+    assert len(open_tables(out)["scores"]) == 1
+    assert len(list((out / "score-sources").glob("*.json"))) == source_count
+    source.write_text("repo,bench,value,unused\norg/parent,task,.5,b\n")
+    _build(universe, out, score_tables=[load_scores_csv(source, mapping, models)])
+    assert len(open_tables(out)["scores"]) == 2
+    assert len(list((out / "score-sources").glob("*.json"))) == source_count + 1
+
+
+def test_default_retains_programmatic_flags_and_explicit_reset_discards(universe, tmp_path):
+    scores = pd.DataFrame([dict(model_key="org/parent@" + SHA1, repo_id="org/parent", benchmark="test",
+        skill=None, value=.7, metric="accuracy", source="local", source_revision=SHA1,
+        revision_verified=False, harness=None, n_items=None)], columns=SCORES_COLUMNS)
+    out = _build(universe, tmp_path / "retained", score_tables=[scores])
+    _build(universe, out)
+    assert len(open_tables(out)["scores"]) == 1
+    assert not open_tables(out)["scores"].revision_verified.any()
+    # Simulate a legacy generation lacking source descriptors, using this
+    # test-created programmatic table only; no scientific source is removed.
+    for path in (out / "score-sources").glob("*.json"):
+        descriptor = json.loads(path.read_text())
+        if descriptor.get("status") == "source_context_unavailable":
+            path.unlink()
+    _build(universe, out)
+    descriptors = [json.loads(p.read_text()) for p in (out / "score-sources").glob("*.json")]
+    assert any(d.get("status") == "source_context_unavailable" for d in descriptors)
+    _build(universe, out, retain_scores=False)
+    assert open_tables(out)["scores"].empty
+
+
+def test_hash_pinned_default_source_configuration_survives_source_deletion(universe, tmp_path):
+    source = tmp_path / "scores.csv"
+    source.write_text(f"key,bench,value\norg/parent@{SHA1},task,.25\n")
+    config = tmp_path / "score-sources.json"
+    config.write_text(json.dumps(dict(sources=[dict(adapter="scores_csv", path="scores.csv",
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        mapping=dict(model_key="key", benchmark="bench", value="value", source="local"))])))
+    out = _build(universe, tmp_path / "configured")
+    assert len(open_tables(out)["scores"]) == 1
+    source.unlink()
+    _build(universe, out)
+    assert len(open_tables(out)["scores"]) == 1
+    with pytest.raises(OSError):
+        _build(universe, tmp_path / "fresh-without-source")
+
+
+def test_context_only_unpinned_source_never_activates_on_default_rebuild(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    parent = _build(universe, tmp_path / "parent")
+    source = tmp_path / "evidence-only.csv"
+    source.write_text("repo,bench,value\norg/parent,unbound,.5\n")
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    models = open_tables(parent)["models"].iloc[:0]
+    table = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value", source="publisher"), models)
+    out = extend_scores(parent, [], tmp_path / "context-only", universe.root, source_tables=[table])
+    source.unlink()
+    _build(universe, out)
+    assert open_tables(out)["scores"].empty
+    context = next(json.loads(p.read_text()) for p in (out / "score-sources").glob("*.json")
+                   if json.loads(p.read_text()).get("adapter") == "scores_csv")
+    assert context["role"] == "inherited_context_only"
+    assert context["rows"][0]["scores"] == []
+    # A deliberate hash-pinned local declaration activates that retained source.
+    (tmp_path / "score-sources.json").write_text(json.dumps(dict(sources=[dict(
+        adapter="scores_csv", path="evidence-only.csv", sha256=source_hash,
+        mapping=dict(repo_id="repo", benchmark="bench", value="value", source="publisher"))])))
+    _build(universe, out)
+    active = open_tables(out)["scores"]
+    assert len(active) == 1 and not active.revision_verified.any()
+    _build(universe, out)
+    assert len(open_tables(out)["scores"]) == 1
+
+
+def test_retained_source_rebinds_new_exact_identity_without_duplicate_old_rows(universe, tmp_path):
+    from zoo.scores import load_scores_csv
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    source = tmp_path / "scores.csv"
+    source.write_text(f"key,bench,value\norg/parent@{SHA1},task,.5\norg/future@{SHA1},task,.6\n")
+    scores = load_scores_csv(source, dict(model_key="key", benchmark="bench", value="value", source="local"), models)
+    out = _build(universe, tmp_path / "expanding", score_tables=[scores])
+    source.unlink()
+    (universe.manifests / "future.manifest.json").write_text(json.dumps(dict(repo_id="org/future", revision=SHA1, access="metadata_only", tensors=[])))
+    _build(universe, out)
+    assert len(open_tables(out)["scores"]) == 2
+    for path in universe.manifests.glob("*.manifest.json"):
+        if json.loads(path.read_text())["repo_id"] == "org/parent":
+            path.unlink()
+    for path in universe.fingerprints.glob("org--parent__" + SHA1 + ".*"):
+        path.unlink()
+    _build(universe, out)
+    assert open_tables(out)["scores"].model_key.tolist() == ["org/future@" + SHA1]
+    context = next(json.loads(p.read_text()) for p in (out / "score-sources").glob("*.json")
+                   if json.loads(p.read_text()).get("adapter") == "scores_csv")
+    assert context["rows"][0]["scores"] == [] and context["rows"][0]["inactive_scores"]
+
+
+def test_filling_unrelated_metadata_does_not_duplicate_card_annotations(tmp_path):
+    import gzip
+    from evidence.source_metadata import SourceMetadataCapture, canonical_json
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "one.manifest.json").write_text(json.dumps(dict(repo_id="org/parent", revision=SHA1,
+        access="metadata_only", tensors=[])))
+    capture = SourceMetadataCapture("org/parent", SHA1)
+    capture.record_json("cardData.json", {"model-index":[{"results":[{
+        "dataset":{"name":"task"},"metrics":[{"type":"accuracy","value":0}]}]}]})
+    source = manifests / "one.source-metadata.json.gz"
+    source.write_bytes(gzip.compress(canonical_json(capture.snapshot()), mtime=0))
+    out = build_zoo(manifests, [], tmp_path / "out", tmp_path)
+    assert len(open_tables(out)["scores"]) == 1
+    capture.record_bytes("config.json", b'{"unrelated":true}')
+    source.write_bytes(gzip.compress(canonical_json(capture.snapshot()), mtime=0))
+    build_zoo(manifests, [], out, tmp_path)
+    assert len(open_tables(out)["scores"]) == 1
+    descriptors = list((out / "score-sources").glob("*.json"))
+    assert len(descriptors) == 1
+    context = json.loads(descriptors[0].read_text())
+    assert context["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    retained = json.loads(gzip.decompress((out / context["snapshot"]).read_bytes()))
+    assert retained["documents"]["config.json"]["content"] == '{"unrelated":true}'
+
+
+def test_source_configuration_mutation_keeps_previous_generation(universe, tmp_path, monkeypatch):
+    import zoo.build as builder
+    out = _build(universe, tmp_path / "out")
+    before = _snapshot(out.resolve())
+    source = tmp_path / "source.csv"
+    source.write_text(f"key,bench,value\norg/parent@{SHA1},task,.5\n")
+    config = tmp_path / "score-sources.json"
+    config.write_text(json.dumps(dict(sources=[dict(adapter="scores_csv", path="source.csv",
+        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        mapping=dict(model_key="key", benchmark="bench", value="value", source="local"))])))
+    original = builder._provenance
+    def mutate_after_hash(*args, **kwargs):
+        result = original(*args, **kwargs)
+        config.write_text('{"sources":[]}')
+        return result
+    monkeypatch.setattr(builder, "_provenance", mutate_after_hash)
+    with pytest.raises(ValueError, match="configuration.*changed|configuration.*hash"):
+        _build(universe, out)
+    assert _snapshot(out.resolve()) == before

@@ -14,6 +14,8 @@ from measurement_config import is_commit_sha, safe_filename
 
 from . import EVIDENCE_VERSION
 from .hub import AccessDenied, HubReader, OfflineError
+from .source_metadata import (SourceManifest, SourceMetadataCapture, bind_source_identity,
+                              source_metadata_path, write_source_metadata)
 from .views import plan_views
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -182,12 +184,15 @@ def select_file_set(filenames: list[str]) -> tuple[list[str], list[dict]]:
             [dict(filename=name, reason=reasons[name]) for name in sorted(reasons)])
 
 
-def _read_json(reader, source, revision, filename):
+def _read_json(reader, source, revision, filename, capture=None):
     remote = reader.resolve(source, filename, revision)
     if remote.size > MAX_JSON_BYTES:
         raise ValueError("Checkpoint JSON exceeds the 8 MiB limit")
     try:
-        value = json.loads(reader.read(remote, 0, remote.size))
+        raw = reader.read(remote, 0, remote.size)
+        if capture is not None:
+            capture.record_bytes(filename, raw)
+        value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("Invalid checkpoint JSON") from exc
     if not isinstance(value, dict):
@@ -260,21 +265,23 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
     local = root.is_dir()
     if not local and not is_commit_sha(revision):
         raise ValueError("Manifests require a pinned 40-character commit SHA")
-    manifest = dict(repo_id=source, revision=revision, gated=False, access="metadata_only", license=None,
+    manifest = SourceManifest(repo_id=source, revision=revision, gated=False, access="metadata_only", license=None,
                     declared_bases=[], base_model_relation=None, is_adapter=False,
                     weight_format="other", params_by_dtype={}, files=[], skipped_files=[], tensors=[],
                     config={}, adapter_config=None, view_counts={}, gguf={}, evidence_version=EVIDENCE_VERSION)
     manifest["decision"] = _decision({}, [], {})
+    capture = SourceMetadataCapture(source, revision, source_kind="local" if local else "hub_api")
     try:
         if local:
             root = root.resolve()
             source = str(root)
             files, revision = _local_files(root)
+            capture.identity["revision"] = revision
             manifest["revision"] = revision
             names = [f["filename"] for f in files]
             tags = []
             if "lineage.json" in names:
-                lineage = _read_json(reader, source, revision, "lineage.json")
+                lineage = _read_json(reader, source, revision, "lineage.json", capture)
                 manifest["repo_id"] = lineage.get("name") or str(root)
                 manifest["declared_bases"] = lineage.get("bases", [])
                 manifest["base_model_relation"] = lineage.get("relation")
@@ -290,11 +297,17 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
                 from huggingface_hub.errors import LocalEntryNotFoundError
                 try:
                     info = _cached_model_info(repo_id, revision)
+                    capture.source_kind = "hub_cache"
                 except LocalEntryNotFoundError:
                     info = _model_info(api, repo_id, revision)
             else:
                 info = _model_info(api, repo_id, revision)
             card = _mapping(_get(info, "card_data", _get(info, "cardData")))
+            capture.record_json("cardData.json", card)
+            if capture.source_kind == "hub_cache":
+                capture.record_status("model_info.json", "not_captured", reason="no_original_api_response_in_cached_snapshot")
+            else:
+                capture.record_json("model_info.json", _mapping(info))
             bases = card.get("base_model", [])
             manifest.update(gated=_get(info, "gated", False), license=card.get("license"),
                             declared_bases=[bases] if isinstance(bases, str) else bases or [],
@@ -317,11 +330,14 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
         manifest["weight_format"] = next((fmt for suffix, fmt in ((".safetensors", "safetensors"), (".gguf", "gguf"),
             (_PICKLE, "bin"), (".onnx", "onnx")) if any(name.endswith(suffix) for name in selected)), "other")
         manifest["files"] = [by_name[name] for name in selected]
-        config = _read_json(reader, source, revision, "config.json") if "config.json" in names else {}
+        config = _read_json(reader, source, revision, "config.json", capture) if "config.json" in names else {}
         manifest["config"] = _config_subset(config)
         if "adapter_config.json" in names:
-            manifest["adapter_config"] = _read_json(reader, source, revision, "adapter_config.json")
+            manifest["adapter_config"] = _read_json(reader, source, revision, "adapter_config.json", capture)
             manifest["is_adapter"] = True
+        # Extra source documents have their own fixed byte budget, before any
+        # weight-header reads. Already fetched API/config bytes are reused.
+        capture.capture_files(reader, source, revision, files)
         # The index, rather than a filename heuristic, defines which shards belong.
         indexes = _select_indexes(names)
         indexed = set()
@@ -389,6 +405,12 @@ def build_manifest(repo_id: str, revision: str, reader: HubReader, api) -> dict:
             manifest["access"] = "granted"
     except AccessDenied:
         manifest["access"] = "no_access"
+        if not local:
+            for name in ("model_info.json", "cardData.json"):
+                if name not in capture.documents:
+                    capture.record_status(name, "denied")
+    capture.identity = {key: manifest[key] for key in ("repo_id", "revision")}
+    manifest.source_metadata = capture.snapshot()
     return manifest
 
 
@@ -398,6 +420,15 @@ def write_manifest(manifest: dict, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = safe_filename(f"{manifest['repo_id']}@{manifest['revision']}") + ".manifest.json"
     destination = out_dir / filename
+    snapshot = getattr(manifest, "source_metadata", None)
+    if snapshot is None and not source_metadata_path(destination).is_file():
+        snapshot = SourceMetadataCapture(manifest["repo_id"], manifest["revision"]).snapshot()
+    if snapshot is not None:
+        snapshot = bind_source_identity(snapshot, {key: manifest[key] for key in ("repo_id", "revision")})
+        write_source_metadata(snapshot, destination)
+    else:
+        from .source_metadata import read_source_metadata
+        read_source_metadata(source_metadata_path(destination), {key: manifest[key] for key in ("repo_id", "revision")})
     fd, temporary = tempfile.mkstemp(prefix=filename + ".", suffix=".tmp", dir=out_dir)
     try:
         with os.fdopen(fd, "w") as stream:

@@ -32,6 +32,9 @@ from .schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
 from .tables import _fingerprint_files, _manifest_files, build_tables, duplicate_groups, pair_delta_files
 from .publish import package_inputs, current_conventions_id
 from .layers import build_layers
+from .collection import write_collection_receipt
+from .scores import (_canonical_scores, check_score_sources, prepare_score_inputs,
+                     score_source_paths, write_score_sources)
 from measurement_config import safe_filename
 
 
@@ -125,7 +128,8 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
               out: Path | None = None, data_root: Path | None = None,
               frame: Path | None = None, score_tables: Sequence[pd.DataFrame] = (),
               lineage_edges: Path | None = None, null: Path | None = None,
-              packages: Path | None = None, conventions_id: str | None = None) -> Path:
+              packages: Path | None = None, conventions_id: str | None = None,
+              retain_scores: bool = True, score_sources: Path | None = None) -> Path:
     """Read evidence artifacts, build privately, and publish with one os.replace.
 
     No checkpoint weights are read. Pre-commit failure leaves the old pointer;
@@ -166,21 +170,45 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
         manifests = Path(manifests).resolve()
         fingerprints = [Path(path).resolve() for path in fingerprints]
         sources = [manifests, *fingerprints]
-    score_tables = tuple(score_tables)
+    _check_locations([out], root, sources)
+    _check_output(out)
+    prior = out.resolve(strict=True) if retain_scores and out.is_symlink() else None
+    prior_files = ([prior / "scores.parquet", prior / "models.parquet",
+                    *sorted((prior / "score-sources").glob("*"))] if prior else [])
+    prior_hashes = {path: _hash_file(path) for path in prior_files if path.is_file()}
+    manifest_paths = list(_manifest_files(manifests))
+    identities = [json.loads(path.read_text()) for path in manifest_paths]
+    models = pd.DataFrame([dict(model_key=r["repo_id"] + "@" + r["revision"],
+        repo_id=r["repo_id"], revision=r["revision"]) for r in identities],
+        columns=["model_key", "repo_id", "revision"])
+    card_paths = [path.with_name(path.name.replace(".manifest.json", ".source-metadata.json.gz"))
+                  for path in manifest_paths]
+    card_paths = [path for path in card_paths if path.is_file()]
+    config = Path(score_sources).resolve() if score_sources is not None else root / "score-sources.json"
+    if score_sources is not None and not config.is_file():
+        raise ValueError("Explicit score source configuration is missing")
+    final_scores, context_tables, score_coverage, score_optional = prepare_score_inputs(
+        models, tuple(score_tables), prior=prior, config=config, card_paths=card_paths)
+    score_tables = (final_scores,) if len(final_scores) or context_tables else ()
+    score_inputs = score_source_paths(context_tables)
     optional = [Path(path).resolve() for path in (frame, lineage_edges, null) if path is not None]
-    sources += optional
+    sources += optional + [path for path in score_inputs if prior is None or not path.is_relative_to(prior)] + score_optional
     token = uuid4().hex
     stage = out.with_name(f".{out.name}.building-{token}")
     generation = out.with_name(f".{out.name}.generation-{token}")
     pointer = out.with_name(f".{out.name}.publish-{token}")
     _check_locations([out, stage, generation, pointer], root, sources)
     _check_output(out)
-    inputs = list(_manifest_files(manifests)) + list(_fingerprint_files(fingerprints)) + optional + package_sources
+    inputs = manifest_paths + list(_fingerprint_files(fingerprints)) + optional + package_sources + score_inputs + score_optional
     out.parent.mkdir(parents=True, exist_ok=True)
     stage.mkdir(mode=0o700)
     moved = False
     publication_attempted = False
     try:
+        write_score_sources(stage, context_tables)
+        (stage / "score-coverage.json").write_text(json.dumps(score_coverage, sort_keys=True, indent=2) + "\n")
+        if config.exists():
+            shutil.copyfile(config, stage / "score-configuration.json")
         tables = build_tables(manifests, fingerprints, root, frame=frame, score_tables=score_tables)
         tables["layers"] = build_layers(selected_packages)
         for relative in tables["models"].full_weight_spectra:
@@ -190,7 +218,8 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
                     raise ValueError("Spectra input escapes data_root")
                 inputs.append(path)
         _check_locations([out, stage, generation, pointer], root,
-                         sources + [Path(path).resolve() for path in inputs])
+                         sources + [Path(path).resolve() for path in inputs
+                                    if prior is None or not Path(path).resolve().is_relative_to(prior)])
         build_retrieval(stage, tables["models"], tables["views"], root)
         calibration = json.loads(Path(null).read_text()) if null is not None else None
         tables["lineage"] = merge_edges(
@@ -207,7 +236,109 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
                         publication_protocol=_PROTOCOL, conventions_id=conventions_id,
                         skipped_conventions=skipped, inputs=_provenance(inputs, score_tables, root),
                         row_counts={name: len(tables[name]) for name in _COLUMNS})
+        write_collection_receipt(stage, tables, root, manifest_paths=manifest_paths,
+                                 provenance=metadata["inputs"])
         (stage / "zoo.json").write_text(json.dumps(metadata, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        check_score_sources(context_tables)
+        config_pin = score_coverage.get("configuration")
+        if config_pin and any(_hash_file(path) != config_pin["sha256"] for path in
+                              [Path(config_pin["path"]), stage / "score-configuration.json"]):
+            raise ValueError("Score source configuration changed during build")
+        if any(_hash_file(path) != digest for path, digest in prior_hashes.items()):
+            raise ValueError("Retained score generation changed during rebuild")
+        stage.rename(generation)
+        moved = True
+        pointer.symlink_to(generation.name, target_is_directory=True)
+        _check_output(out)
+        publication_attempted = True
+        os.replace(pointer, out)
+    except BaseException:
+        pointer.unlink(missing_ok=True)
+        if not publication_attempted:
+            shutil.rmtree(generation if moved else stage)
+        raise
+    return requested_out
+
+
+def extend_scores(zoo: Path, score_tables: Sequence[pd.DataFrame], out: Path,
+                  data_root: Path, source_tables: Sequence[pd.DataFrame] = ()) -> Path:
+    """Append scores/source context without recomputing any inherited evidence.
+
+    Context-only source tables must bind to an exact multiset subset of inherited
+    scores; empty tables can retain explicitly unbound source records. Every
+    inherited file other than scores.parquet/zoo.json is copied byte-for-byte.
+    Existing writer versions and revision-verification meanings are unchanged.
+    """
+    from .tables import _score_tables
+    parent, root = Path(zoo).resolve(strict=True), Path(data_root).resolve(strict=True)
+    requested_out = Path(out)
+    out = requested_out.absolute().parent.resolve() / requested_out.name
+    score_tables, source_tables = tuple(score_tables), tuple(source_tables)
+    all_tables = score_tables + source_tables
+    sources = [parent, *score_source_paths(all_tables)]
+    token = uuid4().hex
+    stage = out.with_name(f".{out.name}.building-{token}")
+    generation = out.with_name(f".{out.name}.generation-{token}")
+    pointer = out.with_name(f".{out.name}.publish-{token}")
+    _check_locations([out, stage, generation, pointer], root, sources)
+    _check_output(out)
+    inventory = {p.relative_to(parent).as_posix(): _hash_file(p)
+                 for p in sorted(parent.rglob("*")) if p.is_file()}
+    metadata = json.loads((parent / "zoo.json").read_text())
+    if metadata.get("zoo_version") not in READABLE_ZOO_VERSIONS:
+        raise ValueError("Unsupported inherited zoo version")
+    tables = open_tables(parent)
+    manifests = dict.fromkeys(tables["models"].model_key)
+    additions = _score_tables(score_tables, manifests)
+    inherited_rows = _arrow("scores", tables["scores"]).to_pylist()
+    inherited_counts = _canonical_scores(inherited_rows)
+    for table in source_tables:
+        _score_tables([table], manifests)
+        counts = _canonical_scores(_arrow("scores", table).to_pylist())
+        if counts - inherited_counts:
+            raise ValueError("Context-only score bindings are absent from inherited scores")
+    existing_indices = [int(p.stem) for p in (parent / "score-sources").glob("*.json")
+                        if p.stem.isdigit()]
+    start = max(existing_indices, default=-1) + 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stage.mkdir(mode=0o700)
+    moved, publication_attempted = False, False
+    try:
+        for name in inventory:
+            destination = stage / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(parent / name, destination)
+        write_score_sources(stage, all_tables, start_index=start,
+            roles=["appended_scores"] * len(score_tables) + ["inherited_context_only"] * len(source_tables))
+        combined = pa.concat_tables([_arrow("scores", tables["scores"]), _arrow("scores", additions)])
+        pq.write_table(combined, stage / "scores.parquet")
+        metadata["build_time"] = datetime.now(timezone.utc).isoformat()
+        metadata["publication_protocol"] = _PROTOCOL
+        metadata["row_counts"]["scores"] = len(combined)
+        metadata["inherited_generation"] = dict(path=str(parent),
+            zoo_json_sha256=inventory["zoo.json"], file_sha256=inventory,
+            status="byte_inherited_except_scores_and_metadata")
+        new_inputs = _provenance(score_source_paths(all_tables), score_tables, root)
+        existing_table_ids = [int(r["path"].split(":", 1)[1]) for r in metadata["inputs"]
+                              if r["kind"] == "score_table" and r["path"].startswith("score_table:")]
+        first_table = max(existing_table_ids, default=-1) + 1
+        for row in new_inputs:
+            if row["kind"] == "score_table":
+                row["path"] = "score_table:" + str(first_table + int(row["path"].split(":")[1]))
+        metadata["inputs"] = sorted(metadata["inputs"] + new_inputs,
+                                    key=lambda row: (row["kind"], row["path"]))
+        tables["scores"] = combined.to_pandas()
+        retained_manifests = [root / row["path"] for row in metadata["inputs"]
+                              if row["kind"] == "file" and row["path"].endswith(".manifest.json")]
+        write_collection_receipt(stage, tables, root, manifest_paths=retained_manifests,
+                                 provenance=metadata["inputs"])
+        (stage / "zoo.json").write_text(json.dumps(metadata, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        check_score_sources(all_tables)
+        for name, digest in inventory.items():
+            if _hash_file(parent / name) != digest:
+                raise ValueError("Inherited generation changed during score extension")
+            if name not in {"scores.parquet", "zoo.json", "collection.json"} and _hash_file(stage / name) != digest:
+                raise ValueError("Inherited evidence bytes changed during score extension")
         stage.rename(generation)
         moved = True
         pointer.symlink_to(generation.name, target_is_directory=True)
@@ -236,6 +367,8 @@ def open_tables(zoo: Path) -> dict[str, pd.DataFrame]:
                 if row["labels"] is not None:
                     row["labels"] = dict(row["labels"])
         table = pd.DataFrame(records)
+        if name == "scores" and records:
+            table["n_items"] = pd.array([row["n_items"] for row in records], dtype="Int64")
         if name == "models":
             table = normalize_model_table(table)
         elif name == "views":

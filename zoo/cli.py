@@ -23,7 +23,9 @@ def _parser():
     build.add_argument("--conventions", dest="conventions_id")
     build.add_argument("--data_root", type=Path, help="Artifact root; defaults to ZOO_DATA")
     build.add_argument("--out", type=Path, help="Defaults to <data_root>/builds/current")
-    for name in ("frame", "leaderboard_v2", "scores_csv", "scores_mapping", "lineage_edges", "null"):
+    build.add_argument("--reset_scores", action="store_true",
+                       help="Discard inherited scores/context; current configured/card sources still apply")
+    for name in ("frame", "leaderboard_v2", "scores_csv", "scores_mapping", "score_sources", "lineage_edges", "null"):
         build.add_argument("--" + name, type=Path)
     publish = commands.add_parser("publish", help="Backfill immutable model packages from completed runs")
     publish.add_argument("--runs", type=Path, nargs="+", required=True)
@@ -113,6 +115,10 @@ def main(argv=None):
             if args.scores_csv:
                 scores.append(load_scores_csv(args.scores_csv, mapping, models))
         options = dict(frame=args.frame, score_tables=scores, lineage_edges=args.lineage_edges, null=args.null)
+        if args.reset_scores:
+            options["retain_scores"] = False
+        if args.score_sources:
+            options["score_sources"] = args.score_sources
         if package_mode:
             options.update(packages=args.packages, conventions_id=args.conventions_id)
         published = build_zoo(args.manifests, args.fingerprints, out, data_root=root, **options)

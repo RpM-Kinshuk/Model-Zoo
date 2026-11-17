@@ -69,6 +69,14 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
     marker = find_fingerprint(folder, safe, "full_weights")
     spectra = companion_spectra_path(marker)
     sources = {manifest_path.name: manifest_path}
+    from evidence.source_metadata import read_source_metadata, source_metadata_path
+    source_metadata = source_metadata_path(manifest_path)
+    source_capture = dict(status="not_captured", reason="legacy_source_metadata_absent")
+    if source_metadata.is_file():
+        snapshot = read_source_metadata(source_metadata, dict(repo_id=repo, revision=revision))
+        sources[source_metadata.name] = source_metadata
+        source_capture = dict(status=snapshot["status"], schema_version=snapshot["schema_version"],
+                              artifact=source_metadata.name)
     cfg, kind = None, "row_blocks_only"
     pairs = [(Path(run) / "stats" / f"{safe_filename(label)}.csv",
               Path(run) / "metrics" / f"{safe_filename(label)}.h5") for label in (key, repo)]
@@ -151,7 +159,8 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
                                   all_experts=experts, with_parent=with_parent, device=settings.get("device", "cpu"))
     metadata = dict(model_key=key, repo_id=repo, revision=revision, kind=kind,
                     conventions_id=conventions_id(scientific), conventions=scientific, complete=True,
-                    evidence={name: summary.get(name, 0) for name in ("reused", "measured", "gaps")})
+                    evidence={name: summary.get(name, 0) for name in ("reused", "measured", "gaps")},
+                    source_metadata=source_capture)
     return safe, sources, metadata
 
 

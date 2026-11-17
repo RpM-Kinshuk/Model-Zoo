@@ -67,6 +67,60 @@ metadata, not benchmark scores or predictions.
 
 Optional inputs:
 
+Ordinary builds collect benchmark evidence already available locally. They read
+structured `model-index` annotations from captured sibling
+`<safe>.source-metadata.json.gz` files, and optional hash-pinned sources configured
+in `<data_root>/score-sources.json` (`--score_sources PATH` overrides the config).
+No builder network, arbitrary benchmark crawler or model inference is involved.
+Card annotations are declared-only: card commits remain source provenance,
+`source_revision` is empty and `revision_verified` is false. Metric/task/dataset
+context is retained without inferred skills, rescaling or an evaluation-weight
+claim; unparseable annotations stay unsupported. README-only claims remain raw
+metadata rather than silently parsed scores.
+
+A local source configuration has this form (paths are relative to the config
+file, or absolute):
+
+```json
+{"sources":[{"adapter":"scores_csv","path":"scores.csv","sha256":"<exact 64-character SHA256>","mapping":{"model_key":"model_key","benchmark":"task","value":"accuracy","metric":"metric","source":"local_eval"}}]}
+```
+
+The other supported configured adapter is `leaderboard_v2`, without a mapping.
+Initial configured imports require the explicit source hash. Imported snapshots
+and mappings are then persistent inside the generation. Missing/mismatched
+configured sources fail before publication; a same-output rebuild can use its
+hash-matched retained snapshot when the original path has disappeared.
+
+Rebuilding the same managed output retains old values, revision flags and full
+source context for exact identities still selected, without repeating score
+flags. A fresh output has no inherited database; it uses only its configured
+sources and selected captured metadata. There is no scan of unrelated catalogs
+or CSV files. Within-source duplicate records remain; the same raw hash, adapter
+and mapping are idempotent across rebuilds, while distinct source contexts remain
+distinct even when their score values coincide. Active sources can bind newly
+selected identities. Historical bindings for removed identities become inactive;
+their raw records remain retained. Sources deliberately saved as
+`inherited_context_only` remain evidence-only during default replay, including
+unpinned publisher records that could otherwise match by repository name.
+An explicit hash-pinned source configuration is activation authority for that
+source, including a previously evidence-only retained snapshot; normal revision
+verification rules still apply. Automatic replay alone never activates it.
+Card annotation identity uses the exact model identity and captured card-document
+hash. Filling an unrelated config/README document refreshes retained metadata
+without appending the same annotations; the full wrapper hash still protects
+the retained bytes.
+
+`--reset_scores` (`retain_scores=False` in the API) explicitly discards inherited
+scores/context; current configured and captured-card sources still apply, so this
+is not a request for an empty score table. Programmatic tables retain their
+explicit flags and unavailable-context status. Immutable retained source snapshots
+and complete package metadata with matching identity/file hash are hardlinked
+into new generations when possible; mutable external CSV files
+are copied, preserving snapshot isolation. Original generations remain intact.
+`score-coverage.json` records per-model/source available (including score zero),
+missing, unsupported, failed, not-attempted or unknown state; `collection.json`
+records evidence tiers and the referenced artifact closure.
+
 | Option | Input |
 | --- | --- |
 | `--frame` | Selection CSV, including sampling probabilities |
@@ -78,12 +132,58 @@ Optional inputs:
 A score mapping names the CSV columns, for example:
 
 ```json
-{"repo_id":"model","revision":"commit","benchmark":"benchmark","value":"value","skill":"skill","source":"our_eval"}
+{"repo_id":"model","revision":"commit","benchmark":"benchmark","value":"value","skill":"skill","source":"our_eval","metric":"metric","harness":"harness","n_items":"n_items"}
 ```
 
 `source` may also be a constant label. Missing or mismatched evaluation SHAs
 produce unverified score rows. Default score filters use revision-verified rows;
 `--include_unverified` opts into the others.
+
+The optional `metric`, `harness` and `n_items` mappings preserve the supplied
+columns. Mapped empty context stays null; item counts must be finite nonnegative
+integers representable as int64. Scores are never averaged, rescaled or
+substituted from normalized leaderboard columns. Repeated evaluation records
+remain repeated rows. Alternatively, map `model_key` to a column containing
+full pinned `repo@revision` keys instead of `repo_id`: only that exact identity
+can match, with no repository fallback. Its explicit pin supplies the source
+revision; contradictory mapped repository/revision columns are rejected.
+For compatibility an absent metric mapping retains the legacy generic label
+`score`; this is an unspecified label, not a recovered accuracy definition.
+Absent harness/item-count mappings remain null.
+
+Imported sources are retained inside the immutable generation under
+`score-sources/<index>.csv` (original bytes) and `<index>.json` (source SHA256,
+adapter/mapping and record-to-score bindings). Every logical CSV data record
+has a 1-based `source_record`, distinct from physical text line numbers, and
+explicit imported, unmatched-model or missing-score status. Unmapped columns,
+including evaluation settings, remain recoverable from the raw snapshot. The
+descriptor binds full emitted score records, including model/source revisions,
+and retains multiplicity. The builder rejects changed source files or stale
+bindings. Programmatic DataFrames without importer metadata are accepted but
+receive an explicit `source_context_unavailable` descriptor. Keeping source
+context does not establish unknown historical evaluation settings.
+
+For an existing current-schema snapshot, the Model-Zoo API can add scores
+without recomputing inherited fingerprints, lineage or retrieval:
+
+```python
+from zoo.build import extend_scores
+
+extend_scores(parent, [new_scores], out, data_root,
+              source_tables=[recovered_original_context, unbound_source])
+```
+
+`new_scores` appends its rows under the existing model identities. Context-only
+`source_tables` do not append rows: any scores they bind must already occur in
+the inherited table with matching multiplicity. To retain an unpinned source
+without attaching it by repository name, import it against an empty model
+identity table; all source records then remain explicitly unmatched. Every
+inherited file except `scores.parquet` and `zoo.json` is copied byte-for-byte,
+including existing source snapshots. New source indices follow inherited ones.
+The new metadata records parent-generation hashes; the parent is preserved and
+the new generation uses the normal atomic publication and path guards. This
+path is a score extension, not a fresh lineage recomputation or verification of
+previously unverified scores.
 
 The output defaults to `<data_root>/builds/current`; `data_root` defaults to
 `ZOO_DATA`. Choose a fresh output or an existing zoo-managed publication path.

@@ -77,6 +77,8 @@ def quarantine_evidence(output_dir, repo, revision):
     manifest = backup / (folder.name + ".manifest.json")
     if manifest.is_file():
         shutil.copyfile(manifest, folder / manifest.name)
+        from evidence.source_metadata import copy_source_metadata
+        copy_source_metadata(manifest, folder / manifest.name)
     return backup
 
 
@@ -118,7 +120,8 @@ def evidence_complete(output_dir, model_id, revision="", *, measurement=None, op
 def _manifest(output_dir, repo, revision):
     folder = evidence_dir(output_dir, repo, revision)
     path = folder / (folder.name + ".manifest.json")
-    return json.loads(path.read_text()) if path.is_file() else None
+    from evidence.source_metadata import load_source_manifest
+    return load_source_manifest(path) if path.is_file() else None
 
 
 def prepare_evidence_manifests(rows, output_dir):
