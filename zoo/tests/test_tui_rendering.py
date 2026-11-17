@@ -33,3 +33,16 @@ def test_theme_enables_color_and_detects_light_background(monkeypatch):
     assert theme.automatic_palette() == 'light'
     theme.palette = 'light'
     assert theme.paint('text', '38;5;73') == '\x1b[38;5;25mtext\x1b[0m'
+
+
+def test_workflow_screen_restores_terminal_after_error(monkeypatch, capsys):
+    import pytest
+    monkeypatch.setenv('TERM', 'xterm-256color')
+    monkeypatch.setattr(tui.sys.stdout, 'isatty', lambda: True)
+    with pytest.raises(RuntimeError):
+        with tui._workflow_screen('1'):
+            raise RuntimeError('cancelled')
+    output = capsys.readouterr().out
+    assert '\x1b[?1049h\x1b[2J\x1b[H' in output
+    assert output.endswith('\x1b[?1049l')
+    assert 'COLLECT' in output

@@ -108,3 +108,57 @@ def test_spacious_frame_separates_workflows():
     frame = home.compose_frame(120, 48, 0, '', [], 0)
     first = next(index for index, line in enumerate(frame) if 'Prepare a collection' in line.text)
     assert not frame[first + 2].text.strip()
+
+
+def test_galaxy_color_region_never_overlaps_header_copy():
+    frame = home.compose_frame(110, 40, 0, '', [], 0)
+    for phrase in ('A living atlas of evidence', 'Collect. Measure. Discover.'):
+        line = next(line for line in frame if phrase in line.text)
+        assert line.artwork_start is not None
+        assert line.text.index(phrase) + len(phrase) < line.artwork_start
+
+
+def test_spiral_galaxy_has_distinct_arms_and_bright_core():
+    artwork = home.spiral_galaxy()
+    assert len(artwork) == 9
+    assert '✦' in artwork[4]
+    assert all(len(line) == 33 for line in artwork)
+    assert sum(line.count(' ') for line in artwork) > 150
+
+
+def test_menu_uses_multiple_warm_and_cool_accents():
+    frame = home.compose_frame(110, 40, 0, '', [], 0)
+    roles = {line.role for line in frame if any(item.title in line.text for item in home.WORKFLOWS)}
+    assert {'spark', 'aurora', 'rose'}.issubset(roles)
+
+
+def test_twinkle_has_gradual_brightness_steps():
+    levels = [home.star_brightness(17, tick) for tick in range(600)]
+    assert len(set(levels)) >= 10
+    assert max(abs(a-b) for a, b in zip(levels, levels[1:])) <= 1
+
+
+def test_twinkle_has_many_steps_without_speeding_up():
+    levels = [home.star_brightness(17, tick) for tick in range(1800)]
+    assert len(set(levels)) == 64
+    assert max(abs(a-b) for a, b in zip(levels, levels[1:])) <= 1
+
+
+def test_braille_stars_stay_sparse_and_clear_of_workflows():
+    frame = home.compose_frame(120, 48, 0, '', [], 500)
+    dust = [line for line in frame if any(role.startswith('dust') for _, role in line.highlights)]
+    assert dust
+    assert all(sum(not char.isspace() for char in line.text) <= 2 for line in dust)
+    assert all(line.role == 'stars' for line in dust)
+
+
+def test_dust_scatter_has_no_repeating_diagonal_stride():
+    from collections import Counter
+    for width in (50, 80, 120):
+        positions = [home.dust_locations(width, row) for row in range(40)]
+        assert positions == [home.dust_locations(width, row) for row in range(40)]
+        assert all(len({column for column, _ in row}) == 2 for row in positions)
+        for slot in range(2):
+            strides = Counter((b[slot][0] - a[slot][0]) % (width - 6)
+                              for a, b in zip(positions, positions[1:]))
+            assert max(strides.values()) < 8

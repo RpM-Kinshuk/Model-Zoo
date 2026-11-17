@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
 import glob
 import getpass
@@ -306,13 +307,15 @@ def _read_input(prompt: str, completion: Sequence[str] | str | None = None) -> s
 
 def _ask(label: str, default: str = "", *, detail: str = "", technical: str = "",
          completion: Sequence[str] | str | None = None) -> str:
+    print()
+    print(THEME.brand("  " + label))
     if detail:
-        print(THEME.paint("  ↳ " + detail, "38;5;245"))
+        print(THEME.paint("  ↳ " + detail, "38;5;73"))
     if VERBOSE and technical:
         print(THEME.paint("  ◦ " + technical, "38;5;67"))
     suffix = f" [{default}]" if default else ""
     # Readline needs a plain prompt to calculate cursor and wrapping positions.
-    answer = _read_input(f"{label}{suffix}: ", completion).strip()
+    answer = _read_input(f"  ›{suffix}: ", completion).strip()
     return answer or default
 
 
@@ -947,6 +950,28 @@ def _read_menu_choice(root: Path | None) -> str:
     return input("Workflow [1-8/q] > ")
 
 
+@contextmanager
+def _workflow_screen(choice: str, *, enabled: bool = True):
+    """Keep guided prompts in a fresh screen and restore the shell on exit."""
+    from zoo.terminal_home import WORKFLOWS
+    interactive = enabled and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"}
+    if interactive:
+        sys.stdout.write("\x1b[?1049h\x1b[2J\x1b[H")
+        sys.stdout.flush()
+    try:
+        item = next(item for item in WORKFLOWS if item.key == choice)
+        print()
+        print(THEME.brand(_fit(f"  ✦  MODEL ZOO  /  {item.group}", _width())))
+        print(THEME.paint(_fit("  " + item.description, _width()), "38;5;67"))
+        print(THEME.paint("  " + "─" * max(0, min(66, _width() - 2)), "38;5;73"))
+        print()
+        yield
+    finally:
+        if interactive:
+            sys.stdout.write("\x1b[?1049l")
+            sys.stdout.flush()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     global VERBOSE, _FRAME_SIZE
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1009,13 +1034,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(THEME.paint("Choose a number from 1 to 8, or q to quit.", "38;5;167"))
             _pause()
             continue
-        try:
-            action(root)
-        except (KeyboardInterrupt, EOFError):
-            print(THEME.paint("\nWorkflow cancelled.", "38;5;245"))
-        except (OSError, ValueError) as error:
-            print(THEME.paint(f"Could not prepare workflow: {error}", "38;5;167"))
-        _pause()
+        with _workflow_screen(choice, enabled=full_screen):
+            try:
+                action(root)
+            except (KeyboardInterrupt, EOFError):
+                print(THEME.paint("\nWorkflow cancelled.", "38;5;245"))
+            except (OSError, ValueError) as error:
+                print(THEME.paint(f"Could not prepare workflow: {error}", "38;5;167"))
+            _pause()
+
 
 
 if __name__ == "__main__":
