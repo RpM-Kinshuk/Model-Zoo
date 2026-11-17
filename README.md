@@ -45,7 +45,7 @@ queried offline without weights or GPUs · <a href="docs/operations/zoo.md#recov
 
 ## <img src="docs/assets/glyph-start.svg" width="30" height="30" alt=""> Quick start
 
-*List, prepare, launch, query.* The defaults are the intended behavior: one model
+_List, prepare, launch, query._ The defaults are the intended behavior: one model
 worker, automatic budgets, evidence and package publishing on.
 
 <picture>
@@ -188,6 +188,24 @@ mode receive [row-block evidence](#oversized-models) after the full-mode queue.
 
 ### 5. Build and query the zoo
 
+For a guided terminal interface, install the project and start `model-zoo`:
+
+```bash
+python -m pip install -e .
+model-zoo
+```
+
+The launcher guides you through preparing and running collections, summarizing
+results, publishing packages, rebuilding the zoo, and measuring model deltas.
+Its measurement planner asks about the GPU pool, workers in parallel, per-worker
+weight/RAM/cache budgets, download-ahead, and timeout/cleanup policy. A read-only
+host scan reports selected GPU memory, available RAM, storage, writable cache
+placement, and whether a Hub token environment variable is set (its value stays
+hidden). Use `model-zoo --verbose` for
+flag-level notes beside each prompt.
+Set `ZOO_DATA` first, or pass `--data-root /path/to/zoo-data`; the query screen
+uses Zoo-Keeper when its CLI is installed.
+
 ```bash
 python -m zoo.cli build
 ```
@@ -234,7 +252,7 @@ for every `outcome` and coverage field.
 
 ## <img src="docs/assets/glyph-architecture.svg" width="30" height="30" alt=""> Architecture
 
-*Plan, own resources, execute, publish.* Supervision stays active through cleanup.
+_Plan, own resources, execute, publish._ Supervision stays active through cleanup.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
@@ -249,19 +267,19 @@ private cache is gone.
 <details>
 <summary><strong>Source map</strong> · Files and responsibilities</summary>
 
-| Code | Owns |
-| --- | --- |
-| `esd_experiment/src/run_experiment.py` | Preparation, metadata pins, preflight, resume, worker jobs and oversized-model routing |
-| `esd_experiment/src/sizing.py` · `prefetch.py` | Automatic per-job budgets; bounded download-ahead into future workers' caches |
-| `esd_experiment/gputracker/` | GPU allocation, live config, process groups, resource checks and cleanup |
-| `esd_experiment/src/worker.py` | One model's load → analyze → finalize lifecycle, heartbeat and package publication |
-| `esd_experiment/src/model_loader.py` | Architecture selection, checkpoint integrity and validated adapter merging |
-| `esd_experiment/src/checkpoint_tensors.py` | Stored-matrix analysis without constructing a model |
-| `esd_experiment/src/evidence_bridge.py` | Evidence sidecar setup, completion checks and publishing for runner jobs |
-| `esd_experiment/src/oversized_model_worker.py` | Supervised row-block evidence for models too large for full mode |
-| `net_esd/` | Matrix discovery, coverage, layer scheduling and spectral computation |
-| `evidence/` | Manifests, fingerprints, row-block sketches, parent deltas, the CPU sidecar and the evidence CLI |
-| `zoo/` | Package publication, the zoo build, lineage, retrieval and the candidate-pair delta pass |
+| Code                                           | Owns                                                                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `esd_experiment/src/run_experiment.py`         | Preparation, metadata pins, preflight, resume, worker jobs and oversized-model routing           |
+| `esd_experiment/src/sizing.py` · `prefetch.py` | Automatic per-job budgets; bounded download-ahead into future workers' caches                    |
+| `esd_experiment/gputracker/`                   | GPU allocation, live config, process groups, resource checks and cleanup                         |
+| `esd_experiment/src/worker.py`                 | One model's load → analyze → finalize lifecycle, heartbeat and package publication               |
+| `esd_experiment/src/model_loader.py`           | Architecture selection, checkpoint integrity and validated adapter merging                       |
+| `esd_experiment/src/checkpoint_tensors.py`     | Stored-matrix analysis without constructing a model                                              |
+| `esd_experiment/src/evidence_bridge.py`        | Evidence sidecar setup, completion checks and publishing for runner jobs                         |
+| `esd_experiment/src/oversized_model_worker.py` | Supervised row-block evidence for models too large for full mode                                 |
+| `net_esd/`                                     | Matrix discovery, coverage, layer scheduling and spectral computation                            |
+| `evidence/`                                    | Manifests, fingerprints, row-block sketches, parent deltas, the CPU sidecar and the evidence CLI |
+| `zoo/`                                         | Package publication, the zoo build, lineage, retrieval and the candidate-pair delta pass         |
 
 The [runner source map](esd_experiment/README.md#code-map) lists entrypoints and
 implementation boundaries.
@@ -272,15 +290,15 @@ implementation boundaries.
 
 ## <img src="docs/assets/glyph-gpus.svg" width="30" height="30" alt=""> GPU allocation and parallelism
 
-*Across models and within a model.* Separate processes own devices; layer threads share the work.
+_Across models and within a model._ Separate processes own devices; layer threads share the work.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gpus-dark.svg">
   <img src="docs/assets/gpus-light.svg" width="100%" alt="Two levels of parallelism. Across models, isolated workers each reserve their own GPUs: worker A holds GPUs 0 and 1, worker B holds GPUs 2 and 3, each in its own process group with a private cache and CUDA_VISIBLE_DEVICES; model C waits for idle GPUs. Admission needs two idle checks five seconds apart with under 500 MB used. Within a model, matrices are sorted by SVD cost and dispatched to one fixed-device thread per GPU; layer metrics return in the original order.">
 </picture>
 
-| Pool | Devices per model | Models at once |
-| --- | --- | --- |
+| Pool             | Devices per model      | Models at once            |
+| ---------------- | ---------------------- | ------------------------- |
 | `--gpus 0 1 2 3` | `--num_gpus_per_job 2` | `--max_concurrent_jobs 2` |
 
 > [!TIP]
@@ -333,7 +351,7 @@ on one selected device. Explicit `--analysis_source checkpoint` requires
 
 ## <img src="docs/assets/glyph-control.svg" width="30" height="30" alt=""> Runtime controls and cache lifecycle
 
-*A live run stays steerable.* Change policy, drain the queue or stop with supervised cleanup.
+_A live run stays steerable._ Change policy, drain the queue or stop with supervised cleanup.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/lifecycle-dark.svg">
@@ -348,17 +366,17 @@ PID=$(python -c "import json, sys; print(json.load(open(sys.argv[1]))['runner_pi
 kill -HUP "$PID"    # after editing $RUN/gpu_config.json
 ```
 
-| Goal | Signal | What happens |
-| --- | --- | --- |
-| Reload policy | `kill -HUP` | Rereads `gpu_config.json` at a safe point; an invalid file keeps the previous settings |
-| Finish active work | `kill -USR1` | Stops dispatching new models; running workers complete |
-| Stop and clean up | `kill -INT` or `kill -TERM` | Terminates worker groups, confirms exit, then removes caches and releases GPUs |
+| Goal               | Signal                      | What happens                                                                           |
+| ------------------ | --------------------------- | -------------------------------------------------------------------------------------- |
+| Reload policy      | `kill -HUP`                 | Rereads `gpu_config.json` at a safe point; an invalid file keeps the previous settings |
+| Finish active work | `kill -USR1`                | Stops dispatching new models; running workers complete                                 |
+| Stop and clean up  | `kill -INT` or `kill -TERM` | Terminates worker groups, confirms exit, then removes caches and releases GPUs         |
 
-| Bound | Default | Checked as |
-| --- | --- | --- |
-| Selected weights | Pool capacity, including adapter-base weights | Reviewed download sizes |
-| Worker RAM | Automatic, at least 16 GiB | Sampled process-tree RSS |
-| Private cache | Automatic | Sampled allocated disk usage |
+| Bound            | Default                                       | Checked as                   |
+| ---------------- | --------------------------------------------- | ---------------------------- |
+| Selected weights | Pool capacity, including adapter-base weights | Reviewed download sizes      |
+| Worker RAM       | Automatic, at least 16 GiB                    | Sampled process-tree RSS     |
+| Private cache    | Automatic                                     | Sampled allocated disk usage |
 
 Every bound is configurable per run. RAM and cache can overshoot between samples.
 
@@ -372,15 +390,15 @@ watch -n 5 'python -m json.tool analysis_runs/phase2/my_run/logs/current_state.j
 The snapshot includes the runner PID, worker state, stages, GPUs, process
 groups, heartbeat data and cache/log paths.
 
-| Control | Default |
-| --- | --- |
-| `--max_weight_gib` | `auto`: selected GPU pool capacity / 1.5; includes adapter base |
-| `--max_worker_ram_gib` | `auto`: max(16, 0.5 × weight GiB + 4), plus any evidence buffer above 2 GiB |
-| `--max_worker_cache_gib` | `auto`: 1.1 × selected weight GiB + 2 |
-| `--heartbeat_timeout_seconds` | 3600 s without a heartbeat |
-| `--stage_timeout_seconds` | `auto`: analyze/fingerprint max(28800, 600 × weight GiB); load 7200, save 1800, default 14400 |
-| `--stale_process_action` | `terminate`; `log` marks stale workers and keeps waiting |
-| `--termination_grace_seconds` | 30 s after TERM before KILL |
+| Control                       | Default                                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `--max_weight_gib`            | `auto`: selected GPU pool capacity / 1.5; includes adapter base                               |
+| `--max_worker_ram_gib`        | `auto`: max(16, 0.5 × weight GiB + 4), plus any evidence buffer above 2 GiB                   |
+| `--max_worker_cache_gib`      | `auto`: 1.1 × selected weight GiB + 2                                                         |
+| `--heartbeat_timeout_seconds` | 3600 s without a heartbeat                                                                    |
+| `--stage_timeout_seconds`     | `auto`: analyze/fingerprint max(28800, 600 × weight GiB); load 7200, save 1800, default 14400 |
+| `--stale_process_action`      | `terminate`; `log` marks stale workers and keeps waiting                                      |
+| `--termination_grace_seconds` | 30 s after TERM before KILL                                                                   |
 
 Zero disables a weight/RAM/cache cap, the heartbeat timeout or an individual
 stage timeout. The termination grace period must be at least one second.
@@ -448,7 +466,7 @@ Allow signal-triggered cleanup to finish; avoid killing the runner with SIGKILL.
 
 ## <img src="docs/assets/glyph-spectrum.svg" width="30" height="30" alt=""> Measurement scope
 
-*Weights, singular values, spectrum.* Explicit matrix coverage gives the numbers context.
+_Weights, singular values, spectrum._ Explicit matrix coverage gives the numbers context.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/spectrum-dark.svg">
@@ -466,8 +484,8 @@ where $n$ counts the tail eigenvalues and $F_n$ is their empirical distribution:
 D \;=\; \sup_{\lambda \ge \lambda_{\min}} \big|\,F_n(\lambda) - F_{\hat\alpha}(\lambda)\,\big|
 ```
 
-| Decompose | Compute | Fit the tail |
-| --- | --- | --- |
+| Decompose          | Compute                | Fit the tail        |
+| ------------------ | ---------------------- | ------------------- |
 | **SVD** by default | **float32** arithmetic | **Midpoint** cutoff |
 
 Declared module weights and ordinary dense 2D parameters are measured.
@@ -476,25 +494,25 @@ Unsupported representations retain explicit reasons.
 <details>
 <summary><strong>Know the coverage</strong> · Included matrices and explicit exclusions</summary>
 
-| Matrix family | Interpretation |
-| --- | --- |
-| Linear, Embedding, HF Conv1D | Whole dense matrices, including wide/tall projections |
-| Conv1d / Conv2d / Conv3d | Declared kernel slices, not the full convolution operator |
-| Built-in MultiheadAttention | Declared fused or separate projections; no synthetic QKV split |
-| HF ViT token/position tables | Declared tables with the singleton broadcast axis removed |
-| HF Swin relative-position tables | Stored relative-position-by-head matrices, not attention operators |
-| Other ordinary dense 2D registered parameters | Exact parameter names, including attributes beyond `.weight` |
+| Matrix family                                 | Interpretation                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------ |
+| Linear, Embedding, HF Conv1D                  | Whole dense matrices, including wide/tall projections              |
+| Conv1d / Conv2d / Conv3d                      | Declared kernel slices, not the full convolution operator          |
+| Built-in MultiheadAttention                   | Declared fused or separate projections; no synthetic QKV split     |
+| HF ViT token/position tables                  | Declared tables with the singleton broadcast axis removed          |
+| HF Swin relative-position tables              | Stored relative-position-by-head matrices, not attention operators |
+| Other ordinary dense 2D registered parameters | Exact parameter names, including attributes beyond `.weight`       |
 
 Declared weights are visited first; generic discovery does not remeasure their
 shared aliases. Unknown higher-dimensional layouts, packed quantization,
 adapter factors and parametrization internals are excluded with reasons.
 
-| Candidate | Default | With `--filter_type` |
-| --- | --- | --- |
+| Candidate                                    | Default                | With `--filter_type`         |
+| -------------------------------------------- | ---------------------- | ---------------------------- |
 | Ordinary 2D parameter such as `custom.extra` | Included by exact name | Excluded by legacy selection |
-| Linear aspect ratio ≥ 8 | Included whole | Skipped by legacy rule |
-| Undeclared 3D `custom.kernel` | Skipped with reason | Skipped with reason |
-| Packed/quantized storage | No automatic unpacking | No automatic unpacking |
+| Linear aspect ratio ≥ 8                      | Included whole         | Skipped by legacy rule       |
+| Undeclared 3D `custom.kernel`                | Skipped with reason    | Skipped with reason          |
+| Packed/quantized storage                     | No automatic unpacking | No automatic unpacking       |
 
 Discovery preserves loaded parameter values. It does not infer a layout from
 a name or a 3:1 shape. A stored matrix is a descriptor of that parameter,
@@ -556,25 +574,25 @@ rejected.
 <details>
 <summary><strong>Choose the numerics</strong> · Settings, metrics and compatibility</summary>
 
-| Option | Default |
-| --- | --- |
-| `--analysis_source` | `auto` |
-| `--load_dtype` | `auto`, checkpoint/framework-selected |
-| `--compute_dtype` | `float32`; `float64` for reference checks |
-| `--use_svd` | On; CUDA uses `gesvd`. `--no-use_svd` selects Gram |
-| `--fix_fingers` | `xmin_mid`; alternatives: `xmin_peak`, `DKS` |
-| `--filter_zeros` / `--evals_thresh` | On / absolute threshold `1e-5` |
+| Option                              | Default                                            |
+| ----------------------------------- | -------------------------------------------------- |
+| `--analysis_source`                 | `auto`                                             |
+| `--load_dtype`                      | `auto`, checkpoint/framework-selected              |
+| `--compute_dtype`                   | `float32`; `float64` for reference checks          |
+| `--use_svd`                         | On; CUDA uses `gesvd`. `--no-use_svd` selects Gram |
+| `--fix_fingers`                     | `xmin_mid`; alternatives: `xmin_peak`, `DKS`       |
+| `--filter_zeros` / `--evals_thresh` | On / absolute threshold `1e-5`                     |
 
-| Field | Definition, over the retained spectrum |
-| --- | --- |
-| `alpha`, `D` | Fitted tail exponent and its Kolmogorov–Smirnov distance |
-| `fit_xmin`, `n_tail` | Cutoff and the number of tail eigenvalues, ties included |
-| `spectral_norm` | Largest eigenvalue $\lambda_{\max}$ |
-| `norm` | $\sum_i \lambda_i$, the squared Frobenius norm |
-| `stable_rank` | $\sum_i \lambda_i / \lambda_{\max}$ |
-| `alpha_weighted` | $\alpha \log_{10} \lambda_{\max}$ |
-| `log_alpha_norm` | $\log_{10} \sum_i \lambda_i^{\alpha}$ |
-| `entropy` | Shannon entropy of the rank-many largest eigenvalues, divided by $\log(\text{rank})$ |
+| Field                | Definition, over the retained spectrum                                               |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| `alpha`, `D`         | Fitted tail exponent and its Kolmogorov–Smirnov distance                             |
+| `fit_xmin`, `n_tail` | Cutoff and the number of tail eigenvalues, ties included                             |
+| `spectral_norm`      | Largest eigenvalue $\lambda_{\max}$                                                  |
+| `norm`               | $\sum_i \lambda_i$, the squared Frobenius norm                                       |
+| `stable_rank`        | $\sum_i \lambda_i / \lambda_{\max}$                                                  |
+| `alpha_weighted`     | $\alpha \log_{10} \lambda_{\max}$                                                    |
+| `log_alpha_norm`     | $\log_{10} \sum_i \lambda_i^{\alpha}$                                                |
+| `entropy`            | Shannon entropy of the rank-many largest eigenvalues, divided by $\log(\text{rank})$ |
 
 SVD is the default because Gram construction can lose small-eigenvalue
 accuracy. Upcasting cannot restore loading precision. Missing fits stay explicit;
@@ -596,7 +614,7 @@ coverage in a fresh directory.
 
 ## <img src="docs/assets/glyph-fingerprint.svg" width="30" height="30" alt=""> Evidence and the zoo
 
-*Weights, fingerprints, packages, zoo.* Measure each model once; compare across every package.
+_Weights, fingerprints, packages, zoo._ Measure each model once; compare across every package.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/fingerprint-dark.svg">
@@ -631,13 +649,13 @@ python -m zoo.cli deltas --workers auto --compute_device cpu
 python -m zoo.cli build
 ```
 
-| Query | Answers |
-| --- | --- |
+| Query           | Answers                                                                           |
+| --------------- | --------------------------------------------------------------------------------- |
 | `find` · `info` | Filter models by metadata and scores; show one model's coverage, scores and links |
-| `similar` | Nearest weight neighbors within the same architecture signature |
-| `family` | Ancestors and descendants from lineage records, with their evidence tiers |
-| `diff` | Views two models share on their measured blocks and views that changed |
-| `check` | A model diffed against its declared bases, with a verdict |
+| `similar`       | Nearest weight neighbors within the same architecture signature                   |
+| `family`        | Ancestors and descendants from lineage records, with their evidence tiers         |
+| `diff`          | Views two models share on their measured blocks and views that changed            |
+| `check`         | A model diffed against its declared bases, with a verdict                         |
 
 <a name="oversized-models"></a>
 
@@ -669,15 +687,15 @@ records pinned identity, kind, conventions, artifact SHA256 hashes, reuse counts
 and source-run provenance. An identical existing package is reused; different
 contents never overwrite it.
 
-| Table | Contents |
-| --- | --- |
-| `models` | Pinned identity, metadata, coverage and artifact links |
-| `views` | Measured matrices and their block hashes |
-| `layers` | Per-layer alpha, fit quality, spectral metrics and HDF5 row indices |
-| `coverage` | Measured/skipped tensors and reasons |
-| `lineage` | Candidate relationships with evidence tiers and statistics |
-| `scores` | Measured scores and revision verification |
-| `predictions` | Separate prediction records; empty in v0 |
+| Table         | Contents                                                            |
+| ------------- | ------------------------------------------------------------------- |
+| `models`      | Pinned identity, metadata, coverage and artifact links              |
+| `views`       | Measured matrices and their block hashes                            |
+| `layers`      | Per-layer alpha, fit quality, spectral metrics and HDF5 row indices |
+| `coverage`    | Measured/skipped tensors and reasons                                |
+| `lineage`     | Candidate relationships with evidence tiers and statistics          |
+| `scores`      | Measured scores and revision verification                           |
+| `predictions` | Separate prediction records; empty in v0                            |
 
 Eigenvalues stay in HDF5; `layers.h5_index` points into each package's
 `esd/metrics.h5`. The default build accepts full and row-block-only packages and
@@ -719,7 +737,7 @@ and revision handling
 
 ## <img src="docs/assets/glyph-verify.svg" width="30" height="30" alt=""> Verification and maintenance
 
-*Check the installation, then the change.*
+_Check the installation, then the change._
 
 ```bash
 python -m pip install 'pytest>=8,<9'
