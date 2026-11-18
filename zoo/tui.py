@@ -950,11 +950,24 @@ def _read_menu_choice(root: Path | None) -> str:
     return input("Workflow [1-8/q] > ")
 
 
+def _supports_full_screen() -> bool:
+    terminal = os.environ.get("TERM", "")
+    if terminal:
+        return terminal != "dumb"
+    if os.name != "nt":
+        return False
+    try:
+        import curses
+    except ImportError:
+        return False
+    return True
+
+
 @contextmanager
 def _workflow_screen(choice: str, *, enabled: bool = True):
     """Keep guided prompts in a fresh screen and restore the shell on exit."""
     from zoo.terminal_home import WORKFLOWS
-    interactive = enabled and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"}
+    interactive = enabled and sys.stdout.isatty() and _supports_full_screen()
     if interactive:
         sys.stdout.write("\x1b[?1049h\x1b[2J\x1b[H")
         sys.stdout.flush()
@@ -1001,7 +1014,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     motion = not args.no_motion and "NO_COLOR" not in os.environ
     full_screen = (not args.plain and sys.stdin.isatty() and sys.stdout.isatty()
-                   and os.environ.get("TERM", "") not in {"", "dumb"})
+                   and _supports_full_screen())
     while True:
         try:
             if full_screen:

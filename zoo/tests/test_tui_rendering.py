@@ -1,8 +1,26 @@
 """Terminal rendering regressions for the interactive launcher."""
 
 import os
+import sys
+from types import ModuleType
 
 from zoo import tui
+
+
+def test_windows_full_screen_is_available_without_term_when_curses_exists(monkeypatch):
+    monkeypatch.setattr(tui.os, 'name', 'nt')
+    monkeypatch.setattr(tui.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(tui.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.delenv('TERM', raising=False)
+    monkeypatch.setitem(sys.modules, 'curses', ModuleType('curses'))
+    assert tui._supports_full_screen()
+
+
+def test_full_screen_stays_disabled_for_dumb_terminal(monkeypatch):
+    monkeypatch.setattr(tui.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(tui.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.setenv('TERM', 'dumb')
+    assert not tui._supports_full_screen()
 
 
 def test_frame_reserves_last_terminal_column(monkeypatch):
