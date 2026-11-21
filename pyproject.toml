@@ -7,12 +7,30 @@ name = "model-zoo"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "h5py==3.15.1",
+    "huggingface-hub==1.11.0",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "pyarrow==23.0.1",
+    "safetensors==0.7.0",
+    "scipy==1.15.3",
+    "torch>=2.10,<2.12",
     "windows-curses>=2.3.1; sys_platform == 'win32'",
 ]
 
 [project.scripts]
 model-zoo = "zoo.tui:main"
 
+[tool.setuptools]
+py-modules = ["measurement_config"]
+
+[tool.setuptools.package-dir]
+"" = "esd_experiment/src"
+evidence = "evidence"
+net_esd = "net_esd"
+zoo = "zoo"
+
 [tool.setuptools.packages.find]
-include = ["evidence", "evidence.*", "zoo", "zoo.*"]
+where = ["."]
+include = ["evidence", "evidence.*", "net_esd", "net_esd.*", "zoo", "zoo.*"]
 exclude = ["evidence.tests", "evidence.tests.*", "zoo.tests", "zoo.tests.*"]

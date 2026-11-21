@@ -1,3 +1,4 @@
+import gzip
 import json
 
 import pandas as pd
@@ -145,7 +146,11 @@ def test_manifest_pins_bases_and_local_reads_are_offline(child_dir, tmp_path, mo
     manifests = [json.loads(p.read_text()) for p in out.glob("*.manifest.json")]
     assert {m["repo_id"] for m in manifests} == {"lab/parent", "lab/child"}
     assert all(m["revision"].startswith("local:") for m in manifests)
-    assert not any(str(tmp_path) in p.read_text() for p in out.iterdir())
+    for artifact in out.iterdir():
+        contents = artifact.read_bytes()
+        if artifact.suffix == ".gz":
+            contents = gzip.decompress(contents)
+        assert str(tmp_path).encode() not in contents, artifact.name
     child = build_manifest(str(child_dir), "main", HubReader(), None)
     pd.DataFrame([{"repo_id": "lab/child", "revision": child["revision"]}]).to_csv(path, index=False)
     assert main(args) == 0

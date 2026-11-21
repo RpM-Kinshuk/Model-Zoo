@@ -188,12 +188,17 @@ mode receive [row-block evidence](#oversized-models) after the full-mode queue.
 
 ### 5. Build and query the zoo
 
-For a guided terminal interface, install the project and start `model-zoo`:
+From the Model-Zoo checkout, install the builder and start the launcher:
 
 ```bash
-python -m pip install -e .
+python -m pip install .
 model-zoo
 ```
+
+The installed package includes the database builder and evidence CLI. For the
+collection and checkpoint runner menus, use the analysis environment above
+and run `python -m zoo.tui` from the source checkout so the launcher can find
+the collection scripts. The builder and query wheels accept Torch 2.10 and 2.11.
 
 The launcher guides you through preparing and running collections, summarizing
 results, publishing packages, rebuilding the zoo, and measuring model deltas.
@@ -215,15 +220,15 @@ python -m zoo.cli build
 
 The build reads current-convention packages from `$ZOO_DATA/packages` and
 atomically publishes `$ZOO_DATA/builds/current`: Parquet tables, a retrieval
-index and links to full HDF5 spectra. Query it offline, without weights or GPUs,
-from a [Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) checkout beside
-Model-Zoo:
+index and links to full HDF5 spectra. Install the companion
+[Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) from its local checkout
+alongside Model-Zoo. The installed query CLI works from any directory, offline
+and without model weights or GPUs.
 
 ```bash
-python -m pip install -e . duckdb==1.5.6   # once: Zoo-Keeper imports zoo/ and evidence/
-cd ../Zoo-Keeper
-python -m zoo_keeper.cli find --text gpt2 --limit 10
-python -m zoo_keeper.cli similar openai-community/gpt2 -k 5
+python -m pip install . ../Zoo-Keeper
+zoo-keeper find --text gpt2 --limit 10
+zoo-keeper similar openai-community/gpt2 -k 5
 ```
 
 <a name="what-a-run-writes"></a>
