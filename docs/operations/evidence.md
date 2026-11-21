@@ -67,7 +67,9 @@ LoRA supports recognized PEFT, kohya, diffusers and MLX factor names. It measure
 the update, rather than claiming the adapter is a full model. MoE defaults to
 eight deterministic experts per layer; use `--all_experts` for all experts.
 Diffusers view names include the component folder to prevent collisions.
-GPTQ, AWQ, bitsandbytes, MLX packed quantization and GGUF remain recorded gaps.
+GPTQ, AWQ, bitsandbytes and MLX packed quantization remain recorded gaps.
+GGUF-only repositories contribute recorded model and file metadata. The
+current GGUF scope stops before tensor decoding and fingerprinting.
 `.bin`/ONNX-only checkpoints provide metadata only; pickle weights are never loaded.
 
 ### Coverage reasons
