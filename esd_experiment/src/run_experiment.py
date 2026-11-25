@@ -36,6 +36,7 @@ from uuid import uuid4
 SCRIPT_DIR = Path(__file__).parent
 EXPERIMENT_ROOT = SCRIPT_DIR.parent
 PROJECT_ROOT = EXPERIMENT_ROOT.parent  # Go up to ESD root
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(EXPERIMENT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "shells"))
@@ -47,6 +48,7 @@ from model_loader import get_hf_token, safe_filename
 from evidence_bridge import (add_evidence_arguments, validate_evidence_arguments, evidence_complete,
                              prepare_evidence_manifests, cached_models, identity, publish_model, publication_complete)
 from measurement_config import artifact_compatibility, is_commit_sha, measurement_config, validate_model_pin
+from zoo.progress import Progress
 
 
 BACKEND_PROBE_TIMEOUT_SECONDS = 30
@@ -574,7 +576,7 @@ def _review_weight_files(repo_id, revision, files, *, adapter, read_metadata, to
     raise ValueError("No standard safetensors/PyTorch weight files; review this checkpoint layout")
 
 
-def pin_model_revisions(model_df, max_weight_gib=None):
+def pin_model_revisions(model_df, max_weight_gib=None, *, progress=None):
     """Resolve a plain CSV using Hub metadata and adapter JSON, never model code.
 
     Reuse resolutions of shared bases within this preparation. Keep failed rows
@@ -624,6 +626,8 @@ def pin_model_revisions(model_df, max_weight_gib=None):
         return resolved[key]
 
     rows = []
+    if progress is not None:
+        progress.update(0)
     for _, row in model_df.iterrows():
         pinned = row.to_dict()
         model_id = _normalize_text(row["model_id"])
@@ -691,7 +695,9 @@ def pin_model_revisions(model_df, max_weight_gib=None):
             if max_weight_gib is not None:
                 pinned["preparation_reason"] = pinned["pin_error"]
         rows.append(pinned)
-        if len(rows) % 100 == 0:
+        if progress is not None:
+            progress.update(len(rows))
+        elif len(rows) % 100 == 0:
             print(f"Resolved {len(rows)}/{len(model_df)} model rows", flush=True)
     return pd.DataFrame(rows)
 
@@ -1204,9 +1210,11 @@ def main():
             if manifest_path.exists():
                 raise ValueError(f"{manifest_path} already exists; use those pins or prepare in a fresh directory")
             print(f"Resolving {len(model_df)} model rows (metadata/config only; no weights)", flush=True)
-            pinned = pin_model_revisions(model_df, max_weight_gib=args.max_weight_gib)
+            progress = Progress("Model review", len(model_df), lambda line: print(line, flush=True))
+            pinned = pin_model_revisions(model_df, max_weight_gib=args.max_weight_gib, progress=progress)
             write_pinned_model_list(pinned, manifest_path)
             if getattr(args, "evidence", False):
+                print("Recording evidence manifests", flush=True)
                 prepare_evidence_manifests(pinned, output_dir)
             errors = int(pinned["pin_status"].eq("error").sum())
             print(f"Saved {len(pinned) - errors} pinned models and {errors} unresolved rows to {manifest_path}")

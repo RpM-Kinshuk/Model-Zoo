@@ -186,6 +186,20 @@ mode receive [row-block evidence](#oversized-models) after the full-mode queue.
 
 </details>
 
+The runner reports a progress bar while reviewing model rows and while
+supervising each measurement queue. A finished worker has exited its
+supervision loop. Check the run summary for successful and failed models.
+The same plain-text bars appear in shell and Slurm output, including redirected
+logs. For example, submit a metadata-only preparation from this checkout with
+the analysis environment active:
+
+```bash
+sbatch --output=prepare-%j.log --wrap='python -u esd_experiment/run_experiment.py --model_list models.csv --output_dir runs/prepared --prepare_only'
+```
+
+Run the measurement command from the same environment inside your allocated
+Slurm job, passing the allocated device indices to `--gpus`.
+
 ### 5. Build and query the zoo
 
 From the Model-Zoo checkout, install the builder and start the launcher:
@@ -208,7 +222,8 @@ host scan reports selected GPU memory, available RAM, storage, writable cache
 placement, and whether a Hub token environment variable is set (its value stays
 hidden). Use `model-zoo --verbose` for
 flag-level notes beside each prompt.
-`--no-motion` starts still.
+`--theme auto|dark|light` sets the palette for the home screen and workflow
+pages. `--no-motion` starts with animation off.
 `NO_COLOR` disables colors and starts with motion off. Use `--plain` for a
 numbered, scrolling menu; terminals without curses support use it automatically.
 Set `ZOO_DATA` first, or pass `--data-root /path/to/zoo-data`; the query screen

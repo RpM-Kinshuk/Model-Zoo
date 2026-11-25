@@ -18,6 +18,7 @@ import time
 
 import gpustat
 import psutil
+from zoo.progress import Progress
 
 from .supervision import (
     WorkerJob,
@@ -285,10 +286,24 @@ class DispatchThread(threading.Thread):
         self.prefetch_models, self.prefetch_max_gib = prefetch_models, prefetch_max_gib
         self.prefetcher = None
         self.workers = []
+        self.progress_thread = None
         self.last_progress = time.monotonic()
 
     def _progress(self):
         self.last_progress = time.monotonic()
+
+    def _show_progress(self):
+        # A slow Slurm log or full pipe must not stall the watchdog.
+        progress = Progress(self.name, len(self.bash_command_list),
+                            lambda line: os.write(sys.stdout.fileno(), (line + "\n").encode()))
+        progress.update(0, running=0)
+        while self.is_alive():
+            workers = tuple(self.workers)
+            running = sum(worker.is_alive() for worker in workers)
+            progress.update(len(workers) - running, running=running)
+            time.sleep(0.5)
+        finished = len(self.workers)
+        progress.update(finished, running=0, final=True)
 
     def wait_for_completion(self):
         """Existing main-thread wait, with a fail-closed escape for stuck control I/O.
@@ -349,6 +364,8 @@ class DispatchThread(threading.Thread):
                     reporter.join(timeout=0.2)
                 finally:
                     os._exit(1)
+        if self.progress_thread is not None:
+            self.progress_thread.join(timeout=0.6)
 
     def _current_max_concurrent_jobs(self):
         if hasattr(self.dispatcher, "config"):
@@ -391,6 +408,10 @@ class DispatchThread(threading.Thread):
     def run(self):
         try:
             self._progress()
+            if self.bash_command_list:
+                self.progress_thread = threading.Thread(
+                    target=self._show_progress, name="measurement-progress", daemon=True)
+                self.progress_thread.start()
             if self.state_options:
                 self.state_tracker = WorkerStateTracker(**self.state_options, on_failure=self.dispatcher.fail)
             if self.prefetch_models and self.state_tracker:

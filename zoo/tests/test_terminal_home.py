@@ -28,7 +28,7 @@ def test_motion_does_not_change_content_rows():
     assert [line.text for line in first if line.role != 'stars'] == [line.text for line in second if line.role != 'stars']
 
 
-@pytest.mark.parametrize('keys', [b'\x1bOA\r', b'tm??/infrastructure\r'])
+@pytest.mark.parametrize('keys', [b'\x1bOA\r', b'TM??/infrastructure\r'])
 def test_real_terminal_resize_navigation_and_mode_restoration(keys):
     """Exercise curses itself, not a mocked screen, through a pseudo-terminal."""
     import os
@@ -112,10 +112,9 @@ def test_spacious_frame_separates_workflows():
 
 def test_galaxy_color_region_never_overlaps_header_copy():
     frame = home.compose_frame(110, 40, 0, '', [], 0)
-    for phrase in ('A living atlas of evidence', 'Collect. Measure. Discover.'):
-        line = next(line for line in frame if phrase in line.text)
-        assert line.artwork_start is not None
-        assert line.text.index(phrase) + len(phrase) < line.artwork_start
+    line = next(line for line in frame if 'MODEL ZOO' in line.text)
+    assert line.artwork_start is not None
+    assert line.text.index('MODEL ZOO') + len('MODEL ZOO') < line.artwork_start
 
 
 def test_spiral_galaxy_has_distinct_arms_and_bright_core():

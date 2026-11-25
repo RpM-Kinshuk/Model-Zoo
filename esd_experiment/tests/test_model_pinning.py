@@ -358,7 +358,7 @@ def forbid_runtime(monkeypatch):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_prepare_only_stops_before_gpu_backends_or_dispatch(tmp_path, monkeypatch, hub, failed):
+def test_prepare_only_stops_before_gpu_backends_or_dispatch(tmp_path, monkeypatch, hub, failed, capsys):
     source = tmp_path / "input.csv"
     pd.DataFrame([{"model_id": "org/model"}]).to_csv(source, index=False)
     output = tmp_path / "run"
@@ -366,6 +366,7 @@ def test_prepare_only_stops_before_gpu_backends_or_dispatch(tmp_path, monkeypatc
     monkeypatch.setattr(sys, "argv", ["run_experiment.py", "--model_list", str(source),
                                      "--output_dir", str(output), "--prepare_only", "--no-evidence"])
     forbid_runtime(monkeypatch)
+    monkeypatch.setenv("SLURM_JOB_ID", "fixture-job")
 
     if failed:
         with pytest.raises(SystemExit) as exc:
@@ -377,6 +378,10 @@ def test_prepare_only_stops_before_gpu_backends_or_dispatch(tmp_path, monkeypatc
     pinned = runner.load_model_list(output / "models.csv")
     assert pinned.iloc[0]["pin_status"] == ("error" if failed else "pinned")
     assert {path.name for path in output.iterdir()} == {"models.csv"}
+    log = capsys.readouterr().out
+    assert "Model review [--------------------] 0/1 finished" in log
+    assert "Model review [####################] 1/1 finished" in log
+    assert "\x1b" not in log and "\r" not in log
     hub.download.assert_not_called()
 
 

@@ -9,28 +9,6 @@ fi
 : "${HF_TOKEN:?Set HF_TOKEN in Model-Zoo/.env or export it before running}"
 export HF_TOKEN
 
-# ------------------ Signal-safe background cleaner management -----------------
-cleanup() {
-    echo "Caught signal or exit. Cleaning up process group..."
-    
-    # Kill the background cleaner
-    if [[ -n "${CLEANER_PID:-}" ]]; then
-        kill "${CLEANER_PID}" 2>/dev/null || true
-    fi
-
-    # The Nuclear Option: Kill the entire process group (PGID).
-    # This ensures python, children, and grandchildren die.
-    # We use a trap on EXIT, so this runs on success, failure, or Ctrl+C.
-    
-    # 'kill 0' sends signal to every process in the process group of the calling process.
-    # We trap SIGINT/TERM specifically to exit, which triggers the EXIT trap.
-    trap '' EXIT INT TERM # Avoid recursion
-    kill -TERM 0 2>/dev/null || true
-    wait
-}
-
-trap cleanup EXIT INT TERM
-
 # -------------------------------- Environment ---------------------------------
 CACHE_DIR="/scratch/kinshuk/.cache"
 export OMP_NUM_THREADS=1
@@ -58,15 +36,14 @@ echo "Running with GPUs: ${GPUS[*]}"
 echo "Model packages: $PACKAGES_ROOT"
 echo "Parent block cache: $PARENT_CACHE_DIR"
 
-# ------------------ Run Python, capture exit code explicitly ------------------
+# The runner owns worker cleanup and prints progress to the launch log.
 # Auto budgets use reviewed weight sizes; reprepare older lists missing download_bytes.
 # CPU evidence overlaps ESD; oversized models get supervised row-block evidence.
 # Download-ahead is bounded separately from each worker's private cache.
-# set +e
-python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
+exec python -u "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --model_list "$MODEL_LIST" \
   --output_dir "$OUTPUT_DIR" \
-  --gpus ${GPUS[@]} \
+  --gpus "${GPUS[@]}" \
   --num_gpus_per_job auto \
   --max_weight_gib auto \
   --fix_fingers DKS \
@@ -94,17 +71,3 @@ python "$PROJECT_ROOT/Model-Zoo/esd_experiment/run_experiment.py" \
   --heartbeat_timeout_seconds 7200 \
   --stage_timeout_seconds auto \
   --termination_grace_seconds 30
-  # --skip_failed
-PY_EXIT_CODE=$?
-# set -e
-
-# Propagate exit status with helpful messages
-if [[ $PY_EXIT_CODE -eq 130 ]]; then
-  echo "Script was interrupted"
-  exit 130
-elif [[ $PY_EXIT_CODE -ne 0 ]]; then
-  echo "Python exited with code $PY_EXIT_CODE"
-  exit "$PY_EXIT_CODE"
-fi
-
-echo "Python completed successfully."

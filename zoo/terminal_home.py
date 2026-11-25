@@ -13,6 +13,8 @@ from functools import lru_cache
 import unicodedata
 from typing import Sequence
 
+from zoo.terminal_style import PALETTES, PageLayout
+
 
 @dataclass(frozen=True)
 class Workflow:
@@ -134,7 +136,8 @@ def _fit_cells(value: str, width: int) -> str:
 def compose_frame(width: int, height: int, selected: int, query: str,
                   status: Sequence[str], tick: int, *, help_open: bool = False, searching: bool = False) -> list[Line]:
     """Budget rows before drawing; reserve the last column to avoid autowrap."""
-    width, height = max(0, width - 1), max(0, height)
+    layout = PageLayout(width)
+    width, height = layout.width, max(0, height)
     if not height:
         return []
     items = matching_workflows(query)
@@ -143,42 +146,32 @@ def compose_frame(width: int, height: int, selected: int, query: str,
         title = items[selected].title if items else 'No matches'
         rows = [Line('MODEL ZOO', 'brand'), Line(title, 'selected'), Line('Resize for more · q quit', 'muted')]
         return [Line(_fit_cells(row.text, width), row.role) for row in rows[:height]]
-    rows = [Line('  M O D E L   Z O O', 'brand')]
+    rows = [Line('MODEL ZOO', 'brand')]
     if height >= 34 and width >= 72:
-        copy = {
-            1: ('  ✦  M O D E L   Z O O', 'brand'),
-            3: ('  A living atlas of evidence', 'text'),
-            5: ('  Collect. Measure. Discover.', 'accent'),
-        }
-        rows = []
-        for index, artwork in enumerate(spiral_galaxy()):
-            text, role = copy.get(index, ('', 'text'))
-            rows.append(Line(text.ljust(36) + artwork, role, artwork_start=36))
+        art = spiral_galaxy()
+        artwork_start = width - len(art[0])
+        rows = [Line(('MODEL ZOO' if index == 1 else '').ljust(artwork_start) + glyphs,
+                     'brand' if index == 1 else 'text', artwork_start=artwork_start)
+                for index, glyphs in enumerate(art)]
     elif height >= 16:
-        rows += [Line('  A living atlas of model evidence', 'accent')]
-    if height >= 22:
-        # Two depths: small distant points and slower foreground stars.
-        stars = [' '] * width
-        highlights = []
-        for position in range(4, width, 7):
-            level = star_brightness(position, tick)
-            foreground = position % 3 == 0
-            stars[position] = ('·' if level < 46 else '✧' if level < 61 else '✦') if foreground else '.'
-            highlights.append((position, f'star{level}'))
-        rows += [Line(''.join(stars), 'stars', highlights=tuple(highlights)), Line('')]
-    if height >= 16:
-        rows += [Line('  ' + line, 'muted') for line in status[:2]]
-        rows += [Line('')]
-    rows += [Line('  SEARCH / ' + query + ('_' if searching else '')
-                  if query or searching else '  YOUR NEXT DISCOVERY', 'accent')]
-    footer = [Line('  Up/Down select · Enter open · / search · q quit', 'muted'),
-              Line(f'  {selected + 1 if items else 0}/{len(items)} workflows · t theme · m motion · ? help', 'muted')]
+        rows.insert(0, Line(''))
+    if height >= 18 and status:
+        rows += [Line(line, 'muted') for line in status[:2]]
+        rows.append(Line(''))
+    rows += [Line('Search  ' + query + ('_' if searching else '')
+                  if query or searching else 'Workflows', 'accent')]
+    if width >= 48:
+        footer = [Line('↑/↓ Select  ·  Enter Open  ·  / Search  ·  Q Quit', 'muted'),
+                  Line(f'{selected + 1 if items else 0}/{len(items)}  ·  T Theme  ·  M Motion  ·  ? Help', 'muted')]
+    elif width >= 30:
+        footer = [Line('↑/↓ Select  ·  Enter Open', 'muted'), Line('/ Search  ·  Q Quit', 'muted')]
+    else:
+        footer = [Line('↑↓ Enter / Q', 'muted')]
     if searching:
-        footer = [Line('  Type to filter · Enter open · Esc clear', 'accent'),
-                  Line('  Search titles and workflow descriptions', 'muted')]
+        footer = [Line('Type to filter  ·  Enter Open', 'accent'), Line('Esc Clear search', 'muted')]
     elif help_open:
-        footer = [Line('  1-8 open directly · Esc clears search', 'accent'),
-                  Line('  Tab next · t palette · m animation · ? close help', 'muted')]
+        footer = [Line('1–8 Open directly  ·  Esc Clear search', 'accent'),
+                  Line('Tab Next  ·  T Theme  ·  M Motion  ·  ? Close help', 'muted')]
     budget = max(0, height - len(rows) - len(footer))
     detailed = width >= 65 and budget >= len(items) * 2
     spacious = budget >= len(items) * (3 if detailed else 2)
@@ -191,7 +184,7 @@ def compose_frame(width: int, height: int, selected: int, query: str,
         for index in range(start, min(len(items), start + count)):
             item = items[index]
             marker = '✦' if index == selected else '·'
-            rows += [Line(f' {marker} {item.key}  {item.title}', 'selected' if index == selected else
+            rows += [Line(f'{marker}  {item.key}  {item.title}', 'selected' if index == selected else
                               {'1': 'glow', '2': 'spark', '3': 'aurora', '4': 'rose',
                                '5': 'accent', '6': 'spark', '7': 'glow', '8': 'rose'}[item.key])]
             if detailed:
@@ -215,11 +208,11 @@ def compose_frame(width: int, height: int, selected: int, query: str,
         else:
             rows.append(Line(''))
     rows += footer
-    margin = ' ' * min(8, max(0, (width - 78) // 2))
-    return [Line(_fit_cells(margin + row.text, width), row.role,
+    margin = layout.indent
+    return [Line(margin + _fit_cells(row.text, width), row.role,
                  row.artwork_start + len(margin) if row.artwork_start is not None else None,
                  tuple((column + len(margin), role) for column, role in row.highlights
-                       if column + len(margin) < width))
+                       if column < width))
             for row in rows[:height]]
 
 
@@ -263,12 +256,11 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
                 aurora, rose = (curses.COLOR_RED if light else curses.COLOR_GREEN), curses.COLOR_MAGENTA
                 selected_foreground = background
                 if curses.COLORS >= 256:
-                    # Luminous jewel accents on deep space; saturated ink on cool white.
+                    colors = PALETTES[palette]
                     background, foreground, accent, secondary, muted, selection = (
-                        (255, 234, 26, 61, 240, 189) if light else
-                        (233, 255, 75, 141, 250, 24))
-                    glow, spark = (26, 94) if light else (117, 222)
-                    aurora, rose = (22, 125) if light else (209, 210)
+                        colors["background"], colors["text"], colors["brand"], colors["accent"],
+                        colors["muted"], colors["selection"])
+                    glow, spark, aurora, rose = (colors[key] for key in ("glow", "spark", "aurora", "rose"))
                     selected_foreground = foreground
                 for index, (fg, bg) in enumerate(((foreground, background), (accent, background),
                                                  (secondary, background), (selected_foreground, selection),
@@ -305,6 +297,7 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
             tick = int(time.monotonic() * 60) if motion else 0
             frame = compose_frame(width, height, selected, query, status, tick, help_open=help_open, searching=searching)
             if frame != last_frame:
+                screen.bkgdset(' ', roles['text'])
                 screen.erase()
                 for row, line in enumerate(frame):
                     try:
@@ -336,6 +329,8 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
                 continue
             if key == '\x03':
                 return 'q', palette, motion
+            if not searching and isinstance(key, str):
+                key = key.lower()
             if searching:
                 if key in ('\n', '\r', curses.KEY_ENTER):
                     if items:
