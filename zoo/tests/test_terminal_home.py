@@ -234,3 +234,10 @@ def test_stars_use_single_dots_and_keep_space_from_neighbors():
                     stars.append((row, column))
             assert all(abs(a_row - b_row) > 1 or abs(a_col - b_col) > 3
                        for (a_row, a_col), (b_row, b_col) in combinations(stars, 2))
+
+
+def test_brand_taglines_fit_the_home_frame():
+    frame = home.compose_frame(80, 24, 0, "", [], 0)
+    assert any(home.ATLAS_TAGLINE in line.text for line in frame[:-2])
+    assert home.DISCOVERY_TAGLINE in frame[-2].text
+    assert "Esc Quit" in frame[-2].text

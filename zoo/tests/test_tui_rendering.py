@@ -185,10 +185,18 @@ def test_escape_navigates_search_back_to_home_in_a_real_terminal(tmp_path, plain
         send(b"7\r" if plain else b"7")
         expect(b"Search by name")
         send(b"1\r")
+        expect(b"Collect. Measure. Discover.")
         expect(b"Search text")
         expect(b"\x1b7\x1b[")  # Header cells update while the input waits.
         send(b"\x1b[D")  # Left arrow must not trigger Back.
         send(b"/nested" * 20 + b"unsubmitted")
+        expect(b"unsubmitted")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 32, 0, 0))
+        expect(b"\x1b[2;7r")
+        expect(b"Esc Back")
+        expect(b"unsubmitted")
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+        expect(b"Collect. Measure. Discover.")
         expect(b"unsubmitted")
         send(b"\x1b")
         expect(b"Search by name")

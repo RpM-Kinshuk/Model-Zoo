@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import codecs
 import csv
 from dataclasses import replace
@@ -23,7 +24,7 @@ from typing import NamedTuple, Sequence
 
 from zoo.terminal_style import PageLayout, Theme, cell_width, wrap_cells
 from zoo.workspace import Workspace
-from zoo.terminal_home import ANIMATION_FPS, MotionClock, brand_header, star_color, star_rgb
+from zoo.terminal_home import ANIMATION_FPS, MotionClock, brand_header, branded_footer, star_color, star_rgb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QUERY_ROOT = PROJECT_ROOT.parent / "Zoo-Keeper"
@@ -33,25 +34,36 @@ STAR_SEED = randbits(64)
 CLOCK = MotionClock()
 
 
-class HeaderAnimation(NamedTuple):
+class TerminalPage(NamedTuple):
     size: tuple[int, int]
-    budget: int
+    reserve_rows: int
+    header_rows: int
+    header_budget: int
+    footer_hint: str
     stars: dict[tuple[int, int], str]
+    body: deque[tuple[str, str, bool, bool]]
 
 
-_header_animation: HeaderAnimation | None = None
+_page: TerminalPage | None = None
 
 
 def _layout() -> PageLayout:
     return PageLayout(shutil.get_terminal_size((84, 24)).columns)
 
 
-def _write(text: str, role: str = "text", *, wrap: bool = True, literal: bool = False,
-           flush: bool = False) -> None:
+def _formatted_lines(text: str, role: str, wrap: bool, literal: bool) -> list[str]:
     layout = _layout()
     lines = wrap_cells(text, layout.width, literal=literal) if wrap else [_fit(text, layout.width)]
-    for line in lines:
-        print(layout.indent + THEME.paint(line, role), flush=flush)
+    return [layout.indent + THEME.paint(line, role) for line in lines]
+
+
+def _write(text: str, role: str = "text", *, wrap: bool = True, literal: bool = False,
+           flush: bool = False) -> None:
+    entry = (text, role, wrap, literal)
+    if _page is not None:
+        _page.body.append(entry)
+    for line in _formatted_lines(*entry):
+        print(line, flush=flush)
 
 
 def _path(value: str) -> Path:
@@ -184,14 +196,28 @@ def _raw_terminal_input(prompt: str, completion: Sequence[str] | str | None) -> 
         cursor = start + len(replacement)
 
     try:
-        columns = shutil.get_terminal_size((84, 24)).columns
-        prompt = _fit(prompt, columns - 2) if cell_width(prompt) > columns - 2 else prompt
-        input_width = max(0, columns - 1 - cell_width(prompt))
-        sys.stdout.write(prompt)
+        prompt_text = prompt.lstrip()
+
+        def fit_prompt() -> tuple[str, int]:
+            columns = shutil.get_terminal_size((84, 24)).columns
+            fitted = _fit(PageLayout(columns).indent + prompt_text, columns - 2)
+            return fitted, max(0, columns - 1 - cell_width(fitted))
+
+        leading_newline = prompt.startswith("\n")
+        prompt, input_width = fit_prompt()
+        sys.stdout.write(("\r\n" if leading_newline else "") + prompt)
         sys.stdout.flush()
         while True:
-            if _header_animation is not None:
-                _refresh_header()
+            if _page is not None:
+                if shutil.get_terminal_size((84, 24)) != _page.size:
+                    _resize_page()
+                    prompt, input_width = fit_prompt()
+                    first_visible, shown, shown_cursor = 0, "", 0
+                    sys.stdout.write(prompt)
+                    redraw()
+                    sys.stdout.flush()
+                elif CLOCK.started is not None:
+                    _refresh_header()
                 if os.name == "nt":
                     if not pending and not msvcrt.kbhit():
                         time.sleep(1 / ANIMATION_FPS)
@@ -305,8 +331,8 @@ def _run(command: Sequence[str], workspace: Workspace, *, label: str,
         _clear_screen()
         _draw_brand()
     _write(label, "heading")
-    if confirm:
-        _write("Esc  Back", "muted")
+    if confirm and _page is None:
+        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
     for line in summary:
         _write(line, literal=True)
     if VERBOSE:
@@ -667,6 +693,8 @@ def _query(workspace: Workspace) -> int:
 
 
 def _pause() -> None:
+    if _page is None:
+        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
     try:
         _read_input("\n" + _layout().indent + "Enter or Esc  Back to workflows")
     except (Back, EOFError, KeyboardInterrupt):
@@ -694,11 +722,13 @@ def _fit(text: str, width: int) -> str:
 
 
 def _release_header() -> None:
-    global _header_animation
-    if _header_animation is not None:
-        _header_animation = None
-        sys.stdout.write("\x1b7\x1b[r\x1b8")
-        sys.stdout.flush()
+    global _page
+    if _page is not None:
+        _, height = _page.size
+        _page = None
+        if height >= 3:
+            sys.stdout.write(f"\x1b7\x1b[{height};1H\x1b[2K\x1b[r\x1b8")
+            sys.stdout.flush()
 
 
 def _clear_screen() -> None:
@@ -734,15 +764,12 @@ def _paint_star(char: str, role: str, *, animated: bool) -> str:
 
 
 def _refresh_header() -> None:
-    state = _header_animation
+    state = _page
     if state is None:
-        return
-    if shutil.get_terminal_size((84, 24)) != state.size:
-        _release_header()
         return
     columns, height = state.size
     layout = PageLayout(columns)
-    lines = brand_header(layout.width, height, CLOCK.tick(), max_rows=state.budget, star_seed=STAR_SEED)
+    lines = brand_header(layout.width, height, CLOCK.tick(), max_rows=state.header_budget, star_seed=STAR_SEED)
     stars = {(row, column): _paint_star(line.text[column], role, animated=True)
              for row, line in enumerate(lines) for column, role in line.highlights}
     changes = []
@@ -757,18 +784,36 @@ def _refresh_header() -> None:
     state.stars.update(stars)
 
 
-def _draw_brand(*, reserve_rows: int = 0) -> bool:
+def _resize_page() -> None:
+    previous = _page
+    if previous is None:
+        return
+    _clear_screen()
+    _draw_brand(reserve_rows=previous.reserve_rows, footer_hint=previous.footer_hint)
+    if _page is None:
+        return
+    _page.body.extend(previous.body)
+    lines = [line for entry in previous.body for line in _formatted_lines(*entry)]
+    available = _page.size[1] - _page.header_rows - 2
+    if available > 0:
+        for line in lines[-available:]:
+            sys.stdout.write(line + "\r\n")
+
+
+def _draw_brand(*, reserve_rows: int = 0, footer_hint: str = "Esc Back") -> bool:
     if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
         return False
-    global _header_animation
+    global _page
     from zoo.terminal_home import artwork_role
 
     columns, height = shutil.get_terminal_size((84, 24))
     layout = PageLayout(columns)
-    budget = max(1, height - reserve_rows)
-    lines = brand_header(layout.width, height, CLOCK.tick(), max_rows=budget, star_seed=STAR_SEED)
     vt = bool(os.environ.get("WT_SESSION") if os.name == "nt" else os.environ.get("TERM"))
-    animated = CLOCK.started is not None and vt and height - len(lines) >= 4
+    budget = max(1, height - max(reserve_rows, 4))
+    lines = brand_header(layout.width, height, CLOCK.tick(), max_rows=budget, star_seed=STAR_SEED)
+    if vt and height < 4:
+        lines = []
+    animated = CLOCK.started is not None and vt
     for line in lines:
         highlights = dict(line.highlights)
 
@@ -786,15 +831,16 @@ def _draw_brand(*, reserve_rows: int = 0) -> bool:
         for role, entries in groupby(enumerate(line.text.rstrip()), key=style):
             value = "".join(char for _, char in entries)
             spans.append(_paint_star(value, role, animated=animated) if role.startswith("dust") else THEME.paint(value, role))
-        print(layout.indent + "".join(spans) if line.text.strip() else "")
-    if animated:
-        # Reserve the header rows while the prompt and its output scroll below.
-        top = len(lines) + 1
-        sys.stdout.write(f"\x1b[{top};{height}r\x1b[{top};1H")
-        sys.stdout.flush()
-        stars = {(row, col): _paint_star(line.text[col], role, animated=True)
+        sys.stdout.write((layout.indent + "".join(spans) if line.text.strip() else "") + "\r\n")
+    if vt:
+        if height >= 3:
+            top = len(lines) + 1
+            footer = THEME.paint(branded_footer(layout.width, footer_hint), "muted")
+            sys.stdout.write(f"\x1b[{top};{height - 1}r\x1b[{height};1H{layout.indent}{footer}\x1b[{top};1H")
+        stars = {(row, col): _paint_star(line.text[col], role, animated=animated)
                  for row, line in enumerate(lines) for col, role in line.highlights}
-        _header_animation = HeaderAnimation((columns, height), budget, stars)
+        _page = TerminalPage((columns, height), reserve_rows, len(lines), budget, footer_hint, stars, deque(maxlen=80))
+    sys.stdout.flush()
     return True
 
 
@@ -804,7 +850,7 @@ def _draw_home(root: Path | None) -> None:
 
     status = _status(root)
     # Leave room for the status, menu, and its input prompt.
-    if not _draw_brand(reserve_rows=len(status) + len(WORKFLOWS) + 4):
+    if not _draw_brand(reserve_rows=len(status) + len(WORKFLOWS) + 4, footer_hint="1–8 Open · Esc Quit"):
         print()
         _write("MODEL ZOO", "brand")
     for line in status:
@@ -813,7 +859,8 @@ def _draw_home(root: Path | None) -> None:
     _write("Workflows", "accent")
     for item in WORKFLOWS:
         _write(f"{item.key}  {item.title}", wrap=False)
-    _write("Enter a number  ·  Esc or Q Quit", "muted", wrap=False)
+    if _page is None:
+        _write(branded_footer(_layout().width, "Enter a number  ·  Esc or Q Quit"), "muted", wrap=False)
 
 
 def _read_menu_choice(root: Path | None) -> str:
@@ -845,7 +892,8 @@ def _workflow_header(choice: str) -> None:
         _write(f"Model Zoo / {item.group}", "workflow")
     _write(item.title, "heading")
     _write(item.description, "text")
-    _write("Esc  Back", "muted")
+    if _page is None:
+        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
     print()
 
 

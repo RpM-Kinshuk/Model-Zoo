@@ -18,6 +18,8 @@ from zoo.terminal_style import PALETTES, PageLayout
 
 
 ANIMATION_FPS = 12
+ATLAS_TAGLINE = "A living atlas of evidence"
+DISCOVERY_TAGLINE = "Collect. Measure. Discover."
 
 
 class MotionClock:
@@ -204,7 +206,8 @@ def brand_header(width: int, height: int, tick: int = 0, *,
     if height >= 34 and width >= 72 and budget >= 11:
         art_width, art_height = 33, 9
     elif height >= 22 and width >= 52 and budget >= 7:
-        art_width, art_height = 33, 5
+        art_width = 33 if width - 33 >= len(ATLAS_TAGLINE) + 2 else 17
+        art_height = 5
     elif height >= 16 and width >= 36 and budget >= 4:
         art_width, art_height = 17, 3
     else:
@@ -217,9 +220,12 @@ def brand_header(width: int, height: int, tick: int = 0, *,
     if height >= 16 and budget > art_height:
         rows.append(Line(" " * width, "stars"))
     for index, row in enumerate(spiral_galaxy()[first_row:first_row + art_height]):
-        title = "MODEL ZOO" if index == art_height // 2 else ""
+        title_row = art_height // 2
+        title = "MODEL ZOO" if index == title_row else ""
+        if index == title_row + 1 and artwork_start >= len(ATLAS_TAGLINE) + 2:
+            title = ATLAS_TAGLINE
         glyphs = row[first_column:first_column + art_width]
-        rows.append(Line(title.ljust(artwork_start) + glyphs, "brand" if title else "text",
+        rows.append(Line(title.ljust(artwork_start) + glyphs, "brand" if index == title_row else "muted" if title else "text",
                          artwork_start=artwork_start))
     if height >= 22 and len(rows) < budget:
         rows.append(Line(""))
@@ -248,6 +254,12 @@ def _fit_cells(value: str, width: int) -> str:
     return ''.join(result)
 
 
+def branded_footer(width: int, hint: str) -> str:
+    """Keep controls visible as the terminal narrows."""
+    full = f"{DISCOVERY_TAGLINE}  ·  {hint}"
+    return full if len(full) <= width else _fit_cells(hint, width)
+
+
 def compose_frame(width: int, height: int, selected: int, query: str,
                   status: Sequence[str], tick: int, *, help_open: bool = False,
                   searching: bool = False, motion: bool = False, star_seed: int = 0) -> list[Line]:
@@ -269,7 +281,7 @@ def compose_frame(width: int, height: int, selected: int, query: str,
     rows += [Line('Search  ' + query + ('_' if searching else '')
                   if query or searching else 'Workflows', 'accent')]
     if width >= 48:
-        footer = [Line('↑/↓ Select  ·  Enter Open  ·  / Search  ·  Esc Quit', 'muted'),
+        footer = [Line('↑↓ Select · Enter · / Search · Esc Quit', 'muted'),
                   Line(f'{selected + 1 if items else 0}/{len(items)}  ·  T Theme  ·  '
                        f'M Motion {"on" if motion else "off"}  ·  ? Help', 'muted')]
     elif width >= 30:
@@ -281,6 +293,7 @@ def compose_frame(width: int, height: int, selected: int, query: str,
     elif help_open:
         footer = [Line('1–8 Open directly  ·  Esc Close help', 'accent'),
                   Line('Tab Next  ·  T Theme  ·  M Motion  ·  ? Close help', 'muted')]
+    footer[0] = replace(footer[0], text=branded_footer(width, footer[0].text))
     budget = max(0, height - len(rows) - len(footer))
     detailed = width >= 65 and budget >= len(items) * 2
     spacious = budget >= len(items) * (3 if detailed else 2)
