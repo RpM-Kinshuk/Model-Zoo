@@ -276,3 +276,13 @@ def test_motion_setting_works_without_color_and_survives_navigation(tmp_path, mo
     monkeypatch.setattr(tui, "_pause", lambda: None)
     assert tui.main([*flags, "--workspace", str(tmp_path)]) == 0
     assert calls == [(enabled, False, calls[0][2]), (enabled, False, calls[0][2])]
+
+
+def test_version_reports_distribution_and_loaded_source(capsys, monkeypatch):
+    monkeypatch.setattr(tui, "version", lambda name: "0.1.0")
+    with pytest.raises(SystemExit) as exit_info:
+        tui.main(["--version"])
+    assert exit_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "0.1.0" in output
+    assert str(tui.Path(tui.__file__).resolve()) in output

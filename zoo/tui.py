@@ -9,6 +9,7 @@ import csv
 from dataclasses import replace
 import glob
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version
 from itertools import groupby
 import os
 from pathlib import Path
@@ -912,7 +913,13 @@ def _main(argv: Sequence[str] | None) -> int:
         "publish": _publish, "build": _build, "deltas": _deltas,
         "search": _query, "scan": _infrastructure,
     }
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    try:
+        installed_version = version("model-zoo")
+    except PackageNotFoundError:
+        installed_version = "source checkout"
+    parser.add_argument("--version", action="version",
+                        version=f"{parser.prog} {installed_version}\nSource: {Path(__file__).resolve()}")
     parser.add_argument("--workspace", "--data-root", type=Path, metavar="DIR",
                         help="Workspace folder (default: ZOO_DATA or ./zoo-data)")
     parser.add_argument("--run", type=Path, metavar="DIR",

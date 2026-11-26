@@ -90,12 +90,17 @@ An importable backend does not guarantee a checkpoint can be measured.
 From the checkout with the analysis environment active:
 
 ```sh
-python -m zoo.tui --workspace "./My Zoo" init
-python -m zoo.tui --workspace "./My Zoo"
+python -m pip install -e .
+model-zoo --workspace "./My Zoo" init
+model-zoo --workspace "./My Zoo"
 ```
 
-For catalog-only use, install with `python -m pip install .` and run the same
-commands with `model-zoo`. The workspace defaults to `ZOO_DATA` or `./zoo-data`.
+An editable install runs the code in your local checkout. Update the checkout
+to pick up newer commits and rerun the install when package metadata changes.
+Use `model-zoo --version` to see the installed version and loaded source path.
+Published catalog wheels are available on [GitHub Releases](https://github.com/RpM-Kinshuk/Model-Zoo/releases).
+
+The workspace defaults to `ZOO_DATA` or `./zoo-data`.
 Optional `init` writes an editable `model-zoo.json`. The launcher organizes
 runs, caches, packages, and catalog builds inside the workspace.
 
@@ -124,10 +129,10 @@ revisions, adapters, and resource controls.
 ### 5. Build and query the zoo
 
 Choose **Build** to assemble packages into `builds/current/`. Install
-[Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) to enable **Search**.
-With both checkouts side by side, run `python -m pip install ../Zoo-Keeper`
-from Model-Zoo. The [catalog guide](docs/operations/zoo.md) covers direct
-build and query commands.
+[Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) supplies **Search**.
+With both checkouts side by side, install `duckdb==1.5.6` in the analysis
+environment so the launcher can run Zoo-Keeper from its checkout. The
+[catalog guide](docs/operations/zoo.md) covers direct build and query commands.
 
 The galaxy header animates by default on compatible terminals. Press **M** to
 toggle motion on the home menu, or start with `--no-motion`. Use `--help`
