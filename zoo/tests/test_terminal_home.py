@@ -238,6 +238,7 @@ def test_stars_use_single_dots_and_keep_space_from_neighbors():
 
 def test_brand_taglines_fit_the_home_frame():
     frame = home.compose_frame(80, 24, 0, "", [], 0)
-    assert any(home.ATLAS_TAGLINE in line.text for line in frame[:-2])
-    assert home.DISCOVERY_TAGLINE in frame[-2].text
+    atlas_row = next(index for index, line in enumerate(frame) if home.ATLAS_TAGLINE in line.text)
+    assert home.DISCOVERY_TAGLINE in frame[atlas_row + 1].text
+    assert home.DISCOVERY_TAGLINE not in frame[-2].text
     assert "Esc Quit" in frame[-2].text

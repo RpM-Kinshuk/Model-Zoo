@@ -24,7 +24,7 @@ from typing import NamedTuple, Sequence
 
 from zoo.terminal_style import PageLayout, Theme, cell_width, wrap_cells
 from zoo.workspace import Workspace
-from zoo.terminal_home import ANIMATION_FPS, MotionClock, brand_header, branded_footer, star_color, star_rgb
+from zoo.terminal_home import ANIMATION_FPS, MotionClock, brand_header, star_color, star_rgb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QUERY_ROOT = PROJECT_ROOT.parent / "Zoo-Keeper"
@@ -332,7 +332,7 @@ def _run(command: Sequence[str], workspace: Workspace, *, label: str,
         _draw_brand()
     _write(label, "heading")
     if confirm and _page is None:
-        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
+        _write("Esc Back", "muted", wrap=False)
     for line in summary:
         _write(line, literal=True)
     if VERBOSE:
@@ -694,7 +694,7 @@ def _query(workspace: Workspace) -> int:
 
 def _pause() -> None:
     if _page is None:
-        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
+        _write("Esc Back", "muted", wrap=False)
     try:
         _read_input("\n" + _layout().indent + "Enter or Esc  Back to workflows")
     except (Back, EOFError, KeyboardInterrupt):
@@ -835,7 +835,7 @@ def _draw_brand(*, reserve_rows: int = 0, footer_hint: str = "Esc Back") -> bool
     if vt:
         if height >= 3:
             top = len(lines) + 1
-            footer = THEME.paint(branded_footer(layout.width, footer_hint), "muted")
+            footer = THEME.paint(_fit(footer_hint, layout.width), "muted")
             sys.stdout.write(f"\x1b[{top};{height - 1}r\x1b[{height};1H{layout.indent}{footer}\x1b[{top};1H")
         stars = {(row, col): _paint_star(line.text[col], role, animated=animated)
                  for row, line in enumerate(lines) for col, role in line.highlights}
@@ -860,7 +860,7 @@ def _draw_home(root: Path | None) -> None:
     for item in WORKFLOWS:
         _write(f"{item.key}  {item.title}", wrap=False)
     if _page is None:
-        _write(branded_footer(_layout().width, "Enter a number  ·  Esc or Q Quit"), "muted", wrap=False)
+        _write("Enter a number  ·  Esc or Q Quit", "muted", wrap=False)
 
 
 def _read_menu_choice(root: Path | None) -> str:
@@ -893,7 +893,7 @@ def _workflow_header(choice: str) -> None:
     _write(item.title, "heading")
     _write(item.description, "text")
     if _page is None:
-        _write(branded_footer(_layout().width, "Esc Back"), "muted", wrap=False)
+        _write("Esc Back", "muted", wrap=False)
     print()
 
 
