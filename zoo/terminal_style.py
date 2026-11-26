@@ -74,6 +74,16 @@ class Theme:
         self.enabled = (stream.isatty() and "NO_COLOR" not in os.environ and os.getenv("TERM") != "dumb"
                         if enabled is None else enabled)
         self.palette = self.automatic_palette() if palette == "auto" else palette
+        self.page_active = False
+
+    def page_colors(self) -> str:
+        if not self.enabled or not self.page_active:
+            return ""
+        colors = PALETTES[self.palette]
+        return f"\x1b[38;5;{colors['text']};48;5;{colors['background']}m"
+
+    def reset_style(self) -> str:
+        return "\x1b[0m" + self.page_colors()
 
     @staticmethod
     def automatic_palette():
@@ -81,7 +91,7 @@ class Theme:
             background = int(os.environ.get("COLORFGBG", "").split(";")[-1])
         except ValueError:
             return "dark"
-        return "light" if background in (7, 15) or 231 <= background <= 255 else "dark"
+        return "light" if background in (7, 15, 231) or 244 <= background <= 255 else "dark"
 
     def paint(self, value, role):
         if not self.enabled:
@@ -89,12 +99,12 @@ class Theme:
         if role == "text":
             return value
         if role == "heading":
-            return f"\x1b[1m{value}\x1b[0m"
+            return f"\x1b[1m{value}{self.reset_style()}"
         if role == "muted":
-            return f"\x1b[2m{value}\x1b[0m"
+            return f"\x1b[2m{value}{self.reset_style()}"
         weight = "1;" if role in ("brand", "workflow") else ""
         color = PALETTES[self.palette][role]
-        return f"\x1b[{weight}38;5;{color}m{value}\x1b[0m"
+        return f"\x1b[{weight}38;5;{color}m{value}{self.reset_style()}"
 
     def brand(self, value):
         return self.paint(value, "brand")

@@ -46,6 +46,8 @@ def test_theme_enables_color_and_detects_light_background(monkeypatch):
     assert theme.paint('text', 'brand') == '\x1b[1;38;5;81mtext\x1b[0m'
     monkeypatch.setenv('COLORFGBG', '0;15')
     assert theme.automatic_palette() == 'light'
+    monkeypatch.setenv('COLORFGBG', '15;233')
+    assert theme.automatic_palette() == 'dark'
     theme.palette = 'light'
     assert theme.paint('text', 'brand') == '\x1b[1;38;5;25mtext\x1b[0m'
 
@@ -162,11 +164,13 @@ def test_escape_navigates_search_back_to_home_in_a_real_terminal(tmp_path, plain
     master, slave = pty.openpty()
     original_mode = termios.tcgetattr(slave)
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
-    command = [sys.executable, "-m", "zoo.tui", "--workspace", str(tmp_path)]
+    command = [sys.executable, "-m", "zoo.tui", "--workspace", str(tmp_path),
+               "--theme", "light" if plain else "dark"]
     if plain:
         command.append("--plain")
-    process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
-                               env=dict(os.environ, TERM="xterm-256color"))
+    env = dict(os.environ, TERM="xterm-256color")
+    env.pop("NO_COLOR", None)
+    process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env)
     output = bytearray()
 
     def expect(marker):
@@ -182,9 +186,11 @@ def test_escape_navigates_search_back_to_home_in_a_real_terminal(tmp_path, plain
 
     try:
         expect(b"Workflow [" if plain else b"Esc Quit")
-        send(b"7\r" if plain else b"7")
+        send(b"7\r" if plain else b"t7")
+        expect(b"\x1b[38;5;234;48;5;255m\x1b[2J")
         expect(b"Search by name")
         send(b"1\r")
+        expect(b"\x1b[38;5;234;48;5;255m\x1b[2J")
         expect(b"Collect. Measure. Discover.")
         expect(b"Search text")
         expect(b"\x1b7\x1b[")  # Header cells update while the input waits.
@@ -192,6 +198,7 @@ def test_escape_navigates_search_back_to_home_in_a_real_terminal(tmp_path, plain
         send(b"/nested" * 20 + b"unsubmitted")
         expect(b"unsubmitted")
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 32, 0, 0))
+        expect(b"\x1b[38;5;234;48;5;255m\x1b[2J")
         expect(b"\x1b[2;7r")
         expect(b"Esc Back")
         expect(b"unsubmitted")
@@ -335,3 +342,24 @@ def test_windows_launcher_uses_console_capability_without_host_variable(monkeypa
     assert "\x1b[2J\x1b[H" in output
     assert "\x1b[1;38;5;" in output
     assert "\x1b7" in output
+
+
+@pytest.mark.parametrize(("palette", "background", "foreground"), [("light", 255, 234), ("dark", 233, 255)])
+def test_workflow_uses_the_chosen_canvas_and_restores_default_styles(
+    monkeypatch, capsys, palette, background, foreground
+):
+    monkeypatch.setattr(tui.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(tui.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(tui, "_supports_vt", lambda: True)
+    monkeypatch.setattr(tui, "THEME", tui.Theme(palette=palette, enabled=True))
+    monkeypatch.setattr(tui, "_page", None)
+    monkeypatch.setattr(tui.shutil, "get_terminal_size", lambda fallback: os.terminal_size((100, 32)))
+    tui._workflow_header("7")
+    output = capsys.readouterr().out
+    canvas = f"\x1b[38;5;{foreground};48;5;{background}m"
+    assert canvas + "\x1b[2J" in output
+    assert "Explore the zoo\x1b[0m" + canvas in output
+    tui._release_header(keep_palette=True)
+    assert tui.THEME.paint("Done", "success").endswith(canvas)
+    tui._release_header()
+    assert capsys.readouterr().out.endswith("\x1b[0m")

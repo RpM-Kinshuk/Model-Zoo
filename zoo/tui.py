@@ -330,7 +330,6 @@ def _shell_command(command: Sequence[str]) -> str:
 def _run(command: Sequence[str], workspace: Workspace, *, label: str,
          cwd: Path = PROJECT_ROOT, summary: Sequence[str] = (), confirm: bool = False) -> int:
     if confirm:
-        _clear_screen()
         _draw_brand()
     _write(label, "heading")
     if confirm and _page is None:
@@ -346,8 +345,12 @@ def _run(command: Sequence[str], workspace: Workspace, *, label: str,
         return 0
     environment = dict(os.environ, ZOO_DATA=str(workspace.root), PYTHONUNBUFFERED="1")
     _write("Starting…", "muted", flush=True)
-    _release_header()  # Let long command output use the terminal’s normal scrollback.
-    outcome = subprocess.run(list(command), cwd=cwd, env=environment, check=False)
+    _release_header(keep_palette=True)  # Let long command output use normal scrollback.
+    try:
+        outcome = subprocess.run(list(command), cwd=cwd, env=environment, check=False)
+    finally:
+        if THEME.page_active:
+            sys.stdout.write(THEME.reset_style())
     if outcome.returncode == 0:
         _write("Done.", "success")
     else:
@@ -723,7 +726,7 @@ def _fit(text: str, width: int) -> str:
     return "".join(output) + "…"
 
 
-def _release_header() -> None:
+def _release_header(*, keep_palette: bool = False) -> None:
     global _page
     if _page is not None:
         _, height = _page.size
@@ -731,6 +734,10 @@ def _release_header() -> None:
         if height >= 3:
             sys.stdout.write(f"\x1b7\x1b[{height};1H\x1b[2K\x1b[r\x1b8")
             sys.stdout.flush()
+    if THEME.page_active and not keep_palette:
+        THEME.page_active = False
+        sys.stdout.write(THEME.reset_style())
+        sys.stdout.flush()
 
 
 def _enable_windows_vt():
@@ -765,7 +772,7 @@ def _supports_vt() -> bool:
     return terminal != "dumb" and (_windows_vt if os.name == "nt" else bool(terminal))
 
 
-def _clear_screen() -> None:
+def _clear_screen(*, themed: bool = False) -> None:
     _release_header()
     if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
         return
@@ -776,7 +783,8 @@ def _clear_screen() -> None:
         except OSError:
             pass
     elif _supports_vt():
-        sys.stdout.write("\x1b[2J\x1b[H")
+        THEME.page_active = themed and THEME.enabled
+        sys.stdout.write(THEME.page_colors() + "\x1b[2J\x1b[H")
         sys.stdout.flush()
 
 
@@ -788,12 +796,12 @@ def _paint_star(char: str, role: str, *, animated: bool) -> str:
         tint = 1 if family == "dust0" else 2
         if os.environ.get("WT_SESSION") or os.environ.get("COLORTERM", "").lower() in {"truecolor", "24bit"}:
             red, green, blue = star_rgb(light, tint, level)
-            return f"\x1b[38;2;{red};{green};{blue}m{char}\x1b[0m"
+            return f"\x1b[38;2;{red};{green};{blue}m{char}{THEME.reset_style()}"
         color = star_color(light, tint, level)
-        return f"\x1b[38;5;{color}m{char}\x1b[0m"
+        return f"\x1b[38;5;{color}m{char}{THEME.reset_style()}"
     if animated:
         weight = 2 if level < 24 else 1 if level > 48 else 22
-        return f"\x1b[{weight}m{char}\x1b[0m"
+        return f"\x1b[{weight}m{char}{THEME.reset_style()}"
     return char
 
 
@@ -822,7 +830,6 @@ def _resize_page() -> None:
     previous = _page
     if previous is None:
         return
-    _clear_screen()
     _draw_brand(reserve_rows=previous.reserve_rows, footer_hint=previous.footer_hint)
     if _page is None:
         return
@@ -840,6 +847,7 @@ def _draw_brand(*, reserve_rows: int = 0, footer_hint: str = "Esc Back") -> bool
     global _page
     from zoo.terminal_home import artwork_role
 
+    _clear_screen(themed=True)
     columns, height = shutil.get_terminal_size((84, 24))
     layout = PageLayout(columns)
     vt = _supports_vt()
@@ -853,13 +861,13 @@ def _draw_brand(*, reserve_rows: int = 0, footer_hint: str = "Esc Back") -> bool
 
         def style(entry: tuple[int, str]) -> str:
             index, char = entry
-            if char == " ":
-                return "text"
             if index in highlights:
                 return highlights[index]
             if line.artwork_start is not None and index >= line.artwork_start:
+                if char == " ":
+                    return "text"
                 return artwork_role(index - line.artwork_start, layout.width - line.artwork_start)
-            return line.role
+            return "text" if line.role == "stars" else line.role
 
         spans = []
         for role, entries in groupby(enumerate(line.text.rstrip()), key=style):
@@ -918,7 +926,6 @@ def _workflow_header(choice: str) -> None:
     from zoo.terminal_home import WORKFLOWS
 
     item = next(item for item in WORKFLOWS if item.key == choice)
-    _clear_screen()
     if _draw_brand():
         _write(item.group, "workflow")
     else:
@@ -995,7 +1002,6 @@ def _main(argv: Sequence[str] | None) -> int:
             workspace = replace(workspace, run=(root / args.run.expanduser()).resolve(), run_is_explicit=True)
         if args.workflow == "init":
             config = workspace.initialize()
-            _clear_screen()
             _draw_brand()
             _write(f"Workspace  {root}", literal=True)
             _write(f"Settings  {config}", literal=True)
@@ -1042,9 +1048,9 @@ def _main(argv: Sequence[str] | None) -> int:
     refresh = True
     while True:
         try:
-            if refresh:
-                _clear_screen()
             if full_screen:
+                if refresh:
+                    _clear_screen()
                 try:
                     choice, THEME.palette, motion = navigate(_status(root), palette=THEME.palette,
                                                               motion=motion, color=THEME.enabled, star_seed=STAR_SEED, clock=CLOCK)
