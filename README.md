@@ -134,7 +134,8 @@ With both checkouts side by side, install `duckdb==1.5.6` in the analysis
 environment so the launcher can run Zoo-Keeper from its checkout. The
 [catalog guide](docs/operations/zoo.md) covers direct build and query commands.
 
-The galaxy header animates by default on compatible terminals. Press **M** to
+The galaxy header animates by default on compatible terminals, including
+Windows PowerShell and Command Prompt consoles with virtual terminal support. Press **M** to
 toggle motion on the home menu, or start with `--no-motion`. Use `--help`
 for launcher options.
 

@@ -46,6 +46,7 @@ class TerminalPage(NamedTuple):
 
 
 _page: TerminalPage | None = None
+_windows_vt = False
 
 
 def _layout() -> PageLayout:
@@ -732,17 +733,49 @@ def _release_header() -> None:
             sys.stdout.flush()
 
 
+def _enable_windows_vt():
+    """Enable ANSI output on the native console and return a mode restorer."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdout.fileno())
+        kernel = ctypes.WinDLL("kernel32")
+        get_mode = kernel.GetConsoleMode
+        get_mode.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        get_mode.restype = wintypes.BOOL
+        set_mode = kernel.SetConsoleMode
+        set_mode.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        set_mode.restype = wintypes.BOOL
+        original = wintypes.DWORD()
+        if not get_mode(handle, ctypes.byref(original)):
+            return None
+        processed_output, virtual_terminal_processing = 0x0001, 0x0004
+        if not set_mode(handle, original.value | processed_output | virtual_terminal_processing):
+            return None
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    return lambda: set_mode(handle, original.value)
+
+
+def _supports_vt() -> bool:
+    terminal = os.environ.get("TERM")
+    return terminal != "dumb" and (_windows_vt if os.name == "nt" else bool(terminal))
+
+
 def _clear_screen() -> None:
     _release_header()
     if not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("TERM") == "dumb":
         return
     sys.stdout.flush()
-    if os.name == "nt" and not os.environ.get("WT_SESSION"):
+    if os.name == "nt" and not _supports_vt():
         try:
             subprocess.run(["cmd.exe", "/d", "/c", "cls"], check=False)
         except OSError:
             pass
-    elif os.name == "nt" or os.environ.get("TERM"):
+    elif _supports_vt():
         sys.stdout.write("\x1b[2J\x1b[H")
         sys.stdout.flush()
 
@@ -809,7 +842,7 @@ def _draw_brand(*, reserve_rows: int = 0, footer_hint: str = "Esc Back") -> bool
 
     columns, height = shutil.get_terminal_size((84, 24))
     layout = PageLayout(columns)
-    vt = bool(os.environ.get("WT_SESSION") if os.name == "nt" else os.environ.get("TERM"))
+    vt = _supports_vt()
     budget = max(1, height - max(reserve_rows, 4))
     lines = brand_header(layout.width, height, CLOCK.tick(), max_rows=budget, star_seed=STAR_SEED)
     if vt and height < 4:
@@ -899,15 +932,26 @@ def _workflow_header(choice: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global _windows_vt
+    restore = None
+    if (os.name == "nt" and sys.stdout.isatty() and sys.stdin.isatty()
+            and os.environ.get("TERM") != "dumb"):
+        restore = _enable_windows_vt()
+    _windows_vt = restore is not None
     try:
         return _main(argv)
     finally:
-        _release_header()
-        CLOCK.set_running(False)
+        try:
+            _release_header()
+            CLOCK.set_running(False)
+        finally:
+            _windows_vt = False
+            if restore is not None:
+                restore()
 
 
 def _main(argv: Sequence[str] | None) -> int:
-    global VERBOSE, CLOCK
+    global VERBOSE, CLOCK, _windows_vt
     actions = {
         "prepare": _prepare, "measure": _launch, "summarize": _analyze,
         "publish": _publish, "build": _build, "deltas": _deltas,
@@ -940,7 +984,7 @@ def _main(argv: Sequence[str] | None) -> int:
     CLOCK.set_running(args.motion)
     VERBOSE = args.verbose
     THEME.palette = THEME.automatic_palette() if args.theme == "auto" else args.theme
-    THEME.enabled = Theme().enabled and (os.name != "nt" or bool(os.environ.get("WT_SESSION")))
+    THEME.enabled = Theme().enabled and (os.name != "nt" or _supports_vt())
     supplied = args.workspace or Path(os.environ.get("ZOO_DATA") or "zoo-data")
     try:
         root = supplied.expanduser().resolve()
@@ -985,7 +1029,7 @@ def _main(argv: Sequence[str] | None) -> int:
         return run_workflow(args.workflow) or 0
 
     motion = args.motion
-    full_screen = (not args.plain and (os.name != "nt" or bool(os.environ.get("WT_SESSION")))
+    full_screen = (not args.plain and _supports_vt()
                    and sys.stdin.isatty()
                    and sys.stdout.isatty() and _supports_full_screen())
     if full_screen:
@@ -1007,6 +1051,12 @@ def _main(argv: Sequence[str] | None) -> int:
                 except curses.error:
                     full_screen = False
                     continue
+                finally:
+                    if os.name == "nt":
+                        # PDCurses may change the output mode if it reused our console buffer.
+                        _windows_vt = _enable_windows_vt() is not None
+                        THEME.enabled = _windows_vt and Theme().enabled
+                        full_screen = full_screen and _windows_vt
             else:
                 if refresh:
                     _draw_home(root)

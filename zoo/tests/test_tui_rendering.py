@@ -268,7 +268,7 @@ def test_motion_setting_works_without_color_and_survives_navigation(tmp_path, mo
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("TERM", "xterm-256color")
     if tui.os.name == "nt":
-        monkeypatch.setenv("WT_SESSION", "test")
+        monkeypatch.setattr(tui, "_enable_windows_vt", lambda: lambda: None)
     monkeypatch.setattr(tui.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(tui.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(terminal_home, "navigate", navigate)
@@ -286,3 +286,52 @@ def test_version_reports_distribution_and_loaded_source(capsys, monkeypatch):
     output = capsys.readouterr().out
     assert "0.1.0" in output
     assert str(tui.Path(tui.__file__).resolve()) in output
+
+
+def test_windows_enables_and_restores_virtual_terminal_mode(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    from unittest.mock import Mock, call
+
+    console = SimpleNamespace(
+        GetConsoleMode=Mock(side_effect=lambda handle, mode: setattr(mode._obj, "value", 2) or 1),
+        SetConsoleMode=Mock(return_value=1),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args: console, raising=False)
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(get_osfhandle=lambda fd: 42))
+    monkeypatch.setattr(tui.sys.stdout, "fileno", lambda: 1)
+    restore = tui._enable_windows_vt()
+    assert restore is not None
+    restore()
+    assert console.SetConsoleMode.call_args_list == [call(42, 7), call(42, 2)]
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_windows_launcher_uses_console_capability_without_host_variable(monkeypatch, tmp_path, capsys, plain):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from zoo import terminal_home
+
+    monkeypatch.setattr(tui, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    monkeypatch.delenv("TERM", raising=False)
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(tui.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(tui.sys.stdout, "isatty", lambda: True)
+    restore = Mock()
+    enable = Mock(return_value=restore)
+    monkeypatch.setattr(tui, "_enable_windows_vt", enable)
+    monkeypatch.setattr(tui, "_pause", lambda: None)
+    monkeypatch.setattr(tui, "_infrastructure", lambda workspace: 0)
+    monkeypatch.setattr(tui, "_read_menu_choice", lambda root: "q")
+    choices = iter(("8", "q"))
+    monkeypatch.setattr(terminal_home, "navigate",
+                        lambda status, *, palette, motion, **kwargs: (next(choices), palette, motion))
+    flags = ["--plain"] if plain else []
+    assert tui.main([*flags, "--workspace", str(tmp_path)]) == 0
+    assert enable.call_count == (1 if plain else 3)
+    restore.assert_called_once()
+    output = capsys.readouterr().out
+    assert "\x1b[2J\x1b[H" in output
+    assert "\x1b[1;38;5;" in output
+    assert "\x1b7" in output
