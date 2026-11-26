@@ -1,6 +1,4 @@
 """Private, bounded stored-dtype parent blocks, shared safely by workers."""
-from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +8,8 @@ import time
 
 import torch
 
+from .file_lock import exclusive_file_lock
+
 
 class BlockCache:
     def __init__(self, root: Path, max_bytes: int = 64 * 1024**3):
@@ -18,15 +18,8 @@ class BlockCache:
         self.root, self.max_bytes = Path(root), max_bytes
         self.root.mkdir(parents=True, exist_ok=True)
 
-    @contextmanager
     def _locked(self):
-        # Separate opens also serialize threads using distinct cache instances.
-        with (self.root / ".lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        return exclusive_file_lock(self.root / ".lock")
 
     def _path(self, manifest, view_name, bounds, dtype, shape):
         identity = [manifest["repo_id"], manifest["revision"], view_name,

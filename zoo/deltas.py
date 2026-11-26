@@ -78,7 +78,7 @@ def run_deltas(zoo, packages, data_root, *, workers="auto", compute_device="auto
         _init(devices, None)
         paths = [_measure(task) for task in tasks]
     elif tasks:
-        context = mp.get_context("spawn" if devices[0] != "cpu" else "fork")
+        context = mp.get_context("spawn" if os.name == "nt" or devices[0] != "cpu" else "fork")
         counter = context.Value("i", 0)
         with ProcessPoolExecutor(max_workers=count, mp_context=context, initializer=_init, initargs=(devices, counter)) as pool:
             paths = list(pool.map(_measure, tasks))

@@ -1,8 +1,6 @@
 """Publish complete derived model artifacts atomically; never publish weights."""
-from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -15,6 +13,7 @@ import h5py
 from safetensors import safe_open
 
 from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
+from evidence.file_lock import exclusive_file_lock
 from evidence.compatibility import canonical_mode, companion_spectra_path, find_fingerprint, historical_artifact_name
 from measurement_config import (FORMAT_VERSION, NUMERICS_VERSION, artifact_compatibility,
                                 measurement_config, safe_filename)
@@ -164,16 +163,6 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
     return safe, sources, metadata
 
 
-@contextmanager
-def _lock(path):
-    with path.open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
-
-
 def _link_or_copy(source, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -239,7 +228,7 @@ def publish_package(run_dir: Path, model_id: str, packages_root: Path, data_root
     destination = _destination(packages_root, safe, metadata)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
-    with _lock(parent / ".publish.lock"):
+    with exclusive_file_lock(parent / ".publish.lock"):
         hashes = {name: _hash_file(path) for name, path in sorted(sources.items())}
         if destination.exists():
             if _matches(destination, metadata, hashes):

@@ -200,3 +200,20 @@ def test_deltas_measures_detected_package_pair_and_resumes(package_run, capsys):
     lineage = open_tables(built)["lineage"]
     assert lineage.evidence.str.contains("row_block_delta").any()
     assert not lineage.calibrated.any()
+
+
+def test_human_publication_summary_explains_empty_run(tmp_path, capsys):
+    assert main(["publish", "--data_root", str(tmp_path), "--runs", str(tmp_path), "--human"]) == 0
+    assert "No complete model packages found" in capsys.readouterr().out
+
+
+def test_human_delta_summary_explains_candidate_counts(tmp_path, monkeypatch, capsys):
+    import zoo.deltas
+
+    monkeypatch.setattr(zoo.deltas, "run_deltas",
+                        lambda *args, **kwargs: {"measured": 1, "skipped": 2, "paths": []})
+    assert main(["deltas", "--data_root", str(tmp_path), "--human"]) == 0
+    output = capsys.readouterr().out
+    assert "Measured 1 candidate pair" in output
+    assert "Skipped 2" in output
+    assert "Rebuild the catalog" in output

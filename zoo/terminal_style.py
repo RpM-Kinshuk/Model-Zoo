@@ -8,9 +8,9 @@ import unicodedata
 
 PALETTES = {
     "dark": dict(background=233, text=255, brand=81, accent=141, border=245,
-                 muted=250, error=203, selection=24, glow=117, spark=222, aurora=209, rose=210),
+                 muted=250, error=203, selection=24, glow=117, spark=222, aurora=209, rose=210, workflow=179, success=150),
     "light": dict(background=255, text=234, brand=25, accent=61, border=60,
-                  muted=60, error=124, selection=189, glow=26, spark=94, aurora=22, rose=125),
+                  muted=60, error=124, selection=189, glow=26, spark=94, aurora=22, rose=125, workflow=94, success=22),
 }
 
 
@@ -74,13 +74,6 @@ class Theme:
         self.enabled = (stream.isatty() and "NO_COLOR" not in os.environ and os.getenv("TERM") != "dumb"
                         if enabled is None else enabled)
         self.palette = self.automatic_palette() if palette == "auto" else palette
-        self.in_frame = False
-
-    def backdrop(self):
-        if not self.enabled or not self.in_frame:
-            return ""
-        colors = PALETTES[self.palette]
-        return f"\x1b[38;5;{colors['text']};48;5;{colors['background']}m"
 
     @staticmethod
     def automatic_palette():
@@ -93,9 +86,15 @@ class Theme:
     def paint(self, value, role):
         if not self.enabled:
             return value
-        weight = "1;" if role in ("brand", "heading") else ""
-        color = PALETTES[self.palette]["brand" if role == "heading" else role]
-        return f"\x1b[{weight}38;5;{color}m{value}\x1b[0m{self.backdrop()}"
+        if role == "text":
+            return value
+        if role == "heading":
+            return f"\x1b[1m{value}\x1b[0m"
+        if role == "muted":
+            return f"\x1b[2m{value}\x1b[0m"
+        weight = "1;" if role in ("brand", "workflow") else ""
+        color = PALETTES[self.palette][role]
+        return f"\x1b[{weight}38;5;{color}m{value}\x1b[0m"
 
     def brand(self, value):
         return self.paint(value, "brand")

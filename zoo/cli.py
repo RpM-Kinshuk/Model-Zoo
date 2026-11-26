@@ -31,10 +31,12 @@ def _parser():
     publish.add_argument("--runs", type=Path, nargs="+", required=True)
     publish.add_argument("--packages_root", type=Path)
     publish.add_argument("--data_root", type=Path)
+    publish.add_argument("--human", action="store_true", help="Print a short publication summary")
     deltas = commands.add_parser("deltas", help="Measure row-block updates for detected candidates")
     deltas.add_argument("--zoo", type=Path)
     deltas.add_argument("--packages", type=Path)
     deltas.add_argument("--data_root", type=Path)
+    deltas.add_argument("--human", action="store_true", help="Print a short measurement summary")
     deltas.add_argument("--workers", default="auto")
     deltas.add_argument("--compute_device", default="auto")
     deltas.add_argument("--parent_cache", type=Path)
@@ -68,15 +70,28 @@ def main(argv=None):
             cache = None if args.no_parent_cache else args.parent_cache or root / "cache" / "parent-blocks"
             result = run_deltas(args.zoo or root / "builds/current", packages, root, workers=args.workers,
                                 compute_device=args.compute_device, parent_cache=cache, parent_cache_gib=args.parent_cache_gib)
-            result["rebuild"] = "python -m zoo.cli build --data_root " + shlex.quote(str(root)) + " --packages " + shlex.quote(str(packages))
-            print(json.dumps(result, sort_keys=True))
+            if args.human:
+                measured = result["measured"]
+                pairs = "pair" if measured == 1 else "pairs"
+                print(f"Measured {measured:,} candidate {pairs}. Skipped {result['skipped']:,} "
+                      "with existing measurements or missing inputs.")
+                if result["measured"]:
+                    print("Rebuild the catalog to include these measurements.")
+            else:
+                result["rebuild"] = "python -m zoo.cli build --data_root " + shlex.quote(str(root)) + " --packages " + shlex.quote(str(packages))
+                print(json.dumps(result, sort_keys=True))
             return 0
         if args.command == "publish":
             root = args.data_root or (Path(os.environ["ZOO_DATA"]) if os.environ.get("ZOO_DATA") else None)
             if root is None:
                 raise ValueError("Set --data_root or ZOO_DATA")
-            published = publish_packages(args.runs, args.packages_root or root / "packages", root)
-            print(json.dumps({"packages": [str(path) for path in published], "count": len(published)}, sort_keys=True))
+            packages = args.packages_root or root / "packages"
+            published = publish_packages(args.runs, packages, root)
+            if args.human:
+                print(f"{len(published):,} complete model packages available in {packages}."
+                      if published else "No complete model packages found in the selected runs.")
+            else:
+                print(json.dumps({"packages": [str(path) for path in published], "count": len(published)}, sort_keys=True))
             return 0
         if bool(args.scores_csv) != bool(args.scores_mapping):
             raise ValueError("--scores_csv and --scores_mapping must be supplied together")

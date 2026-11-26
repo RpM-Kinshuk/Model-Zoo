@@ -23,12 +23,18 @@ def test_selected_workflow_stays_visible_in_small_window():
 
 
 def test_motion_does_not_change_content_rows():
-    first = home.compose_frame(100, 32, 0, '', [], 0)
-    second = home.compose_frame(100, 32, 0, '', [], 3)
-    assert [line.text for line in first if line.role != 'stars'] == [line.text for line in second if line.role != 'stars']
+    def without_stars(line):
+        text = list(line.text)
+        for column, _ in line.highlights:
+            text[column] = " "
+        return "".join(text)
+
+    first = home.compose_frame(100, 32, 0, "", [], 0)
+    second = home.compose_frame(100, 32, 0, "", [], 57)
+    assert [without_stars(line) for line in first] == [without_stars(line) for line in second]
 
 
-@pytest.mark.parametrize('keys', [b'\x1bOA\r', b'TM??/infrastructure\r'])
+@pytest.mark.parametrize("keys", [b"\x1bOA\r", b"TM??/infrastructure\r"])
 def test_real_terminal_resize_navigation_and_mode_restoration(keys):
     """Exercise curses itself, not a mocked screen, through a pseudo-terminal."""
     import os
@@ -50,7 +56,8 @@ def test_real_terminal_resize_navigation_and_mode_restoration(keys):
     original = termios.tcgetattr(slave)
     environment = dict(os.environ, TERM='xterm-256color')
     code = ('from zoo.terminal_home import navigate; '
-            'print("RESULT", navigate(["Workspace not connected"], motion=False)[0])')
+            'choice, _, motion = navigate(["Workspace not connected"], motion=False); '
+            'print("RESULT", choice, "MOTION", motion)')
     process = subprocess.Popen([sys.executable, '-c', code], stdin=slave,
                                stdout=slave, stderr=slave, env=environment)
     captured = bytearray()
@@ -74,6 +81,7 @@ def test_real_terminal_resize_navigation_and_mode_restoration(keys):
         drain(0.1)
         assert process.returncode == 0, captured.decode(errors='replace')
         assert b'RESULT 8' in captured
+        assert (b'MOTION True' if b'M' in keys else b'MOTION False') in captured
         assert termios.tcgetattr(slave) == original
     finally:
         if process.poll() is None:
@@ -131,33 +139,98 @@ def test_menu_uses_multiple_warm_and_cool_accents():
     assert {'spark', 'aurora', 'rose'}.issubset(roles)
 
 
-def test_twinkle_has_gradual_brightness_steps():
-    levels = [home.star_brightness(17, tick) for tick in range(600)]
-    assert len(set(levels)) >= 10
-    assert max(abs(a-b) for a, b in zip(levels, levels[1:])) <= 1
-
-
-def test_twinkle_has_many_steps_without_speeding_up():
-    levels = [home.star_brightness(17, tick) for tick in range(1800)]
-    assert len(set(levels)) == 64
-    assert max(abs(a-b) for a, b in zip(levels, levels[1:])) <= 1
+def test_twinkle_fades_slowly_in_small_brightness_steps():
+    ticks_per_second = home.ANIMATION_FPS
+    for seed in (17, 120, 359):
+        levels = [home.star_brightness(seed, tick) for tick in range(1 + 30 * ticks_per_second)]
+        assert min(levels) == 0 and max(levels) == 63
+        assert len(set(levels)) >= 24
+        assert max(abs(a - b) for a, b in zip(levels, levels[1:])) <= 2
+        period = next(tick for tick in range(18 * ticks_per_second, 30 * ticks_per_second + 1)
+                      if all(home.star_brightness(seed, tick + offset) == levels[offset]
+                             for offset in range(ticks_per_second)))
+        assert 18 <= period / ticks_per_second <= 30
 
 
 def test_braille_stars_stay_sparse_and_clear_of_workflows():
     frame = home.compose_frame(120, 48, 0, '', [], 500)
-    dust = [line for line in frame if any(role.startswith('dust') for _, role in line.highlights)]
+    dust = [line for line in frame if line.highlights]
     assert dust
-    assert all(sum(not char.isspace() for char in line.text) <= 2 for line in dust)
-    assert all(line.role == 'stars' for line in dust)
+    assert sum(len(line.highlights) for line in dust) < 120 * 48 / 50
+    for line in dust:
+        assert not any(item.title in line.text for item in home.WORKFLOWS)
+        for column, _ in line.highlights:
+            assert 0x2800 <= ord(line.text[column]) <= 0x28FF
+            assert line.artwork_start is None or column < line.artwork_start
 
 
-def test_dust_scatter_has_no_repeating_diagonal_stride():
-    from collections import Counter
-    for width in (50, 80, 120):
-        positions = [home.dust_locations(width, row) for row in range(40)]
-        assert positions == [home.dust_locations(width, row) for row in range(40)]
-        assert all(len({column for column, _ in row}) == 2 for row in positions)
-        for slot in range(2):
-            strides = Counter((b[slot][0] - a[slot][0]) % (width - 6)
-                              for a, b in zip(positions, positions[1:]))
-            assert max(strides.values()) < 8
+def test_home_keeps_galaxy_and_stars_at_standard_size():
+    frame = home.compose_frame(80, 24, 0, "", ["Workspace  example"], 0)
+    assert any("MODEL ZOO" in line.text for line in frame)
+    assert any("✦" in line.text and line.artwork_start is not None for line in frame)
+    assert any(line.highlights for line in frame[:8])
+    assert any("Scan infrastructure" in line.text for line in frame)
+
+
+def test_shared_header_fits_compact_terminal_sizes():
+    for width, height in [(0, 2), (7, 10), (25, 12), (36, 16), (75, 24), (88, 40)]:
+        header = home.brand_header(width, height)
+        assert len(header) < height
+        assert all(len(line.text) <= width for line in header)
+
+
+def test_a_single_star_stays_in_place_until_it_has_gone_dark(monkeypatch):
+    seed = 17
+    monkeypatch.setattr(home, "_star_seeds", lambda field_seed, count: (seed,))
+    field = [home.Line(" " * 36, "stars")] * 5
+    visible_by_life = {}
+    for tick in range(900):
+        shown = home._scatter_stars(field, tick, 0)
+        positions = [(row, column) for row, line in enumerate(shown) for column, _ in line.highlights]
+        generation, _, _ = home._star_cycle(seed, tick)
+        if home.star_brightness(seed, tick):
+            assert len(positions) == 1
+            visible_by_life.setdefault(generation, set()).update(positions)
+        else:
+            assert not positions
+    assert all(len(positions) == 1 for positions in visible_by_life.values())
+    assert len(set.union(*visible_by_life.values())) > 1
+
+
+def test_motion_state_is_visible_in_the_home_controls():
+    for active in (False, True):
+        frame = home.compose_frame(80, 24, 0, "", [], 0, motion=active)
+        assert any(("Motion on" if active else "Motion off") in line.text for line in frame)
+
+
+def test_stars_have_a_dark_gap_between_fades():
+    levels = [home.star_brightness(17, tick) for tick in range(home.ANIMATION_FPS * 20)]
+    assert any(levels[index:index + home.ANIMATION_FPS] == [0] * home.ANIMATION_FPS
+               for index in range(len(levels) - home.ANIMATION_FPS))
+
+
+def test_starfields_change_location_and_density_with_time_and_seed():
+    def positions(seed, tick):
+        header = home.brand_header(75, 24, tick, star_seed=seed)
+        return {(row, column) for row, line in enumerate(header) for column, _ in line.highlights}
+
+    samples = [positions(17, tick) for tick in range(0, 600, 12)]
+    assert len(set().union(*samples)) > max(map(len, samples))
+    assert len(set(map(len, samples))) > 1
+    assert positions(17, 24) == positions(17, 24)
+    assert positions(17, 24) != positions(91, 24)
+
+
+def test_stars_use_single_dots_and_keep_space_from_neighbors():
+    from itertools import combinations
+
+    for seed in (0, 17, 91):
+        for tick in range(0, 480, 12):
+            frame = home.compose_frame(80, 24, 0, "", [], tick, star_seed=seed)
+            stars = []
+            for row, line in enumerate(frame):
+                for column, _ in line.highlights:
+                    assert (ord(line.text[column]) - 0x2800).bit_count() == 1
+                    stars.append((row, column))
+            assert all(abs(a_row - b_row) > 1 or abs(a_col - b_col) > 3
+                       for (a_row, a_col), (b_row, b_col) in combinations(stars, 2))

@@ -24,6 +24,36 @@ python esd_experiment/run_experiment.py \
 `run_script.sh` is the local HPC wrapper; check its paths and flags before use.
 Eigenvalues are saved by default. Use `--no-save_eigs` for scalar-only outputs.
 
+## Launcher settings
+
+Optional `init` creates `model-zoo.json`. Paths in `models`, `run`, and `cache`
+are relative to the workspace unless absolute. Set `prepare_limit` to review
+the first N entries, `gpus` to save allocated numeric device IDs, and
+`resources` for runner overrides such as `{"max_concurrent_jobs": 2}`.
+If `cache` is omitted, `MODEL_ZOO_WORKER_CACHE_ROOT` can override the default.
+Use `--run runs/trial` to select another run folder for a launcher session.
+
+## Scripted runs and Slurm
+
+Set `HF_TOKEN` for gated or private repositories. Set `ZOO_DATA` to put
+published packages and catalog builds under a shared artifact root. Without
+it, packages go to `<output_dir>/packages`, and a catalog build needs
+`--data_root`.
+
+With the analysis environment active, submit metadata-only preparation from
+the checkout:
+
+```bash
+sbatch --output=prepare-%j.log --wrap='python -u esd_experiment/run_experiment.py --model_list models.csv --output_dir runs/prepared --prepare_only'
+```
+
+Run measurement inside the allocated Slurm job. Use
+`--model_list runs/prepared/models.csv --output_dir runs/prepared` and pass the
+allocated device indices to `--gpus`. Progress appears in redirected Slurm logs.
+Use `python esd_experiment/analyze_results.py --results_dir runs/prepared`
+to write `summary.csv`. Filter by `outcome` and `matrix_coverage` before
+comparing models.
+
 ## Pinned inputs and remote code
 
 Preparation fills `revision_norm` with a full commit SHA and pins each

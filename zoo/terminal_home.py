@@ -5,15 +5,36 @@ restores its modes before any subprocess or ordinary line prompt runs.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import time
 import math
 import random
+from secrets import randbits
 from functools import lru_cache
 import unicodedata
 from typing import Sequence
 
 from zoo.terminal_style import PALETTES, PageLayout
+
+
+ANIMATION_FPS = 12
+
+
+class MotionClock:
+    def __init__(self):
+        self.elapsed = 0.0
+        self.started = None
+
+    def set_running(self, running: bool) -> None:
+        if running and self.started is None:
+            self.started = time.monotonic()
+        elif not running and self.started is not None:
+            self.elapsed += time.monotonic() - self.started
+            self.started = None
+
+    def tick(self) -> int:
+        current = 0 if self.started is None else time.monotonic() - self.started
+        return int((self.elapsed + current) * ANIMATION_FPS)
 
 
 @dataclass(frozen=True)
@@ -25,8 +46,8 @@ class Workflow:
 
 
 WORKFLOWS = (
-    Workflow('1', 'Prepare a collection', 'Pin model revisions and review ready / held rows', 'COLLECT'),
-    Workflow('2', 'Plan a measurement run', 'Choose resources, inspect preflight, review command', 'COLLECT'),
+    Workflow('1', 'Prepare a collection', 'Resolve model versions and check which entries can run', 'COLLECT'),
+    Workflow('2', 'Measure pinned models', 'Check GPUs and review the run before downloading weights', 'COLLECT'),
     Workflow('3', 'Summarize a run', 'Refresh the run summary from existing measurements', 'COLLECT'),
     Workflow('4', 'Publish completed evidence', 'Create immutable local model packages', 'ASSEMBLE'),
     Workflow('5', 'Build / refresh the zoo', 'Turn model packages into an offline query snapshot', 'ASSEMBLE'),
@@ -70,25 +91,33 @@ def spiral_galaxy() -> tuple[str, ...]:
     return tuple(artwork)
 
 
-def star_brightness(position: int, tick: int) -> int:
-    """Sixty-four luminance steps over slow, independently phased cycles."""
-    phase = tick / (110 + position % 89) + position * 1.73
-    wave = (1 + math.sin(phase)) / 2
-    return round(63 * wave * wave * (3 - 2 * wave))
+def _star_cycle(seed: int, tick: int) -> tuple[int, int, int]:
+    period = ANIMATION_FPS * 18 + seed % (ANIMATION_FPS * 12 + 1)
+    generation, age = divmod(tick + (seed >> 8) % period, period)
+    return generation, age, period * 4 // 5
+
+
+def star_brightness(seed: int, tick: int) -> int:
+    """Fade in and out, then stay dark before moving to a new position."""
+    _, age, lit_ticks = _star_cycle(seed, tick)
+    if age >= lit_ticks:
+        return 0
+    return round(63 * math.sin(math.pi * age / lit_ticks) ** 4)
+
+
+@lru_cache(maxsize=384)
+def star_rgb(light: bool, family: int, level: int) -> tuple[int, int, int]:
+    background = (238, 238, 238) if light else (18, 18, 18)
+    targets = ((24, 75, 145), (145, 55, 20), (100, 45, 145)) if light else (
+        (220, 239, 255), (255, 190, 120), (185, 155, 255))
+    return tuple(round(a + (b - a) * level / 63)
+                 for a, b in zip(background, targets[family]))
 
 
 @lru_cache(maxsize=384)
 def star_color(light: bool, family: int, level: int) -> int:
-    """Quantize a smooth fade to the terminal's fixed 256-color palette.
-
-    Keep the emulator's color definitions untouched. Repeated indices are normal
-    where terminal color depth cannot express adjacent animation steps.
-    """
-    background = (238, 238, 238) if light else (18, 18, 18)
-    targets = ((24, 75, 145), (145, 55, 20), (100, 45, 145)) if light else (
-        (220, 239, 255), (255, 190, 120), (185, 155, 255))
-    amount = level / 63
-    target = tuple(a + (b-a) * amount for a, b in zip(background, targets[family]))
+    """Find the closest shade on a 256-color terminal."""
+    target = star_rgb(light, family, level)
     steps = (0, 95, 135, 175, 215, 255)
     candidates = [(16 + 36*r + 6*g + b, (red, green, blue))
                   for r, red in enumerate(steps) for g, green in enumerate(steps)
@@ -97,18 +126,104 @@ def star_color(light: bool, family: int, level: int) -> int:
     return min(candidates, key=lambda item: sum((a-b)**2 for a, b in zip(item[1], target)))[0]
 
 
-@lru_cache(maxsize=256)
-def dust_locations(width: int, row: int) -> tuple[tuple[int, int], ...]:
-    """Independent row samples avoid the diagonal bands of modular placement.
+@lru_cache(maxsize=128)
+def _star_sites(bounds: tuple[tuple[int, int], ...], field_seed: int) -> tuple[tuple[int, int], ...]:
+    candidates = [(row, column) for row, (start, stop) in enumerate(bounds)
+                  for column in range(start, stop)]
+    random.Random(field_seed).shuffle(candidates)
+    sites = []
+    blocked = set()
+    for row, column in candidates:
+        if (row, column) in blocked:
+            continue
+        sites.append((row, column))
+        # Terminal cells are taller than they are wide. Reserve more space
+        # across each row than vertically.
+        blocked.update((row + dy, column + dx) for dy in (-1, 0, 1) for dx in range(-3, 4))
+    return tuple(sites)
 
-    Local seeded randomness keeps layout and fade phases stable across frames;
-    sampling without replacement also prevents two stars sharing a cell.
-    """
-    if width < 8:
-        return ()
-    generator = random.Random(20261028 + row * 65537)
-    columns = generator.sample(range(3, width - 3), 2)
-    return tuple((column, generator.randrange(1_000_000)) for column in columns)
+
+@lru_cache(maxsize=128)
+def _star_seeds(field_seed: int, count: int) -> tuple[int, ...]:
+    generator = random.Random(field_seed)
+    return tuple(generator.getrandbits(64) for _ in range(count))
+
+
+@lru_cache(maxsize=512)
+def _star_cell_index(seed: int, generation: int, count: int) -> int:
+    return random.Random(f"{seed}:{generation}").randrange(count)
+
+
+def _scatter_stars(lines: list[Line], tick: int, field_seed: int) -> list[Line]:
+    bounds = []
+    for line in lines:
+        end = line.artwork_start if line.artwork_start is not None else len(line.text)
+        start = len(line.text[:end].rstrip())
+        bounds.append((start + 3, end - 3))
+    sites = _star_sites(tuple(bounds), field_seed)
+    if not sites:
+        return lines
+
+    area = sum(max(0, stop - start) for start, stop in bounds)
+    count = min(max(1, len(sites) // 2), max(2, area // 32))
+    seeds = _star_seeds(field_seed, count)
+    # Give each star its own set of random, separated positions. A new fade
+    # cannot crowd a star that is already visible.
+    visible = []
+    for index, seed in enumerate(seeds):
+        level = star_brightness(seed, tick)
+        if not level:
+            continue
+        generation, _, _ = _star_cycle(seed, tick)
+        positions = sites[index::len(seeds)]
+        cell = positions[_star_cell_index(seed, generation, len(positions))]
+        visible.append((cell, level, index % 2))
+
+    text = [list(line.text) for line in lines]
+    highlights: list[list[tuple[int, str]]] = [[] for _ in lines]
+    for (row, column), level, family in sorted(visible):
+        dot = (row * 31 + column + field_seed) % 8
+        text[row][column] = chr(0x2800 + (1 << dot))
+        highlights[row].append((column, f"dust{family}_{level}"))
+    return [replace(line, text="".join(text[row]), highlights=tuple(highlights[row]))
+            if highlights[row] else line for row, line in enumerate(lines)]
+
+
+def artwork_role(offset: int, width: int) -> str:
+    spectrum = ("glow", "accent", "rose", "spark", "aurora")
+    distance = abs(offset - width // 2)
+    return "spark" if distance < 3 else spectrum[min(4, distance // 4)]
+
+
+def brand_header(width: int, height: int, tick: int = 0, *,
+                 max_rows: int | None = None, star_seed: int = 0) -> list[Line]:
+    """Fit the same galaxy and title to the available space on each page."""
+    if width < 25 or height < 10:
+        return [Line("MODEL ZOO"[:width], "brand")]
+    budget = height if max_rows is None else max_rows
+    if height >= 34 and width >= 72 and budget >= 11:
+        art_width, art_height = 33, 9
+    elif height >= 22 and width >= 52 and budget >= 7:
+        art_width, art_height = 33, 5
+    elif height >= 16 and width >= 36 and budget >= 4:
+        art_width, art_height = 17, 3
+    else:
+        art_width, art_height = 9, 1
+
+    first_row = (9 - art_height) // 2
+    first_column = (33 - art_width) // 2
+    artwork_start = width - art_width
+    rows = []
+    if height >= 16 and budget > art_height:
+        rows.append(Line(" " * width, "stars"))
+    for index, row in enumerate(spiral_galaxy()[first_row:first_row + art_height]):
+        title = "MODEL ZOO" if index == art_height // 2 else ""
+        glyphs = row[first_column:first_column + art_width]
+        rows.append(Line(title.ljust(artwork_start) + glyphs, "brand" if title else "text",
+                         artwork_start=artwork_start))
+    if height >= 22 and len(rows) < budget:
+        rows.append(Line(""))
+    return _scatter_stars(rows, tick, star_seed)
 
 
 def matching_workflows(query: str) -> list[Workflow]:
@@ -134,7 +249,8 @@ def _fit_cells(value: str, width: int) -> str:
 
 
 def compose_frame(width: int, height: int, selected: int, query: str,
-                  status: Sequence[str], tick: int, *, help_open: bool = False, searching: bool = False) -> list[Line]:
+                  status: Sequence[str], tick: int, *, help_open: bool = False,
+                  searching: bool = False, motion: bool = False, star_seed: int = 0) -> list[Line]:
     """Budget rows before drawing; reserve the last column to avoid autowrap."""
     layout = PageLayout(width)
     width, height = layout.width, max(0, height)
@@ -146,31 +262,24 @@ def compose_frame(width: int, height: int, selected: int, query: str,
         title = items[selected].title if items else 'No matches'
         rows = [Line('MODEL ZOO', 'brand'), Line(title, 'selected'), Line('Resize for more · q quit', 'muted')]
         return [Line(_fit_cells(row.text, width), row.role) for row in rows[:height]]
-    rows = [Line('MODEL ZOO', 'brand')]
-    if height >= 34 and width >= 72:
-        art = spiral_galaxy()
-        artwork_start = width - len(art[0])
-        rows = [Line(('MODEL ZOO' if index == 1 else '').ljust(artwork_start) + glyphs,
-                     'brand' if index == 1 else 'text', artwork_start=artwork_start)
-                for index, glyphs in enumerate(art)]
-    elif height >= 16:
-        rows.insert(0, Line(''))
+    rows = brand_header(width, height, tick, star_seed=star_seed)
     if height >= 18 and status:
         rows += [Line(line, 'muted') for line in status[:2]]
         rows.append(Line(''))
     rows += [Line('Search  ' + query + ('_' if searching else '')
                   if query or searching else 'Workflows', 'accent')]
     if width >= 48:
-        footer = [Line('↑/↓ Select  ·  Enter Open  ·  / Search  ·  Q Quit', 'muted'),
-                  Line(f'{selected + 1 if items else 0}/{len(items)}  ·  T Theme  ·  M Motion  ·  ? Help', 'muted')]
+        footer = [Line('↑/↓ Select  ·  Enter Open  ·  / Search  ·  Esc Quit', 'muted'),
+                  Line(f'{selected + 1 if items else 0}/{len(items)}  ·  T Theme  ·  '
+                       f'M Motion {"on" if motion else "off"}  ·  ? Help', 'muted')]
     elif width >= 30:
-        footer = [Line('↑/↓ Select  ·  Enter Open', 'muted'), Line('/ Search  ·  Q Quit', 'muted')]
+        footer = [Line('↑/↓ Select  ·  Enter Open', 'muted'), Line('/ Search  ·  Esc Quit', 'muted')]
     else:
         footer = [Line('↑↓ Enter / Q', 'muted')]
     if searching:
         footer = [Line('Type to filter  ·  Enter Open', 'accent'), Line('Esc Clear search', 'muted')]
     elif help_open:
-        footer = [Line('1–8 Open directly  ·  Esc Clear search', 'accent'),
+        footer = [Line('1–8 Open directly  ·  Esc Close help', 'accent'),
                   Line('Tab Next  ·  T Theme  ·  M Motion  ·  ? Close help', 'muted')]
     budget = max(0, height - len(rows) - len(footer))
     detailed = width >= 65 and budget >= len(items) * 2
@@ -191,22 +300,11 @@ def compose_frame(width: int, height: int, selected: int, query: str,
                 rows += [Line('      ' + item.description, 'muted')]
             if spacious:
                 rows.append(Line(''))
-    while len(rows) < height - len(footer):
-        row_index = len(rows)
-        if width >= 50 and height >= 22:
-            dust = [' '] * width
-            highlights = []
-            # A fixed spatial seed prevents flicker; slow envelopes reveal stars
-            # at apparently random times. Only unused padding receives dust.
-            for slot, (column, seed) in enumerate(dust_locations(width, row_index)):
-                brightness = star_brightness(seed, tick)
-                if brightness > 25:
-                    level = round((brightness - 26) * 63 / 37)
-                    dust[column] = chr(0x2800 + (1, 8, 16, 64, 128, 9)[seed % 6])
-                    highlights.append((column, f'dust{slot}_{level}'))
-            rows.append(Line(''.join(dust), 'stars', highlights=tuple(highlights)))
-        else:
-            rows.append(Line(''))
+    padding = max(0, height - len(footer) - len(rows))
+    if width >= 50 and height >= 22:
+        rows += _scatter_stars([Line(" " * width, "stars")] * padding, tick, star_seed ^ 1)
+    else:
+        rows += [Line("")] * padding
     rows += footer
     margin = layout.indent
     return [Line(margin + _fit_cells(row.text, width), row.role,
@@ -216,10 +314,17 @@ def compose_frame(width: int, height: int, selected: int, query: str,
             for row in rows[:height]]
 
 
-def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = True,
-             color: bool = True) -> tuple[str, str, bool]:
+def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = False,
+             color: bool = True, star_seed: int | None = None, clock: MotionClock | None = None) -> tuple[str, str, bool]:
     """Run an alternate-screen session and return a workflow and preferences."""
     import curses
+
+    clock = clock or MotionClock()
+    clock.set_running(motion)
+    if star_seed is None:
+        star_seed = randbits(64)
+    if hasattr(curses, "set_escdelay"):
+        curses.set_escdelay(75)
 
     def session(screen):
         nonlocal palette, motion
@@ -228,7 +333,7 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
         except curses.error:
             pass
         screen.keypad(True)
-        screen.timeout(16)
+        screen.timeout(round(1000 / ANIMATION_FPS) if motion else -1)
         selected, query, searching, help_open = 0, '', False, False
         last_frame = None
         colors_available = color and curses.has_colors()
@@ -280,7 +385,7 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
             for family in range(3):
                 for level in range(64):
                     name = f'star{level}' if family == 0 else f'dust{family - 1}_{level}'
-                    roles[name] = curses.A_NORMAL
+                    roles[name] = curses.A_DIM if level < 28 else (curses.A_BOLD if level >= 48 else curses.A_NORMAL)
                     if colors_available:
                         if curses.COLORS >= 256 and curses.COLOR_PAIRS >= 202:
                             pair = 10 + family * 64 + level
@@ -288,28 +393,35 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
                             curses.init_pair(pair, shade, background)
                             roles[name] = curses.color_pair(pair)
                         else:
-                            roles[name] = roles['muted' if level < 32 else 'spark']
+                            fallback = 'muted' if level < 28 else 'accent' if level < 48 else 'spark'
+                            roles[name] |= roles[fallback]
             return roles
 
         roles = attributes()
         while True:
             height, width = screen.getmaxyx()
-            tick = int(time.monotonic() * 60) if motion else 0
-            frame = compose_frame(width, height, selected, query, status, tick, help_open=help_open, searching=searching)
+            tick = clock.tick()
+            frame = compose_frame(width, height, selected, query, status, tick,
+                                  help_open=help_open, searching=searching, motion=motion, star_seed=star_seed)
             if frame != last_frame:
-                screen.bkgdset(' ', roles['text'])
-                screen.erase()
+                previous = last_frame if last_frame is not None and len(last_frame) == len(frame) else None
+                if previous is None:
+                    screen.bkgdset(' ', roles['text'])
+                    screen.erase()
                 for row, line in enumerate(frame):
+                    if previous is not None and previous[row] == line:
+                        continue
                     try:
+                        if previous is not None:
+                            screen.move(row, 0)
+                            screen.clrtoeol()
                         screen.addstr(row, 0, line.text, roles[line.role])
                         if line.artwork_start is not None:
-                            spectrum = ('glow', 'accent', 'rose', 'spark', 'aurora')
-                            for column in range(line.artwork_start, len(line.text)):
+                            start = line.artwork_start
+                            for column in range(start, len(line.text)):
                                 glyph = line.text[column]
                                 if glyph != ' ':
-                                    # Cool outer arms transition to a warm stellar core.
-                                    distance = abs(column - line.artwork_start - 16)
-                                    shade = 'spark' if distance < 3 else spectrum[min(4, distance // 4)]
+                                    shade = artwork_role(column - start, len(line.text) - start)
                                     screen.addstr(row, column, glyph, roles[shade])
                         for column, shade in line.highlights:
                             screen.addstr(row, column, line.text[column], roles[shade])
@@ -358,13 +470,18 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Tru
             elif key == '/':
                 searching = True
             elif key == '\x1b':
-                query, selected = '', 0
+                if help_open:
+                    help_open = False
+                else:
+                    return 'q', palette, motion
             elif key == 't':
                 palette = 'light' if palette == 'dark' else 'dark'
                 roles = attributes()
                 last_frame = None
             elif key == 'm':
                 motion = not motion
+                clock.set_running(motion)
+                screen.timeout(round(1000 / ANIMATION_FPS) if motion else -1)
             elif key == '?':
                 help_open = not help_open
 

@@ -50,7 +50,7 @@ worker, automatic budgets, evidence and package publishing on.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/terminal-dark.svg">
-  <img src="docs/assets/terminal-light.svg" width="100%" alt="A terminal session with four commands. run_experiment.py with --prepare_only pins every row to a commit and marks rows ready or held without using a GPU. run_experiment.py with --gpus 0 1 2 3 measures GPU spectra and CPU fingerprints and publishes one immutable package per model. python -m zoo.cli build writes Parquet tables and a retrieval index to $ZOO_DATA/builds/current. python -m zoo_keeper.cli similar openai-community/gpt2 -k 5 finds the nearest models by weight fingerprint, with no weights or GPU needed.">
+  <img src="docs/assets/terminal-light.svg" width="100%" alt="Scripted workflow in a terminal. Pin revisions, measure models, build the catalog, and find similar models by fingerprint.">
 </picture>
 
 <a name="install"></a>
@@ -85,9 +85,21 @@ An importable backend does not guarantee a checkpoint can be measured.
 
 </details>
 
-### 2. List the models
+### 2. Open a workspace
 
-Create `models.csv` with one Hugging Face ID per row, then set two paths:
+From the checkout with the analysis environment active:
+
+```sh
+python -m zoo.tui --workspace "./My Zoo" init
+python -m zoo.tui --workspace "./My Zoo"
+```
+
+For catalog-only use, install with `python -m pip install .` and run the same
+commands with `model-zoo`. The workspace defaults to `ZOO_DATA` or `./zoo-data`.
+Optional `init` writes an editable `model-zoo.json`. The launcher organizes
+runs, caches, packages, and catalog builds inside the workspace.
+
+Create `models.csv` in the workspace:
 
 ```csv
 model_id
@@ -95,156 +107,31 @@ openai-community/gpt2
 google/flan-t5-small
 ```
 
-```bash
-export HF_TOKEN="<your-token>"      # gated or private repositories
-export ZOO_DATA=/path/to/zoo-data   # packages, parent-block cache and zoo builds
-```
-
-Without `ZOO_DATA`, packages go to `<output_dir>/packages` and the zoo build
-needs `--data_root`.
-
-<details>
-<summary><strong>List options</strong> · Revisions, adapters and curated collections</summary>
-
-Preparation accepts `org/model@revision` or a `revision_norm` column and
-resolves them to full commit pins. For an adapter, supply
-`base_model_relation=adapter` and preferably `source_model=org/base-model`.
-
-For larger collections, start from `data/curated/model_zoo_phase2.csv`.
-Imported family labels and old ready subsets have known
-[limitations](docs/operations/curation.md#architecture-label-caveat);
-prefer pinned config evidence over names.
-
-</details>
-
 ### 3. Prepare and review
 
-```bash
-python esd_experiment/run_experiment.py \
-  --model_list models.csv \
-  --output_dir analysis_runs/phase2/my_run --limit 5 --prepare_only
-```
-
-> [!NOTE]
-> **Review before launch.** Open `analysis_runs/phase2/my_run/models.csv`. Ready rows
-> launch; held rows stay visible with a `preparation_reason` and are never dispatched.
-> Preparation reads metadata, small JSON files and selected safetensors headers,
-> not tensor values, and uses no GPU.
-
-<details>
-<summary><strong>Preparation notes</strong> · Pins, held rows and weight budgets</summary>
-
-Launch requires full 40-character model and adapter-base commit SHAs.
-Inspect `preparation_status` and `preparation_reason` before starting.
-
-Config labels are trusted for routing only at their recorded revision.
-Preparation preserves an existing `models.csv`; resume with it or prepare a
-fresh directory for new pins. Preparation reviews selected file sizes and access
-without probing GPUs. At launch, `--max_weight_gib auto` uses the selected pool's
-capacity, including adapter bases; `0` disables its size cap. Old size-only holds
-are reconsidered when the new budget permits; access/layout holds remain held.
-
-</details>
+Choose **Prepare** to pin model revisions. Review `runs/default/models.csv`
+before measuring, including the reasons for any held rows.
 
 ### 4. Launch
 
-```bash
-python esd_experiment/run_experiment.py \
-  --model_list analysis_runs/phase2/my_run/models.csv \
-  --output_dir analysis_runs/phase2/my_run \
-  --gpus 0 1 2 3 \
-  --worker_cache_root /scratch/$USER/model_zoo_worker_cache
+Choose **Measure** and confirm the run and allocated GPUs. The runner publishes
+finished model packages. Choose **Summarize** for the run report. Use Linux or
+WSL for GPU measurement and catalog builds.
 
-python esd_experiment/analyze_results.py --results_dir analysis_runs/phase2/my_run
-```
-
-One model worker at a time draws GPUs from the pool you name, sized from its
-weights. While the GPUs compute spectra, a CPU sidecar fingerprints the same
-downloaded files, and each finished model publishes one package. Point
-`--worker_cache_root` at fast local disk; private caches are deleted after
-confirmed exit. The second command indexes the run into `summary.csv`; filter on
-both `outcome` and `matrix_coverage` before comparing models.
-
-> [!TIP]
-> **Continue where you left off.** Relaunch with the same pins and settings;
-> compatible completed work is skipped. `run_script.sh` is the site-specific HPC
-> wrapper with every default spelled out.
-
-<details>
-<summary><strong>Launch options</strong> · Evidence, publishing and opt-outs</summary>
-
-Full-mode runs write pinned evidence under `evidence/<safe>/`: fingerprints
-of full tensors and sampled 128/256/512-row blocks, full spectra, and declared-parent deltas.
-Evidence runs on CPU alongside GPU analysis by default. Use `--no-evidence` for
-the previous CSV/H5-only behavior; checkpoint mode disables evidence with a notice.
-If evidence fails, the ESD pair is retained and the next run retries evidence only.
-
-Completed models publish immutable packages to `$ZOO_DATA/packages`, or
-`<output_dir>/packages` when `ZOO_DATA` is unset. Set `--packages_root PATH` or
-use `--no-publish` to retain only run-folder outputs. Models too large for full
-mode receive [row-block evidence](#oversized-models) after the full-mode queue.
-
-</details>
-
-The runner reports a progress bar while reviewing model rows and while
-supervising each measurement queue. A finished worker has exited its
-supervision loop. Check the run summary for successful and failed models.
-The same plain-text bars appear in shell and Slurm output, including redirected
-logs. For example, submit a metadata-only preparation from this checkout with
-the analysis environment active:
-
-```bash
-sbatch --output=prepare-%j.log --wrap='python -u esd_experiment/run_experiment.py --model_list models.csv --output_dir runs/prepared --prepare_only'
-```
-
-Run the measurement command from the same environment inside your allocated
-Slurm job, passing the allocated device indices to `--gpus`.
+See the [analysis guide](docs/operations/analysis.md) for scripting, Slurm,
+revisions, adapters, and resource controls.
 
 ### 5. Build and query the zoo
 
-From the Model-Zoo checkout, install the builder and start the launcher:
+Choose **Build** to assemble packages into `builds/current/`. Install
+[Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) to enable **Search**.
+With both checkouts side by side, run `python -m pip install ../Zoo-Keeper`
+from Model-Zoo. The [catalog guide](docs/operations/zoo.md) covers direct
+build and query commands.
 
-```bash
-python -m pip install .
-model-zoo
-```
-
-The installed package includes the database builder and evidence CLI. For the
-collection and checkpoint runner menus, use the analysis environment above
-and run `python -m zoo.tui` from the source checkout so the launcher can find
-the collection scripts. The builder and query wheels accept Torch 2.10 and 2.11.
-
-The launcher guides you through preparing and running collections, summarizing
-results, publishing packages, rebuilding the zoo, and measuring model deltas.
-Its measurement planner asks about the GPU pool, workers in parallel, per-worker
-weight/RAM/cache budgets, download-ahead, and timeout/cleanup policy. A read-only
-host scan reports selected GPU memory, available RAM, storage, writable cache
-placement, and whether a Hub token environment variable is set (its value stays
-hidden). Use `model-zoo --verbose` for
-flag-level notes beside each prompt.
-`--theme auto|dark|light` sets the palette for the home screen and workflow
-pages. `--no-motion` starts with animation off.
-`NO_COLOR` disables colors and starts with motion off. Use `--plain` for a
-numbered, scrolling menu; terminals without curses support use it automatically.
-Set `ZOO_DATA` first, or pass `--data-root /path/to/zoo-data`; the query screen
-uses Zoo-Keeper when its CLI is installed.
-
-```bash
-python -m zoo.cli build
-```
-
-The build reads current-convention packages from `$ZOO_DATA/packages` and
-atomically publishes `$ZOO_DATA/builds/current`: Parquet tables, a retrieval
-index and links to full HDF5 spectra. Install the companion
-[Zoo-Keeper](https://github.com/RpM-Kinshuk/Zoo-Keeper) from its local checkout
-alongside Model-Zoo. The installed query CLI works from any directory, offline
-and without model weights or GPUs.
-
-```bash
-python -m pip install . ../Zoo-Keeper
-zoo-keeper find --text gpt2 --limit 10
-zoo-keeper similar openai-community/gpt2 -k 5
-```
+The galaxy header animates by default on compatible terminals. Press **M** to
+toggle motion on the home menu, or start with `--no-motion`. Use `--help`
+for launcher options.
 
 <a name="what-a-run-writes"></a>
 
