@@ -209,6 +209,15 @@ def test_escape_navigates_search_back_to_home_in_a_real_terminal(tmp_path, plain
         expect(b"Search by name")
         send(b"\x1b")
         expect(b"Workflow [" if plain else b"Esc Quit")
+        if not plain:
+            expect(b"7/8")  # Return with Explore selected.
+            send(b"/Explore\r")
+            expect(b"Search by name")
+            send(b"\x1b")
+            expect(b"Search  Explore_")
+            expect(b"Esc Clear search")
+            send(b"\x1b")
+            expect(b"Esc Quit")
         send(b"\x1b")
         expect(b"See you next time.")
         assert process.wait(timeout=5) == 0
@@ -268,7 +277,7 @@ def test_motion_setting_works_without_color_and_survives_navigation(tmp_path, mo
 
     calls = []
 
-    def navigate(status, *, palette, motion, color, star_seed, clock):
+    def navigate(status, *, palette, motion, color, star_seed, clock, state):
         calls.append((motion, color, star_seed))
         return ("8" if len(calls) == 1 else "q", palette, motion)
 

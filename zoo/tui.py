@@ -25,7 +25,7 @@ from typing import NamedTuple, Sequence
 
 from zoo.terminal_style import PageLayout, Theme, cell_width, wrap_cells
 from zoo.workspace import Workspace
-from zoo.terminal_home import ANIMATION_FPS, MotionClock, brand_header, star_color, star_rgb
+from zoo.terminal_home import ANIMATION_FPS, HomeState, MotionClock, brand_header, star_color, star_rgb
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 QUERY_ROOT = PROJECT_ROOT.parent / "Zoo-Keeper"
@@ -1046,6 +1046,7 @@ def _main(argv: Sequence[str] | None) -> int:
             full_screen = False
 
     refresh = True
+    home_state = HomeState()
     while True:
         try:
             if full_screen:
@@ -1053,7 +1054,8 @@ def _main(argv: Sequence[str] | None) -> int:
                     _clear_screen()
                 try:
                     choice, THEME.palette, motion = navigate(_status(root), palette=THEME.palette,
-                                                              motion=motion, color=THEME.enabled, star_seed=STAR_SEED, clock=CLOCK)
+                                                              motion=motion, color=THEME.enabled, star_seed=STAR_SEED,
+                                                              clock=CLOCK, state=home_state)
                 except curses.error:
                     full_screen = False
                     continue

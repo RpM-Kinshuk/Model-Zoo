@@ -322,11 +322,21 @@ def compose_frame(width: int, height: int, selected: int, query: str,
             for row in rows[:height]]
 
 
+@dataclass
+class HomeState:
+    selected: int = 0
+    query: str = ""
+    searching: bool = False
+    help_open: bool = False
+
+
 def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = False,
-             color: bool = True, star_seed: int | None = None, clock: MotionClock | None = None) -> tuple[str, str, bool]:
+             color: bool = True, star_seed: int | None = None, clock: MotionClock | None = None,
+             state: HomeState | None = None) -> tuple[str, str, bool]:
     """Run an alternate-screen session and return a workflow and preferences."""
     import curses
 
+    state = state if state is not None else HomeState()
     clock = clock or MotionClock()
     clock.set_running(motion)
     if star_seed is None:
@@ -342,7 +352,17 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Fal
             pass
         screen.keypad(True)
         screen.timeout(round(1000 / ANIMATION_FPS) if motion else -1)
-        selected, query, searching, help_open = 0, '', False, False
+        selected, query, searching, help_open = state.selected, state.query, state.searching, state.help_open
+
+        def open_workflow(key: str) -> tuple[str, str, bool]:
+            items = matching_workflows(query)
+            index = next((index for index, item in enumerate(items) if item.key == key), None)
+            state.selected = index if index is not None else int(key) - 1
+            state.query = query if index is not None else ""
+            state.searching = searching if index is not None else False
+            state.help_open = help_open
+            return key, palette, motion
+
         last_frame = None
         colors_available = color and curses.has_colors()
         if colors_available:
@@ -415,7 +435,7 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Fal
                 previous = last_frame if last_frame is not None and len(last_frame) == len(frame) else None
                 if previous is None:
                     screen.bkgdset(' ', roles['text'])
-                    screen.erase()
+                    screen.clear()  # The preceding page used a different renderer and scroll region.
                 for row, line in enumerate(frame):
                     if previous is not None and previous[row] == line:
                         continue
@@ -454,7 +474,7 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Fal
             if searching:
                 if key in ('\n', '\r', curses.KEY_ENTER):
                     if items:
-                        return items[selected % len(items)].key, palette, motion
+                        return open_workflow(items[selected % len(items)].key)
                 elif key == '\x1b':
                     searching, query = False, ''
                 elif key in (curses.KEY_BACKSPACE, '\x7f', '\b'):
@@ -468,9 +488,9 @@ def navigate(status: Sequence[str], *, palette: str = 'dark', motion: bool = Fal
                 return 'q', palette, motion
             elif key in ('\n', '\r', curses.KEY_ENTER):
                 if items:
-                    return items[selected % len(items)].key, palette, motion
+                    return open_workflow(items[selected % len(items)].key)
             elif isinstance(key, str) and key in '12345678':
-                return key, palette, motion
+                return open_workflow(key)
             elif key in (curses.KEY_DOWN, '\t', 'j'):
                 selected = (selected + 1) % max(1, len(items))
             elif key in (curses.KEY_UP, curses.KEY_BTAB, 'k'):
