@@ -27,14 +27,17 @@ apply_preflight = run_experiment.apply_preflight
 collect_run_outcomes = run_experiment.collect_run_outcomes
 
 
-def _write_compatible_h5(path, config=None):
+def _write_compatible_h5(path, config=None, legacy_csv=False):
+    """Write a current HDF5-only record; legacy_csv adds an older run's matching CSV."""
     import h5py
     from measurement_config import FORMAT_VERSION, NUMERICS_VERSION
     config = dict(config or run_experiment.measurement_config(SimpleNamespace()))
     config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
-    csv_path = path.parent.parent / "stats" / f"{path.stem}.csv"
-    csv_path.write_text("longname,alpha\nmodel.layers.0.proj,2\n")
+    if legacy_csv:
+        csv_path = path.parent.parent / "stats" / f"{path.stem}.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_path.write_text("longname,alpha\nmodel.layers.0.proj,2\n")
     with h5py.File(path, "w") as h5:
         h5.attrs["format_version"] = FORMAT_VERSION
         h5.attrs["numerics_version"] = NUMERICS_VERSION
@@ -500,19 +503,23 @@ def test_generate_worker_jobs_adds_supervision_metadata(tmp_path: Path):
     assert jobs[0].command == generate_commands(df, tmp_path, args)[0]
 
 
-def test_get_completed_models_uses_stats_and_metrics_pairs(tmp_path: Path):
+def test_get_completed_models_uses_hdf5_records_and_checks_legacy_csvs(tmp_path: Path):
     stats_dir = tmp_path / "stats"
     metrics_dir = tmp_path / "metrics"
     stats_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
-    _write_compatible_h5(metrics_dir / "org--model-a.h5")
-    (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
+    _write_compatible_h5(metrics_dir / "org--model-a.h5")  # Current run: HDF5 only.
+    (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")  # Legacy CSV without HDF5.
+    _write_compatible_h5(metrics_dir / "org--model-c.h5", legacy_csv=True)  # Matching legacy pair.
+    _write_compatible_h5(metrics_dir / "org--model-d.h5")
+    (stats_dir / "org--model-d.csv").write_text("longname,alpha\nmodel.layers.0.proj,3\n")  # Mismatch.
+    (metrics_dir / ".org--model-e.h5.tmp").write_bytes(b"partial")
 
     completed = get_completed_models(tmp_path, skip_failed=False)
 
-    assert completed == {"org/model-a"}
+    assert completed == {"org/model-a", "org/model-c"}
+    assert run_experiment.collect_run_outcomes(tmp_path).success_count == 2
 
 
 def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Path):
@@ -523,7 +530,6 @@ def test_get_completed_models_parses_tab_separated_failure_summary(tmp_path: Pat
     metrics_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
     _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_loader_scenario\tunsupported\n"
@@ -646,7 +652,6 @@ def test_collect_run_outcomes_counts_success_artifacts_and_terminal_statuses(tmp
     metrics_dir.mkdir(parents=True, exist_ok=True)
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
-    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
     _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (stats_dir / "org--model-b.csv").write_text("alpha\n2.0\n")
     (terminal_dir / "org--model-b.json").write_text(
@@ -673,7 +678,6 @@ def test_collect_run_outcomes_prefers_success_over_stale_failure_history(tmp_pat
     metrics_dir.mkdir(parents=True, exist_ok=True)
     terminal_dir.mkdir(parents=True, exist_ok=True)
 
-    (stats_dir / "org--model-a.csv").write_text("alpha\n1.0\n")
     _write_compatible_h5(metrics_dir / "org--model-a.h5")
     (logs_dir / "failed_models.txt").write_text(
         "org/model-a\tload\tunsupported_backend\tstale failure\n"

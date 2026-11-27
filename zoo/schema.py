@@ -1,4 +1,8 @@
-"""Pinned model identities and the v0 database table contract."""
+"""Pinned model identities and the database table contract (zoo version 3).
+
+One fact has one home: skipped tensors live in `coverage` (status 'skipped'),
+not again inside `models`. Missing values are null, never empty strings.
+"""
 
 import hashlib
 import json
@@ -15,11 +19,16 @@ MODELS_COLUMNS = [
     "is_decision", "system_one", "decision_type", "num_labels", "labels",
     "arch_signature", "n_views", "modality", "pipeline_tag", "downloads", "params",
     "stratum", "inclusion_prob", "dup_group", "row_block_fingerprint", "full_weight_fingerprint",
-    "full_weight_spectra", "coverage_status", "skipped_tensors",
+    "full_weight_spectra", "coverage_status",
 ]
 VIEWS_COLUMNS = [
     "model_key", "view_index", "name", "geometry", "component", "n_rows", "n_cols",
     "r0", "r1", "block_sha256", "tier",
+    # Row-block delta against the recorded parent, copied from the fingerprint.
+    # delta_rank is null whenever no rank is reported (no parent, identical or
+    # below the rounding floor); status/confidence keep the evidence vocabulary.
+    "delta_status", "delta_rank_confidence", "delta_frac_identical",
+    "delta_rel_update_norm", "delta_rank",
 ]
 COVERAGE_COLUMNS = ["model_key", "tensor_name", "decode", "geometry", "status", "reason"]
 LINEAGE_COLUMNS = [

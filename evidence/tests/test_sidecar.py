@@ -283,7 +283,7 @@ def test_published_spectrum_device_describes_supplied_results(local_manifest, tm
         assert set(h["layers/compute_device"].asstr()[:]) == {"cuda:1"}
 
 
-def test_batched_spectra_matches_streaming_layout_and_values(tmp_path):
+def test_batched_spectra_matches_streaming_records_in_contiguous_storage(tmp_path):
     from evidence.fingerprint import _Spectra
     rows = [
         ("a.weight", dict(eigs=np.array([1., 2.], np.float32), alpha=2., fit_status="ok", extra=3.)),
@@ -307,12 +307,15 @@ def test_batched_spectra_matches_streaming_layout_and_values(tmp_path):
         assert list(left["layers"]) == list(right["layers"])
         for key in left["layers"]:
             a, b = left["layers"][key], right["layers"][key]
-            assert a.dtype == b.dtype and a.maxshape == b.maxshape
+            assert a.dtype == b.dtype and a.shape == b.shape
             np.testing.assert_equal(a[:], b[:])
+            # Only storage differs: a complete batch has no resizable chunked padding.
+            assert a.chunks is not None and b.chunks is None
         assert left["eigs"].dtype == right["eigs"].dtype
-        assert left["eigs"].maxshape == right["eigs"].maxshape
+        assert left["eigs"].shape == right["eigs"].shape and right["eigs"].chunks is None
         for a, b in zip(left["eigs"][:], right["eigs"][:]):
             np.testing.assert_array_equal(a, b)
+    assert (tmp_path / "batch.h5").stat().st_size < (tmp_path / "stream.h5").stat().st_size
 
 
 def test_sidecar_publishes_spectra_in_batch(local_manifest, tmp_path, monkeypatch):

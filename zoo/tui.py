@@ -617,9 +617,11 @@ def _launch(workspace: Workspace) -> int:
 
 
 def _has_run_records(run: Path) -> bool:
+    # metrics/*.h5 is every run's measurement record; older runs' stats/*.csv
+    # files sit beside those HDF5 files and add no further runs.
     return (run / "models.csv").is_file() or any(
         any((run / directory).glob(pattern))
-        for directory, pattern in (("stats", "*.csv"), ("metrics", "*.h5"), ("logs/terminal_status", "*.json"))
+        for directory, pattern in (("metrics", "*.h5"), ("logs/terminal_status", "*.json"))
     )
 
 

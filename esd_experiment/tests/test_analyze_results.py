@@ -205,9 +205,11 @@ def test_weight_usage_survives_real_spectra_writer_and_summary_round_trip(tmp_pa
     config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
     config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
-    worker.save_results(metrics, csv_path, "org/model", False, h5_output_path=h5_path,
+    worker.save_results(metrics, h5_path, "org/model", False,
                         save_eigs=True, measurement_config=config, coverage=coverage)
+    assert not csv_path.exists()
     summary = analyze_results.read_model_summary(csv_path, h5_path)
+    assert summary["csv_path"] == ""
 
     assert summary["weight_usage_status"] == "recorded"
     assert summary["registered_tensors"] == summary["shared_tensors"] == 2
@@ -246,7 +248,7 @@ def test_attention_records_and_partial_module_counts_survive_round_trip(tmp_path
     config = measurement_config(SimpleNamespace(), model_id="org/model", revision="a" * 40)
     config["runtime"] = {"analysis_source": "model", "filter_type": config["filter_type"]}
 
-    worker.save_results(metrics, paths[0], "org/model", False, h5_output_path=paths[1],
+    worker.save_results(metrics, paths[1], "org/model", False,
                         save_eigs=True, measurement_config=config, coverage=coverage)
     summary = analyze_results.read_model_summary(*paths)
 
@@ -313,11 +315,22 @@ def test_reader_preserves_requested_identity_and_actual_config_provenance(tmp_pa
         assert summary[name] == value
 
 
-@pytest.mark.parametrize("mutation", ["missing_csv", "old_version", "wrong_alpha", "wrong_coverage"])
+def test_hdf5_record_without_csv_summarizes_like_a_legacy_pair(tmp_path):
+    csv_path, h5_path = write_pair(tmp_path)
+    legacy = analyze_results.read_model_summary(csv_path, h5_path)
+    csv_path.unlink()
+    current = analyze_results.read_model_summary(csv_path, h5_path)
+    assert legacy["csv_path"] == str(csv_path.resolve()) and current["csv_path"] == ""
+    assert {**legacy, "csv_path": ""}.keys() == current.keys()
+    pd.testing.assert_series_equal(pd.Series({**legacy, "csv_path": ""}), pd.Series(current))
+    assert analyze_results.read_model_summary(None, h5_path)["csv_path"] == ""
+
+
+@pytest.mark.parametrize("mutation", ["missing_h5", "old_version", "wrong_alpha", "wrong_coverage"])
 def test_invalid_pairs_are_not_silently_read_as_csv(tmp_path, mutation):
     csv_path, h5_path = write_pair(tmp_path)
-    if mutation == "missing_csv":
-        csv_path.unlink()
+    if mutation == "missing_h5":
+        h5_path.unlink()  # A legacy CSV alone is never a result.
     elif mutation == "wrong_alpha":
         frame = pd.read_csv(csv_path)
         frame.loc[0, "alpha"] = 99.
@@ -337,16 +350,22 @@ def test_invalid_pairs_are_not_silently_read_as_csv(tmp_path, mutation):
 
 
 def test_main_indexes_valid_and_missing_pairs_and_can_be_rerun(tmp_path):
-    write_pair(tmp_path)
-    missing_csv, _ = write_pair(tmp_path, "org--missing")
-    missing_csv.unlink()
+    write_pair(tmp_path)  # Legacy run layout: CSV beside the HDF5.
+    current_csv, _ = write_pair(tmp_path, "org--current")
+    current_csv.unlink()  # Current run layout: HDF5 only.
+    _, missing_h5 = write_pair(tmp_path, "org--missing")
+    missing_h5.unlink()
     for _ in range(2):
         assert analyze_results.main(["--results_dir", str(tmp_path)]) == 1
-        summary = pd.read_csv(tmp_path / "summary.csv")
-        assert len(summary) == 2
-        assert set(summary["artifact_status"]) == {"valid", "invalid"}
-        invalid = summary.loc[summary["artifact_status"] == "invalid"].iloc[0]
-        assert isinstance(invalid["artifact_error"], str) and invalid["artifact_error"]
+        summary = pd.read_csv(tmp_path / "summary.csv", keep_default_na=False)
+        summary.index = [Path(path).stem for path in summary["h5_path"]]
+        assert len(summary) == 3
+        assert summary["artifact_status"].to_dict() == {
+            "org--current": "valid", "org--missing": "invalid", "org--model": "valid"}
+        assert summary.loc["org--current", "csv_path"] == ""
+        assert summary.loc["org--model", "csv_path"].endswith("stats/org--model.csv")
+        assert summary.loc["org--missing", "csv_path"].endswith("stats/org--missing.csv")
+        assert summary.loc["org--missing", "artifact_error"]
 
 
 @pytest.mark.parametrize("output", ["stats/org--model.csv", "metrics/index.csv", "summary.h5",

@@ -24,7 +24,7 @@ COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COL
 def test_build_writes_all_tables(built_zoo):
     t = open_tables(built_zoo)
     assert set(t) == {"models", "views", "coverage", "lineage", "scores", "predictions", "layers"}
-    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "2"
+    assert json.loads((built_zoo / "zoo.json").read_text())["zoo_version"] == "3"
     assert list((built_zoo / "retrieval").glob("*.npy"))
 
 
@@ -61,12 +61,11 @@ def test_nested_values_and_typed_empty_tables_roundtrip(built_zoo):
     assert models.loc["org/decider@" + SHA11, "labels"] == {"0": "no", "1": "yes"}
     assert models.loc["org/parent@" + SHA1, "labels"] == {}
     assert models.loc["org/parent@" + SHA1, "declared_bases"] == []
-    assert isinstance(models.loc["org/parent@" + SHA1, "skipped_tensors"], list)
     assert t["scores"].empty and t["predictions"].empty
     schema = pq.read_schema(built_zoo / "models.parquet")
     assert pa.types.is_map(schema.field("labels").type)
     assert pa.types.is_list(schema.field("declared_bases").type)
-    assert pa.types.is_list(schema.field("skipped_tensors").type)
+    assert "skipped_tensors" not in schema.names  # Skipped tensors live only in coverage.
     assert pa.types.is_floating(pq.read_schema(built_zoo / "scores.parquet").field("value").type)
     assert pa.types.is_list(pq.read_schema(built_zoo / "predictions.parquet").field("inputs").type)
 
@@ -81,7 +80,7 @@ def test_all_empty_zoo_serializes_all_six_tables(tmp_path):
     assert all(table.empty and list(table.columns) == COLUMNS[name] for name, table in t.items())
 
 
-def test_all_empty_label_maps_and_skipped_lists_serialize(tmp_path):
+def test_all_empty_label_maps_and_base_lists_serialize(tmp_path):
     manifests = tmp_path / "manifests"
     manifests.mkdir()
     manifest = dict(repo_id="org/only", revision=SHA1, access="metadata_only", declared_bases=[],
@@ -89,7 +88,7 @@ def test_all_empty_label_maps_and_skipped_lists_serialize(tmp_path):
     (manifests / "only.manifest.json").write_text(json.dumps(manifest))
     out = build_zoo(manifests, [], tmp_path / "only", tmp_path)
     model = open_tables(out)["models"].iloc[0]
-    assert model.labels == {} and model.skipped_tensors == [] and model.declared_bases == []
+    assert model.labels == {} and model.declared_bases == []
 
 
 def test_hub_gating_values_roundtrip_as_nullable_booleans_without_manifest_changes(tmp_path):
@@ -596,3 +595,107 @@ def test_source_configuration_mutation_keeps_previous_generation(universe, tmp_p
     with pytest.raises(ValueError, match="configuration.*changed|configuration.*hash"):
         _build(universe, out)
     assert _snapshot(out.resolve()) == before
+
+
+def test_every_missing_value_is_null_and_tables_use_zstd(built_zoo):
+    for name in COLUMNS:
+        path = built_zoo / f"{name}.parquet"
+        assert pq.ParquetFile(path).metadata.row_group(0).column(0).compression == "ZSTD"
+        table = pq.read_table(path)
+        for field in table.schema:
+            if pa.types.is_string(field.type):
+                assert "" not in table.column(field.name).to_pylist(), (name, field.name)
+    models = open_tables(built_zoo)["models"].set_index("model_key")
+    assert models.loc["org/t0only@" + "8" * 40, ["row_block_fingerprint", "full_weight_fingerprint",
+                                                    "full_weight_spectra"]].isna().all()
+
+
+def test_score_extension_shares_inherited_files_and_rewrites_only_its_own(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    parent = _build(universe, tmp_path / "parent").resolve()
+    before = _snapshot(parent)
+    source = tmp_path / "scores.csv"
+    source.write_text(f"repo,bench,value,revision\norg/parent,task,.5,{SHA1}\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local", revision="revision"), open_tables(parent)["models"])
+    out = extend_scores(parent, [scores], tmp_path / "extended", universe.root).resolve()
+    for name in before:
+        shared = (out / name).stat().st_ino == (parent / name).stat().st_ino
+        assert shared == (name not in {"scores.parquet", "zoo.json", "collection.json"}), name
+    assert _snapshot(parent) == before and len(open_tables(out)["scores"]) == 1
+
+
+def test_version2_generation_reads_in_current_columns_and_extends_as_version2(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    generation = _build(universe, tmp_path / "parent").resolve()
+    old = tmp_path / "v2"
+    import shutil
+    shutil.copytree(generation, old)
+    models = pq.read_table(old / "models.parquet")
+    skipped = pa.array([[{"name": "x.bias", "reason": ""}]] * len(models),
+                       pa.list_(pa.struct([("name", pa.string()), ("reason", pa.string())])))
+    pq.write_table(models.append_column("skipped_tensors", skipped), old / "models.parquet")
+    metadata = json.loads((old / "zoo.json").read_text())
+    metadata["zoo_version"] = "2"
+    (old / "zoo.json").write_text(json.dumps(metadata))
+    tables = open_tables(old)
+    assert list(tables["models"].columns) == MODELS_COLUMNS
+    assert list(tables["views"].columns) == VIEWS_COLUMNS
+    source = tmp_path / "scores.csv"
+    source.write_text(f"repo,bench,value,revision\norg/parent,task,.5,{SHA1}\n")
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value",
+        source="local", revision="revision"), tables["models"])
+    out = extend_scores(old, [scores], tmp_path / "extended", universe.root)
+    assert json.loads((out / "zoo.json").read_text())["zoo_version"] == "2"
+    assert "skipped_tensors" in pq.read_schema(out / "models.parquet").names
+
+
+def test_rebuild_recognizes_a_programmatic_table_recorded_with_empty_text(universe, tmp_path):
+    """A version <=2 build stored "" (and its own table id); v3 resupplies null."""
+    from zoo.build import _arrow
+    from zoo.schema import SCORES_COLUMNS
+    key = "org/parent@" + SHA1
+    row = dict(model_key=key, repo_id="org/parent", benchmark="task", skill=None, value=.5, metric="accuracy",
+               source="local", source_revision=None, revision_verified=False, harness=None, n_items=None)
+    table = pd.DataFrame([row], columns=SCORES_COLUMNS)
+    out = _build(universe, tmp_path / "zoo", score_tables=[table])
+    generation = out.resolve()
+    descriptor_path = next(p for p in (generation / "score-sources").glob("*.json")
+                           if json.loads(p.read_text()).get("status") == "source_context_unavailable")
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor["table_id"] = "recorded-by-an-older-build"
+    descriptor["scores"] = [dict(score, source_revision="", skill="", harness="") for score in descriptor["scores"]]
+    descriptor_path.write_text(json.dumps(descriptor))
+    rebuilt = _build(universe, tmp_path / "zoo", score_tables=[table])
+    assert len(open_tables(rebuilt)["scores"]) == 1
+
+
+def test_score_extension_of_version2_parent_keeps_inherited_text_and_parent_files(universe, tmp_path):
+    from zoo.build import extend_scores
+    from zoo.scores import load_scores_csv
+    source = tmp_path / "scores.csv"
+    source.write_text("repo,bench,value\norg/parent,task,.5\n")  # No revision: source_revision missing.
+    models = open_tables(_build(universe, tmp_path / "baseline"))["models"]
+    scores = load_scores_csv(source, dict(repo_id="repo", benchmark="bench", value="value", source="local"), models)
+    parent = _build(universe, tmp_path / "parent", score_tables=[scores]).resolve()
+    # Present the parent as a version 2 generation that stored "" for missing text.
+    inherited = pq.read_table(parent / "scores.parquet").to_pylist()
+    rows = [dict(r, source_revision="", harness="") for r in inherited]
+    parent_scores = parent / "scores.parquet"
+    parent_scores.unlink()
+    pq.write_table(pa.Table.from_pylist(rows, schema=pq.read_schema(tmp_path / "baseline" / "scores.parquet")), parent_scores)
+    metadata = json.loads((parent / "zoo.json").read_text())
+    metadata["zoo_version"] = "2"
+    (parent / "zoo.json").unlink()
+    (parent / "zoo.json").write_text(json.dumps(metadata))
+    orphan = parent / "score-sources" / "40.csv"  # A snapshot without a descriptor.
+    orphan.write_bytes(b"orphan\n")
+    before = _snapshot(parent)
+    out = extend_scores(parent, [scores], tmp_path / "extended", universe.root).resolve()
+    extended = pq.read_table(out / "scores.parquet").to_pylist()
+    assert extended[:len(rows)] == rows and json.loads((out / "zoo.json").read_text())["zoo_version"] == "2"
+    assert _snapshot(parent) == before
+    assert min(int(p.name.split(".")[0]) for p in out.joinpath("score-sources").glob("*")
+               if not (parent / "score-sources" / p.name).exists()) == 41

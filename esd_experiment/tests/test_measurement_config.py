@@ -237,19 +237,32 @@ def test_standalone_worker_skips_matching_configuration(monkeypatch, tmp_path):
     assert worker.main() == 0
 
 
-@pytest.mark.parametrize("missing", ["csv", "h5"])
-def test_standalone_worker_preserves_incomplete_artifacts(monkeypatch, tmp_path, missing):
+def test_standalone_worker_preserves_legacy_csv_without_hdf5(monkeypatch, tmp_path):
     import worker
     args = SimpleNamespace(model_id="org/model", revision="", source_model="", base_model_relation="",
                            loader_scenario="", output_dir=str(tmp_path), overwrite=False)
     csv_path, h5_path = write_pair(tmp_path, measurement_config(args, model_id="org/model"))
-    (csv_path if missing == "csv" else h5_path).unlink()
-    remaining = h5_path if missing == "csv" else csv_path
-    before = remaining.read_bytes()
+    h5_path.unlink()
+    before = csv_path.read_bytes()
     monkeypatch.setattr(worker, "parse_args", lambda: args)
     monkeypatch.setattr(worker, "load_model", lambda **kwargs: pytest.fail("Must not replace existing artifacts implicitly"))
     assert worker.main() == 1
-    assert remaining.read_bytes() == before
+    assert csv_path.read_bytes() == before
+    assert not h5_path.exists()
+
+
+def test_standalone_worker_resumes_from_hdf5_without_csv(monkeypatch, tmp_path):
+    import worker
+    args = SimpleNamespace(model_id="org/model", revision="", source_model="", base_model_relation="",
+                           loader_scenario="", output_dir=str(tmp_path), overwrite=False)
+    csv_path, h5_path = write_pair(tmp_path, measurement_config(args, model_id="org/model"))
+    csv_path.unlink()
+    before = h5_path.read_bytes()
+    monkeypatch.setattr(worker, "parse_args", lambda: args)
+    monkeypatch.setattr(worker, "load_model", lambda **kwargs: pytest.fail("A compatible HDF5 record should resume"))
+    assert worker.main() == 0
+    assert h5_path.read_bytes() == before
+    assert not csv_path.exists()
 
 
 def test_derived_view_does_not_merge_exotic_structural_namespaces():
@@ -264,9 +277,8 @@ def test_derived_view_does_not_merge_exotic_structural_namespaces():
 def test_sparse_huge_depth_keeps_canonical_records_without_dense_allocation(tmp_path):
     import worker
     names = ["model.layers.999999999.proj"]
-    csv_path = tmp_path / "stats" / "model.csv"
     h5_path = tmp_path / "metrics" / "model.h5"
-    worker.save_results({"longname": names, "alpha": [2.]}, csv_path, "org/model", False, h5_output_path=h5_path)
+    worker.save_results({"longname": names, "alpha": [2.]}, h5_path, "org/model", False)
     with h5py.File(h5_path) as h5:
         assert h5["layers/longname"].asstr()[:].tolist() == names
         assert h5["alpha"].shape == (0, 0)
@@ -280,7 +292,7 @@ def test_hdf5_preserves_computed_spectrum_precision_without_upcasting(tmp_path, 
     eigs = np.array([0, 1e-8, 2.3], dtype=dtype)
     path = tmp_path / "model.h5"
     worker.save_results({"longname": [""], "alpha": [float("nan")], "slice": [""], "eigs": [eigs]},
-                        tmp_path / "model.csv", "root-model", False, save_eigs=True, h5_output_path=path)
+                        path, "root-model", False, save_eigs=True)
     with h5py.File(path) as h5:
         assert h5["eigs"][0].dtype == np.dtype(dtype)
         np.testing.assert_array_equal(h5["eigs"][0], eigs)

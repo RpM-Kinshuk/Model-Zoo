@@ -6,7 +6,8 @@ from pathlib import Path
 import h5py
 import pytest
 
-from zoo.publish import publish_package, publish_packages, current_conventions_id
+from zoo.publish import package_complete, package_inputs, publish_package, publish_packages, current_conventions_id
+from zoo.testing import write_legacy_stats_csv
 
 
 def test_publish_creates_sharded_package_with_hashes(package_run):
@@ -17,11 +18,55 @@ def test_publish_creates_sharded_package_with_hashes(package_run):
     assert metadata["complete"] and metadata["kind"] == "full"
     assert metadata["model_key"] == "lab/tiny@" + r.manifest["revision"]
     assert metadata["evidence"] == dict(reused=2, measured=0, gaps=0)
-    assert "esd/stats.csv" in metadata["files"] and "esd/metrics.h5" in metadata["files"]
-    assert len(metadata["files"]) == 9
+    # Current runs package the HDF5 layer record alone.
+    assert "esd/metrics.h5" in metadata["files"] and "esd/stats.csv" not in metadata["files"]
+    assert not (path / "esd/stats.csv").exists()
+    assert len(metadata["files"]) == 8
     for name, digest in metadata["files"].items():
         assert hashlib.sha256((path / name).read_bytes()).hexdigest() == digest
     assert not list(path.rglob("*.bin"))
+    selected, skipped = package_inputs(r.packages)
+    assert skipped == 0 and [meta["kind"] for _, meta in selected] == ["full"]
+
+
+def test_legacy_run_with_matching_csv_publishes_it_unchanged(package_run):
+    r = package_run
+    legacy_csv = write_legacy_stats_csv(r.run / "metrics/lab--tiny.h5", r.run / "stats/lab--tiny.csv")
+    path = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    metadata = json.loads((path / "package.json").read_text())
+    assert len(metadata["files"]) == 9
+    assert (path / "esd/stats.csv").read_bytes() == legacy_csv.read_bytes()
+    assert metadata["files"]["esd/stats.csv"] == hashlib.sha256(legacy_csv.read_bytes()).hexdigest()
+    selected, skipped = package_inputs(r.packages)
+    assert skipped == 0 and len(selected) == 1 and selected[0][1]["kind"] == "full"
+    assert package_complete(r.run, "lab/tiny", r.packages, r.root)
+
+
+def test_legacy_run_with_mismatching_csv_is_not_published(package_run):
+    r = package_run
+    legacy_csv = write_legacy_stats_csv(r.run / "metrics/lab--tiny.h5", r.run / "stats/lab--tiny.csv")
+    rows = legacy_csv.read_text().splitlines()
+    legacy_csv.write_text("\n".join(rows[:-1]) + "\n")  # One layer row fewer than the HDF5.
+    assert publish_package(r.run, "lab/tiny", r.packages, r.root) is None
+    assert not r.packages.exists() or not list(r.packages.rglob("package.json"))
+
+
+def test_existing_legacy_package_is_never_replaced_by_hdf5_only_run(package_run):
+    r = package_run
+    legacy_csv = write_legacy_stats_csv(r.run / "metrics/lab--tiny.h5", r.run / "stats/lab--tiny.csv")
+    legacy = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    before = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
+    # The same model and conventions measured again without a CSV share the
+    # package destination; the different inventory is refused, not merged.
+    legacy_csv.unlink()
+    with pytest.raises(FileExistsError, match="only in existing package: esd/stats.csv"):
+        publish_package(r.run, "lab/tiny", r.packages, r.root)
+    assert not package_complete(r.run, "lab/tiny", r.packages, r.root)
+    assert {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()} == before
+    assert [path.parent for path in r.packages.rglob("package.json")] == [legacy]
+    # Readers keep accepting the older package with its verified stats.csv.
+    selected, _ = package_inputs(r.packages)
+    assert [folder for folder, _ in selected] == [legacy] and "esd/stats.csv" in selected[0][1]["files"]
 
 
 def test_publish_retains_source_snapshot_and_checks_its_identity(package_run):
@@ -115,13 +160,14 @@ def test_publish_never_overwrites_and_separates_conventions(package_run):
     second = publish_package(r.run, "lab/tiny", r.packages, r.root)
     assert first != second and first.parent == second.parent
     assert (first / "package.json").read_bytes() == before
-    stats = r.run / "stats/lab--tiny.csv"
-    replacement = stats.with_suffix(".new")
-    replacement.write_bytes(stats.read_bytes() + b"\n")
-    os.replace(replacement, stats)
+    second_before = (second / "package.json").read_bytes()
+    # Same conventions, different inventory: a legacy CSV now sits beside the HDF5.
+    write_legacy_stats_csv(metrics, r.run / "stats/lab--tiny.csv")
     with pytest.raises(FileExistsError):
         publish_package(r.run, "lab/tiny", r.packages, r.root)
     assert (first / "package.json").read_bytes() == before
+    assert (second / "package.json").read_bytes() == second_before
+    assert not (second / "esd/stats.csv").exists()
 
 
 def test_publish_skips_incomplete_models(package_run):
@@ -133,7 +179,7 @@ def test_publish_skips_incomplete_models(package_run):
 
 def test_publish_row_blocks_only_package_without_esd_files(package_run):
     r = package_run
-    for path in (r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")):
+    for path in (r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")):
         path.unlink()
     path = publish_package(r.run, "lab/tiny", r.packages, r.root)
     metadata = json.loads((path / "package.json").read_text())
@@ -158,7 +204,7 @@ def test_row_blocks_preliminary_and_full_packages_coexist_without_overwrite(pack
     stash = r.root / "stash"
     stash.mkdir()
     saved = []
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
+    for path in [r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
         other = stash / path.name
         os.replace(path, other)
         saved.append((other, path))
@@ -177,7 +223,7 @@ def test_missing_summary_infers_nondefault_sketch_from_artifacts(package_run):
     from evidence.fingerprint import fingerprint_tensors
     from safetensors.torch import load_file
     r = package_run
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*"),
+    for path in [r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*"),
                  *r.folder.glob("*.row_blocks_*"), r.folder / "evidence.json"]:
         path.unlink()
     fingerprint_tensors(load_file(r.root / "source/model.safetensors").items(),
@@ -223,7 +269,7 @@ def test_pinned_publication_does_not_scan_other_models(package_run, monkeypatch)
 def test_default_build_accepts_gpu_row_blocks_and_prefers_cpu_when_both_exist(package_run):
     from zoo.build import build_zoo, open_tables
     r = package_run
-    for path in [r.run / "stats/lab--tiny.csv", r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
+    for path in [r.run / "metrics/lab--tiny.h5", *r.folder.glob("*.full_weights.*")]:
         path.unlink()
     summary = r.folder / "evidence.json"
     settings = dict(sketch_k=64, all_experts=False, with_parent=True, device="gpu")
@@ -237,3 +283,18 @@ def test_default_build_accepts_gpu_row_blocks_and_prefers_cpu_when_both_exist(pa
     build_zoo(packages=r.packages, data_root=r.root, out=built)
     path = open_tables(built)["models"].iloc[0].row_block_fingerprint
     assert str(cpu.relative_to(r.root)) in path and gpu != cpu
+
+
+def test_same_inventory_with_different_bytes_is_refused_without_changes(package_run):
+    r = package_run
+    existing = publish_package(r.run, "lab/tiny", r.packages, r.root)
+    before = {path.relative_to(existing): path.read_bytes() for path in existing.rglob("*") if path.is_file()}
+    metrics = r.run / "metrics/lab--tiny.h5"
+    replacement = metrics.with_suffix(".new")  # Replace, never edit a hardlinked artifact in place.
+    replacement.write_bytes(metrics.read_bytes())
+    with h5py.File(replacement, "r+") as h:
+        h.attrs["unrelated_note"] = "changes the bytes, not the inventory"
+    os.replace(replacement, metrics)
+    with pytest.raises(FileExistsError):
+        publish_package(r.run, "lab/tiny", r.packages, r.root)
+    assert {path.relative_to(existing): path.read_bytes() for path in existing.rglob("*") if path.is_file()} == before

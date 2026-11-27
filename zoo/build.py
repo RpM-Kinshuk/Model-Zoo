@@ -29,7 +29,7 @@ from .lineage import declared_edges, merge_edges, shared_tensor_edges, similarit
 from .retrieval import build_retrieval
 from .schema import (COVERAGE_COLUMNS, LINEAGE_COLUMNS, MODELS_COLUMNS,
                      PREDICTIONS_COLUMNS, SCORES_COLUMNS, VIEWS_COLUMNS, LAYERS_COLUMNS, empty_table)
-from .tables import _fingerprint_files, _manifest_files, build_tables, duplicate_groups, pair_delta_files
+from .tables import _fingerprint_files, build_tables, duplicate_groups, load_manifests, pair_delta_files
 from .publish import package_inputs, current_conventions_id
 from .layers import build_layers
 from .collection import write_collection_receipt
@@ -41,21 +41,35 @@ from measurement_config import safe_filename
 _COLUMNS = dict(models=MODELS_COLUMNS, views=VIEWS_COLUMNS, coverage=COVERAGE_COLUMNS,
                 lineage=LINEAGE_COLUMNS, scores=SCORES_COLUMNS, predictions=PREDICTIONS_COLUMNS, layers=LAYERS_COLUMNS)
 _PROTOCOL = "immutable-generation-v1"
-_FLOATS = {"score", "p_value", "value", "lower", "upper", "inclusion_prob", "downloads", "params"}
+# Parquet tables use zstd: about half the bytes of snappy for these hash/name
+# heavy tables, read transparently by Arrow and DuckDB. Level fixed for stable bytes.
+_PARQUET_OPTIONS = dict(compression="zstd", compression_level=3)
+# Zoo version <=2 columns whose data has one home elsewhere in version 3
+# (skipped tensors: coverage rows with status 'skipped').
+_RETIRED_COLUMNS = {"models": frozenset({"skipped_tensors"})}
+# Generation files rewritten by a score extension; everything else is inherited.
+_SCORE_EXTENSION_REWRITES = frozenset({"scores.parquet", "zoo.json", "collection.json"})
+_FLOATS = {"score", "p_value", "value", "lower", "upper", "inclusion_prob", "downloads", "params",
+           "delta_frac_identical", "delta_rel_update_norm"}
 _LAYER_FLOATS = set(LAYERS_COLUMNS) - {"model_key", "longname", "module_name", "weight_attribute", "slice", "view_name", "fit_status", "h5_index", "num_evals", "matrix_rank", "n_tail"}
 _FLOATS |= _LAYER_FLOATS
-_INTS = {"view_index", "n_rows", "n_cols", "r0", "r1", "n_views", "num_labels", "n_items", "h5_index", "num_evals", "matrix_rank", "n_tail"}
+_INTS = {"view_index", "n_rows", "n_cols", "r0", "r1", "n_views", "num_labels", "n_items", "h5_index", "num_evals", "matrix_rank", "n_tail", "delta_rank"}
 _BOOLS = {"is_adapter", "gated", "is_decision", "system_one", "calibrated", "revision_verified"}
 _NESTED = {
     "labels": pa.map_(pa.string(), pa.string()),
     "declared_bases": pa.list_(pa.string()),
-    "skipped_tensors": pa.list_(pa.struct([("name", pa.string()), ("reason", pa.string())])),
     "inputs": pa.list_(pa.string()),  # v0 predictions are always empty; no future format claim.
 }
 
 
-def _arrow(name, table):
-    """Explicit types also support all-empty maps, lists and whole tables."""
+def _arrow(name, table, *, empty_text_as_null=True):
+    """Explicit types also support all-empty maps, lists and whole tables.
+
+    Every missing value is written as null: NaN floats and empty strings
+    included, so readers need one missing-value rule for every table.
+    `empty_text_as_null=False` reproduces zoo version <=2 rows, only to
+    recognize identities those builds recorded.
+    """
     columns = _COLUMNS[name]
     if set(table.columns) != set(columns):
         raise ValueError(f"Invalid {name} table columns")
@@ -67,8 +81,22 @@ def _arrow(name, table):
         values = table[column].tolist()
         if column == "labels":
             values = [None if value is None else sorted(value.items()) for value in values]
+        elif kind == pa.string() and empty_text_as_null:
+            values = [None if value == "" else value for value in values]
         arrays.append(pa.array(values, type=kind, from_pandas=True))
     return pa.Table.from_arrays(arrays, names=columns)
+
+
+def _write_table(table, path):
+    pq.write_table(table, path, **_PARQUET_OPTIONS)
+
+
+def _link_or_copy(source, destination):
+    """Share an immutable generation file; copy only across filesystems."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copyfile(source, destination)
 
 
 def _hash_file(path):
@@ -79,11 +107,14 @@ def _hash_file(path):
     return digest.hexdigest()
 
 
-def _provenance(paths, score_tables, root):
+def _provenance(paths, score_tables, root, verified=None):
+    """Hash every input once; `verified` supplies digests this build already checked."""
+    verified = verified or {}
     entries = []
     for path in sorted({Path(path).resolve() for path in paths}):
         label = path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
-        entries.append(dict(kind="file", path=label, sha256=_hash_file(path)))
+        digest = verified.get(path) or _hash_file(path)
+        entries.append(dict(kind="file", path=label, sha256=digest))
     for index, table in enumerate(score_tables):
         rows = _arrow("scores", table).to_pylist()
         encoded = sorted(json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -145,6 +176,7 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
     requested_out = Path(out) if out is not None else root / "builds/current"
     out = requested_out.absolute().parent.resolve() / requested_out.name
     selected_packages, skipped = [], 0
+    verified_hashes = {}
     package_mode = packages is not None or (manifests is None and fingerprints is None)
     package_sources = []
     if package_mode:
@@ -157,6 +189,9 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
         selected_packages, skipped = package_inputs(packages, conventions_id)
         manifests, fingerprints = [], []
         for folder, package in selected_packages:
+            # package_inputs has just checked every listed artifact against these digests.
+            verified_hashes.update({(folder / name).resolve(): digest
+                                    for name, digest in package["files"].items()})
             safe = safe_filename(package["model_key"])
             manifests.append(folder / f"{safe}.manifest.json")
             fingerprints.extend(folder / name for name in package["files"]
@@ -176,10 +211,10 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
     prior_files = ([prior / "scores.parquet", prior / "models.parquet",
                     *sorted((prior / "score-sources").glob("*"))] if prior else [])
     prior_hashes = {path: _hash_file(path) for path in prior_files if path.is_file()}
-    manifest_paths = list(_manifest_files(manifests))
-    identities = [json.loads(path.read_text()) for path in manifest_paths]
+    loaded_manifests = load_manifests(manifests)
+    manifest_paths = [path for path, _ in loaded_manifests]
     models = pd.DataFrame([dict(model_key=r["repo_id"] + "@" + r["revision"],
-        repo_id=r["repo_id"], revision=r["revision"]) for r in identities],
+        repo_id=r["repo_id"], revision=r["revision"]) for _, r in loaded_manifests],
         columns=["model_key", "repo_id", "revision"])
     card_paths = [path.with_name(path.name.replace(".manifest.json", ".source-metadata.json.gz"))
                   for path in manifest_paths]
@@ -209,7 +244,8 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
         (stage / "score-coverage.json").write_text(json.dumps(score_coverage, sort_keys=True, indent=2) + "\n")
         if config.exists():
             shutil.copyfile(config, stage / "score-configuration.json")
-        tables = build_tables(manifests, fingerprints, root, frame=frame, score_tables=score_tables)
+        tables = build_tables(manifests, fingerprints, root, frame=frame, score_tables=score_tables,
+                              loaded_manifests=loaded_manifests)
         tables["layers"] = build_layers(selected_packages)
         for relative in tables["models"].full_weight_spectra:
             if relative:
@@ -231,13 +267,14 @@ def build_zoo(manifests: Path | None = None, fingerprints: list[Path] | None = N
         inputs.extend(path for path, _ in supplements)
         tables["lineage"] = with_pair_delta_evidence(tables["lineage"], supplements)
         for name in _COLUMNS:
-            pq.write_table(_arrow(name, tables[name]), stage / f"{name}.parquet")
+            _write_table(_arrow(name, tables[name]), stage / f"{name}.parquet")
         metadata = dict(zoo_version=ZOO_VERSION, build_time=datetime.now(timezone.utc).isoformat(),
                         publication_protocol=_PROTOCOL, conventions_id=conventions_id,
-                        skipped_conventions=skipped, inputs=_provenance(inputs, score_tables, root),
+                        skipped_conventions=skipped,
+                        inputs=_provenance(inputs, score_tables, root, verified_hashes),
                         row_counts={name: len(tables[name]) for name in _COLUMNS})
         write_collection_receipt(stage, tables, root, manifest_paths=manifest_paths,
-                                 provenance=metadata["inputs"])
+                                 provenance=metadata["inputs"], loaded_manifests=loaded_manifests)
         (stage / "zoo.json").write_text(json.dumps(metadata, sort_keys=True, indent=2, allow_nan=False) + "\n")
         check_score_sources(context_tables)
         config_pin = score_coverage.get("configuration")
@@ -266,8 +303,10 @@ def extend_scores(zoo: Path, score_tables: Sequence[pd.DataFrame], out: Path,
 
     Context-only source tables must bind to an exact multiset subset of inherited
     scores; empty tables can retain explicitly unbound source records. Every
-    inherited file other than scores.parquet/zoo.json is copied byte-for-byte.
-    Existing writer versions and revision-verification meanings are unchanged.
+    inherited file other than scores.parquet/zoo.json/collection.json is shared
+    byte-for-byte (hardlinked when possible, otherwise copied). The new
+    generation keeps its parent's zoo version and table schema; existing
+    revision-verification meanings are unchanged.
     """
     from .tables import _score_tables
     parent, root = Path(zoo).resolve(strict=True), Path(data_root).resolve(strict=True)
@@ -297,21 +336,29 @@ def extend_scores(zoo: Path, score_tables: Sequence[pd.DataFrame], out: Path,
         counts = _canonical_scores(_arrow("scores", table).to_pylist())
         if counts - inherited_counts:
             raise ValueError("Context-only score bindings are absent from inherited scores")
-    existing_indices = [int(p.stem) for p in (parent / "score-sources").glob("*.json")
-                        if p.stem.isdigit()]
+    # Every retained name counts (descriptors and snapshots), so a new index can
+    # never land on an inherited, hardlinked file.
+    existing_indices = [int(p.name.split(".", 1)[0]) for p in (parent / "score-sources").glob("*")
+                        if p.name.split(".", 1)[0].isdigit()]
     start = max(existing_indices, default=-1) + 1
+    # A score extension keeps its parent's table conventions: version <=2
+    # generations keep their inherited "" text exactly.
+    empty_text_as_null = metadata.get("zoo_version") not in {"0", "1", "2"}
     out.parent.mkdir(parents=True, exist_ok=True)
     stage.mkdir(mode=0o700)
     moved, publication_attempted = False, False
     try:
         for name in inventory:
+            if name in _SCORE_EXTENSION_REWRITES:
+                continue  # Rewritten below; a hardlink would let that write reach the parent.
             destination = stage / name
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(parent / name, destination)
+            _link_or_copy(parent / name, destination)
         write_score_sources(stage, all_tables, start_index=start,
             roles=["appended_scores"] * len(score_tables) + ["inherited_context_only"] * len(source_tables))
-        combined = pa.concat_tables([_arrow("scores", tables["scores"]), _arrow("scores", additions)])
-        pq.write_table(combined, stage / "scores.parquet")
+        combined = pa.concat_tables([_arrow("scores", table, empty_text_as_null=empty_text_as_null)
+                                     for table in (tables["scores"], additions)])
+        _write_table(combined, stage / "scores.parquet")
         metadata["build_time"] = datetime.now(timezone.utc).isoformat()
         metadata["publication_protocol"] = _PROTOCOL
         metadata["row_counts"]["scores"] = len(combined)
@@ -337,7 +384,9 @@ def extend_scores(zoo: Path, score_tables: Sequence[pd.DataFrame], out: Path,
         for name, digest in inventory.items():
             if _hash_file(parent / name) != digest:
                 raise ValueError("Inherited generation changed during score extension")
-            if name not in {"scores.parquet", "zoo.json", "collection.json"} and _hash_file(stage / name) != digest:
+            staged = stage / name
+            if (name not in _SCORE_EXTENSION_REWRITES and not staged.samefile(parent / name)
+                    and _hash_file(staged) != digest):
                 raise ValueError("Inherited evidence bytes changed during score extension")
         stage.rename(generation)
         moved = True
@@ -354,21 +403,33 @@ def extend_scores(zoo: Path, score_tables: Sequence[pd.DataFrame], out: Path,
 
 
 def open_tables(zoo: Path) -> dict[str, pd.DataFrame]:
-    """Resolve one generation once, preserving native list/dict user fields."""
+    """Resolve one generation once, preserving native list/dict user fields.
+
+    Older generations are presented in the current columns: columns whose data
+    now has a single home elsewhere are not read, and new columns are null.
+    """
     generation = Path(zoo).resolve(strict=True)
     tables = {}
     for name, columns in _COLUMNS.items():
-        if name == "layers" and not (generation / "layers.parquet").is_file():
+        path = generation / f"{name}.parquet"
+        if name == "layers" and not path.is_file():
             tables[name] = empty_table(columns)
             continue
-        records = pq.read_table(generation / f"{name}.parquet").to_pylist()
-        if name == "models":
-            for row in records:
-                if row["labels"] is not None:
-                    row["labels"] = dict(row["labels"])
-        table = pd.DataFrame(records)
-        if name == "scores" and records:
-            table["n_items"] = pd.array([row["n_items"] for row in records], dtype="Int64")
+        selected = [column for column in pq.read_schema(path).names
+                    if column not in _RETIRED_COLUMNS.get(name, ())]
+        data = pq.read_table(path, columns=selected)
+        if name not in ("models", "scores", "predictions"):  # These hold nested/nullable-int columns.
+            # Flat tables: Arrow's columnar conversion, no per-row Python objects.
+            table = data.to_pandas()
+        else:
+            records = data.to_pylist()
+            if name == "models":
+                for row in records:
+                    if row["labels"] is not None:
+                        row["labels"] = dict(row["labels"])
+            table = pd.DataFrame(records, columns=selected)
+            if name == "scores" and records:
+                table["n_items"] = pd.array([row["n_items"] for row in records], dtype="Int64")
         if name == "models":
             table = normalize_model_table(table)
         elif name == "views":

@@ -146,8 +146,12 @@ def similarity_edges(zoo_dir: Path, models: pd.DataFrame, data_root: Path,
                 if neighbor not in records or records[neighbor].arch_signature != signature:
                     raise ValueError("Retrieval candidate disagrees with lineage models")
                 candidates.add(tuple(sorted((key, neighbor))))
-    fingerprints, rows = {}, []
-    for child, parent in sorted(candidates):
+    # Candidates never cross architecture signatures, so fingerprints are cached
+    # per signature only: peak memory follows the largest family, not the zoo.
+    fingerprints, rows, signature = {}, [], None
+    for child, parent in sorted(candidates, key=lambda pair: (records[pair[0]].arch_signature, pair)):
+        if records[child].arch_signature != signature:
+            fingerprints, signature = {}, records[child].arch_signature
         for key in (child, parent):
             if key not in fingerprints:
                 fingerprints[key] = _fingerprint(records[key], root)

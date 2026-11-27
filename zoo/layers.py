@@ -10,8 +10,16 @@ from evidence.compatibility import is_baseline_fingerprint
 from .schema import LAYERS_COLUMNS, empty_table
 
 
+_TEXT_COLUMNS = {"longname", "module_name", "weight_attribute", "slice", "fit_status"}
+
+
 def build_layers(packages):
-    records = []
+    """One row per runner layer record in each full package's `esd/metrics.h5`.
+
+    `h5_index` addresses that file's aligned `/layers` and `/eigs` records;
+    `view_name` links to the fingerprint view table when the identity matches.
+    """
+    tables = []
     for folder, package in packages:
         if package["kind"] != "full":
             continue
@@ -27,14 +35,20 @@ def build_layers(packages):
                 raise ValueError("Unaligned package layer records")
             columns = {name: dataset.asstr()[:] if h5py.check_string_dtype(dataset.dtype) else dataset[:]
                        for name, dataset in group.items() if name in LAYERS_COLUMNS}
-            for index in range(count):
-                record = {name: values[index] for name, values in columns.items()}
-                module, attribute = record.get("module_name", ""), record.get("weight_attribute", "")
-                stored_key = ".".join(part for part in (module, attribute) if part)
-                candidate = stored_key + (record.get("slice") or "")
-                record.update(model_key=package["model_key"], h5_index=index,
-                              view_name=candidate if candidate in names else "")
-                records.append(record)
-    if not records:
+        table = pd.DataFrame(columns)
+        for name in _TEXT_COLUMNS & set(table.columns):
+            # Missing text is null in the database, never an empty string.
+            table[name] = [value if value else None for value in table[name]]
+        modules = table.get("module_name", pd.Series([None] * count))
+        attributes = table.get("weight_attribute", pd.Series([None] * count))
+        slices = table.get("slice", pd.Series([None] * count))
+        candidates = [".".join(part for part in (module, attribute) if part) + (piece or "")
+                      for module, attribute, piece in zip(modules, attributes, slices)]
+        table["view_name"] = [candidate if candidate in names else None for candidate in candidates]
+        table["model_key"] = package["model_key"]
+        table["h5_index"] = range(count)
+        tables.append(table)
+    if not tables:
         return empty_table(LAYERS_COLUMNS)
-    return pd.DataFrame(records).reindex(columns=LAYERS_COLUMNS).sort_values(["model_key", "h5_index"], kind="stable").reset_index(drop=True)
+    return (pd.concat(tables, ignore_index=True).reindex(columns=LAYERS_COLUMNS)
+            .sort_values(["model_key", "h5_index"], kind="stable").reset_index(drop=True))

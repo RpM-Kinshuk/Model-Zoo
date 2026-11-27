@@ -525,7 +525,12 @@ def test_worker_saves_real_cpu_spectra_with_missing_fits(tmp_path, monkeypatch, 
 
     assert worker.main() == 0
 
-    saved = worker.pd.read_csv(tmp_path / "stats" / "test--local-model.csv")
+    assert not (tmp_path / "stats").exists()  # The HDF5 is the only per-layer record.
+    with worker.h5py.File(tmp_path / "metrics" / "test--local-model.h5", "r") as h5:
+        saved = worker.pd.DataFrame({
+            name: dataset.asstr()[:] if worker.h5py.check_string_dtype(dataset.dtype) else dataset[:]
+            for name, dataset in h5["layers"].items()
+        })
     assert saved["longname"].tolist() == [f"layers.{i}.proj" for i in range(3)]
     assert saved["num_evals"].tolist() == [4, 1, 0]
     assert saved["n_tail"].tolist() == [2 if with_fit else 0, 0, 0]

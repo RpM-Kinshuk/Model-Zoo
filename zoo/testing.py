@@ -17,6 +17,37 @@ SHA1, SHA2, SHA3, SHA4, SHA5, SHA6, SHA7, SHA8, SHA9 = (str(i) * 40 for i in ran
 SHA10, SHA11, SHA12 = "a" * 40, "b" * 40, "c" * 40
 
 
+def write_legacy_stats_csv(h5_path: Path, csv_path: Path) -> Path:
+    """Recreate the stats/<safe>.csv that runs before HDF5-only output wrote.
+
+    Current runs write only the HDF5. Tests use this to reproduce an older run:
+    model_id, is_adapter and (for adapters) source_model come from the HDF5
+    attributes, followed by every /layers column. Eigenvalues stay in HDF5.
+    """
+    import h5py
+    import pandas as pd
+
+    def attribute(h5, name):
+        value = h5.attrs.get(name, "")
+        return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+    with h5py.File(h5_path, "r") as h5:
+        frame = pd.DataFrame({
+            name: dataset.asstr()[:] if h5py.check_string_dtype(dataset.dtype) else dataset[:]
+            for name, dataset in h5["layers"].items()
+        })
+        model_id, is_adapter = attribute(h5, "full_name"), attribute(h5, "is_adapter") == "true"
+        source_model = attribute(h5, "source_model")
+    frame.insert(0, "model_id", model_id)
+    frame.insert(1, "is_adapter", is_adapter)
+    if source_model:
+        frame.insert(2, "source_model", source_model)
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(csv_path, index=False)
+    return csv_path
+
+
 def make_universe(root: Path) -> SimpleNamespace:
     """Write twelve pinned model manifests and nine real row-block fingerprints.
 

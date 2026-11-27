@@ -12,12 +12,16 @@ def _measurement_file(path):
             or name in {"package.json", "evidence.json", "stats.csv", "metrics.h5"})
 
 
-def write_collection_receipt(directory, tables, data_root, *, manifest_paths=(), provenance=()):
+def write_collection_receipt(directory, tables, data_root, *, manifest_paths=(), provenance=(),
+                             loaded_manifests=()):
     """Write a versioned inventory; completeness refers only to listed references.
 
     Hashes come from the builder's existing provenance pass. No checkpoint is
     archived, no measurements are recomputed and no large files are rehashed.
+    `loaded_manifests` ((path, JSON) pairs the builder already parsed) avoids
+    reading those manifests again.
     """
+    parsed = {Path(path).resolve(): manifest for path, manifest in loaded_manifests}
     root = Path(data_root).resolve()
     directory = Path(directory)
     references = {}
@@ -56,7 +60,7 @@ def write_collection_receipt(directory, tables, data_root, *, manifest_paths=(),
         add(absolute, "manifest")
         if not absolute.resolve().is_relative_to(root) or not absolute.is_file():
             continue
-        manifest = json.loads(absolute.read_text())
+        manifest = parsed.get(absolute.resolve()) or json.loads(absolute.read_text())
         key = manifest["repo_id"] + "@" + manifest["revision"]
         manifests.add(key)
         sibling = absolute.with_name(absolute.name.removesuffix(".manifest.json") + ".source-metadata.json.gz")

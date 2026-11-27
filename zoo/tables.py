@@ -9,7 +9,7 @@ from typing import Sequence
 import pandas as pd
 
 from evidence import EVIDENCE_VERSION, READABLE_EVIDENCE_VERSIONS
-from evidence.fingerprint import load_fingerprint
+from evidence.fingerprint import load_fingerprint_views
 from evidence.compatibility import companion_spectra_path, is_baseline_fingerprint, normalize_manifest
 from .schema import (COVERAGE_COLUMNS, MODELS_COLUMNS, PREDICTIONS_COLUMNS,
                      SCORES_COLUMNS, VIEWS_COLUMNS, arch_signature, empty_table,
@@ -121,8 +121,23 @@ def _frame_values(frame, repo_id, revision):
 
 def _coverage(manifest, fp):
     return fp.coverage if fp is not None else [dict(name=t["name"], decode=t.get("decode", "plain"),
-                geometry=t.get("geometry", ""), status=t.get("status", "skipped"),
-                reason=t.get("reason", "")) for t in manifest.get("tensors", [])]
+                geometry=t.get("geometry"), status=t.get("status", "skipped"),
+                reason=t.get("reason")) for t in manifest.get("tensors", [])]
+
+
+def _present(value):
+    """Missing values are null in the tables; empty strings are not values."""
+    return None if value is None or value == "" else value
+
+
+def _finite(value):
+    value = float(value)
+    return value if not math.isnan(value) else None
+
+
+def load_manifests(inputs) -> list[tuple[Path, dict]]:
+    """Read each selected manifest once, as (path, original JSON) pairs."""
+    return [(path, json.loads(path.read_text())) for path in _manifest_files(inputs)]
 
 
 def _score_tables(tables, manifests):
@@ -154,17 +169,20 @@ def _score_tables(tables, manifests):
 
 def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
                  frame: Path | None = None,
-                 score_tables: Sequence[pd.DataFrame] = ()) -> dict[str, pd.DataFrame]:
+                 score_tables: Sequence[pd.DataFrame] = (),
+                 loaded_manifests: Sequence[tuple[Path, dict]] | None = None) -> dict[str, pd.DataFrame]:
     """Read extractor outputs without writing or modifying any input artifacts.
 
     Fingerprint inputs are directories or canonical row-block/full-weight files. Paths stored
     in the tables are resolved relative to data_root, including full-weight's complete
     HDF5 spectrum. Extra row-block block-height outputs are not database baselines.
+    Only view records are read from fingerprints; sketches and eigenvalues stay on
+    disk. `loaded_manifests` (from `load_manifests`) avoids parsing them twice.
     """
     root = Path(data_root).resolve()
     records, manifest_paths = {}, {}
-    for path in _manifest_files(manifests):
-        manifest = normalize_manifest(json.loads(path.read_text()))
+    for path, original in (loaded_manifests if loaded_manifests is not None else load_manifests(manifests)):
+        manifest = normalize_manifest(original)
         key = model_key(manifest["repo_id"], manifest["revision"])
         if key in records:
             raise ValueError(f"Duplicate manifest identity {key}: {manifest_paths[key]} and {path}")
@@ -172,7 +190,7 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
     measured = defaultdict(dict)
     for path in _fingerprint_files(fingerprints):
         relative = _relative(path, root)
-        fp = load_fingerprint(path)
+        fp = load_fingerprint_views(path)
         key = model_key(fp.meta["repo_id"], fp.meta["revision"])
         tier = fp.meta["tier"]
         if tier not in ("row_blocks", "full_weights") or fp.meta.get("evidence_version") not in READABLE_EVIDENCE_VERSIONS:
@@ -189,14 +207,13 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
         chosen = pair.get("row_blocks", pair.get("full_weights"))
         fp = chosen[2] if chosen else None
         coverage = _coverage(manifest, fp)
-        skipped = [dict(name=r["name"], reason=r.get("reason", ""))
-                   for r in coverage if r.get("status") == "skipped"]
+        skip_reasons = [r.get("reason") or "" for r in coverage if r.get("status") == "skipped"]
         access = manifest["access"]
         if access not in ("granted", "no_access", "metadata_only"):
             raise ValueError(f"Unknown manifest access state: {access}")
-        status = ("partial" if any(r["reason"] not in _BENIGN_SKIPS for r in skipped) else "measured") if fp else (
+        status = ("partial" if any(reason not in _BENIGN_SKIPS for reason in skip_reasons) else "measured") if fp else (
             access if access in ("metadata_only", "no_access") else "not_measured")
-        spectra = ""
+        spectra = None
         if "full_weights" in pair:
             path = pair["full_weights"][0]
             spectrum_path = companion_spectra_path(path)
@@ -215,18 +232,25 @@ def build_tables(manifests: Path, fingerprints: list[Path], data_root: Path,
             **{field: decision.get(field) for field in ("is_decision", "system_one", "decision_type", "num_labels", "labels")},
             arch_signature=arch_signature(config, shapes), n_views=len(fp.names) if fp else 0,
             **_frame_values(frame_rows, manifest["repo_id"], manifest["revision"]),
-            dup_group=key, row_block_fingerprint=pair["row_blocks"][1] if "row_blocks" in pair else "",
-            full_weight_fingerprint=pair["full_weights"][1] if "full_weights" in pair else "", full_weight_spectra=spectra,
-            coverage_status=status, skipped_tensors=skipped))
+            dup_group=key, row_block_fingerprint=pair["row_blocks"][1] if "row_blocks" in pair else None,
+            full_weight_fingerprint=pair["full_weights"][1] if "full_weights" in pair else None,
+            full_weight_spectra=spectra, coverage_status=status))
         if fp is not None:
+            delta = fp.delta
             for index, name in enumerate(fp.names):
+                rank = int(delta["rank"][index]) if math.isfinite(delta["rank"][index]) else -1
                 view_rows.append(dict(model_key=key, view_index=index, name=name,
-                    geometry=fp.geometry[index], component=fp.component[index],
+                    geometry=fp.geometry[index], component=_present(fp.component[index]),
                     n_rows=int(fp.shape[index, 0]), n_cols=int(fp.shape[index, 1]),
                     r0=int(fp.rows[index, 0]), r1=int(fp.rows[index, 1]),
-                    block_sha256=fp.sha256[index], tier=fp.meta["tier"]))
+                    block_sha256=_present(fp.sha256[index]), tier=fp.meta["tier"],
+                    delta_status=_present(str(delta["status"][index])),
+                    delta_rank_confidence=_present(str(delta["confidence"][index])),
+                    delta_frac_identical=_finite(delta["frac_identical"][index]),
+                    delta_rel_update_norm=_finite(delta["rel_update_norm"][index]),
+                    delta_rank=rank if rank >= 0 else None))
         coverage_rows.extend(dict(model_key=key, tensor_name=row["name"],
-            **{field: row.get(field, "") for field in ("decode", "geometry", "status", "reason")})
+            **{field: _present(row.get(field)) for field in ("decode", "geometry", "status", "reason")})
             for row in coverage)
     views = _rows(view_rows, VIEWS_COLUMNS, ["model_key", "view_index"])
     groups = duplicate_groups(views)

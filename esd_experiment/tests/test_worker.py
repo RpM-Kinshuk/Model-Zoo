@@ -135,7 +135,8 @@ def test_worker_dense_fallback_uses_loaded_weights_and_records_selection(tmp_pat
         torch.testing.assert_close(tensor, before[name], rtol=0, atol=0)
     assert worker.main() == 0  # Resume does not load the same model twice.
     assert load_model.call_count == 1
-    paths = [tmp_path / "stats/org--control.csv", tmp_path / "metrics/org--control.h5"]
+    paths = [tmp_path / "metrics/org--control.h5"]
+    assert not (tmp_path / "stats").exists()  # Current runs write no per-layer CSV.
     saved = [path.read_bytes() for path in paths]
     opposite_flag = "--no-filter_type" if filter_type else "--filter_type"
     monkeypatch.setattr(sys, "argv", arguments + [opposite_flag])
@@ -285,7 +286,6 @@ def test_validate_metrics_output_rejects_invalid_power_law_fits(alpha):
 @pytest.mark.parametrize("alphas", [[float("nan"), 2.5], [2.5, float("nan")]])
 def test_partial_fits_preserve_rows_and_missing_values_in_saved_results(tmp_path: Path, capsys, alphas):
     worker = load_worker_module()
-    output_path = tmp_path / "stats" / "org--model.csv"
     h5_path = tmp_path / "metrics" / "org--model.h5"
     metrics = {
         "longname": ["model.layers.0.proj", "model.layers.1.proj"],
@@ -294,13 +294,12 @@ def test_partial_fits_preserve_rows_and_missing_values_in_saved_results(tmp_path
     }
 
     assert worker.validate_metrics_output(metrics) is None
-    worker.save_results(metrics, output_path, "org/model", False, h5_output_path=h5_path)
+    worker.save_results(metrics, h5_path, "org/model", False)
 
-    saved = worker.pd.read_csv(output_path)
-    assert len(saved) == 2
-    worker.np.testing.assert_allclose(saved["alpha"], alphas, equal_nan=True)
-    assert saved["norm"].tolist() == [4.0, 30.0]
+    assert not (tmp_path / "stats").exists()
     with worker.h5py.File(h5_path, "r") as h5:
+        assert len(h5["layers/alpha"]) == 2
+        assert h5["layers/norm"][:].tolist() == [4.0, 30.0]
         assert h5["alpha"].shape == (2, 1)
         worker.np.testing.assert_allclose(h5["alpha"][:, 0], alphas, equal_nan=True)
         assert h5.attrs["numerics_version"] == worker.NUMERICS_VERSION
@@ -327,7 +326,6 @@ def test_alpha_matrix_keeps_a_module_with_no_fits():
 
 def test_spectra_without_any_fits_can_be_saved(tmp_path: Path, capsys):
     worker = load_worker_module()
-    output_path = tmp_path / "stats" / "org--model.csv"
     h5_path = tmp_path / "metrics" / "org--model.h5"
     metrics = {
         "longname": ["model.layers.0.proj", "model.layers.1.proj"],
@@ -340,14 +338,13 @@ def test_spectra_without_any_fits_can_be_saved(tmp_path: Path, capsys):
     }
 
     assert worker.validate_metrics_output(metrics) is None
-    worker.save_results(metrics, output_path, "org/model", False, h5_output_path=h5_path, save_eigs=True)
+    worker.save_results(metrics, h5_path, "org/model", False, save_eigs=True)
 
-    saved = worker.pd.read_csv(output_path)
-    assert len(saved) == 2
-    assert saved["alpha"].isna().all()
-    assert saved["fit_xmin"].isna().all()
-    assert saved["n_tail"].tolist() == [0, 0]
     with worker.h5py.File(h5_path, "r") as h5:
+        assert len(h5["layers/alpha"]) == 2
+        assert worker.np.isnan(h5["layers/alpha"][:]).all()
+        assert worker.np.isnan(h5["layers/fit_xmin"][:]).all()
+        assert h5["layers/n_tail"][:].tolist() == [0, 0]
         assert h5["alpha"].shape == (2, 1)
         assert worker.np.isnan(h5["alpha"][:]).all()
         assert h5["eigs"][0].tolist() == [4.0]
@@ -381,7 +378,6 @@ def test_spectral_measurements_still_require_aligned_fit_rows(alphas):
 
 def test_save_results_keeps_eigenvalues_only_in_h5_when_requested(tmp_path: Path):
     worker = load_worker_module()
-    output_path = tmp_path / "stats" / "org--model.csv"
     h5_path = tmp_path / "metrics" / "org--model.h5"
     metrics = {
         "longname": ["model.layers.0.mlp.up_proj", "model.layers.1.mlp.up_proj"],
@@ -394,17 +390,15 @@ def test_save_results_keeps_eigenvalues_only_in_h5_when_requested(tmp_path: Path
 
     worker.save_results(
         metrics,
-        output_path,
+        h5_path,
         model_id="org/model",
         is_adapter=False,
         save_eigs=True,
-        h5_output_path=h5_path,
     )
 
-    csv_text = output_path.read_text()
-    assert "eigs" not in csv_text
-    assert "[1. 2.]" not in csv_text
+    assert sorted(path.name for path in tmp_path.rglob("*") if path.is_file()) == ["org--model.h5"]
     with worker.h5py.File(h5_path, "r") as h5:
+        assert "eigs" not in h5["layers"]
         assert "eigs" in h5
         assert h5["eigs"][0].tolist() == [1.0, 2.0]
         assert h5["eigs"][1].tolist() == [3.0, 4.0, 5.0]
@@ -433,7 +427,6 @@ def test_arbitrary_layer_names_remain_canonical_when_depth_view_is_incomplete(
     tmp_path: Path, longnames, expected_status,
 ):
     worker = load_worker_module()
-    output_path = tmp_path / "stats" / "org--model.csv"
     h5_path = tmp_path / "metrics" / "org--model.h5"
     metrics = {
         "longname": longnames,
@@ -444,7 +437,7 @@ def test_arbitrary_layer_names_remain_canonical_when_depth_view_is_incomplete(
         "eigs": [worker.np.array([1., 4., 9., 16.]), worker.np.array([1e-8]), worker.np.array([1., 4.])],
     }
 
-    worker.save_results(metrics, output_path, "org/model", False, save_eigs=True, h5_output_path=h5_path)
+    worker.save_results(metrics, h5_path, "org/model", False, save_eigs=True)
 
     with worker.h5py.File(h5_path, "r") as h5:
         assert h5["layers/longname"].asstr()[:].tolist() == longnames
@@ -470,14 +463,12 @@ def test_arbitrary_layer_names_remain_canonical_when_depth_view_is_incomplete(
 ])
 def test_save_results_rejects_ambiguous_or_misaligned_rows_before_writing(tmp_path: Path, metrics, error):
     worker = load_worker_module()
-    output_path = tmp_path / "model.csv"
     h5_path = tmp_path / "model.h5"
 
     with pytest.raises(ValueError, match=error):
-        worker.save_results(metrics, output_path, "org/model", False, h5_output_path=h5_path)
+        worker.save_results(metrics, h5_path, "org/model", False)
 
-    assert not output_path.exists()
-    assert not h5_path.exists()
+    assert not list(tmp_path.iterdir())
 
 
 def test_save_results_removes_only_explicit_aligned_legacy_summary(tmp_path: Path):
@@ -488,12 +479,12 @@ def test_save_results_removes_only_explicit_aligned_legacy_summary(tmp_path: Pat
         "norm": [1.0, 0.0, 0.5],
         "eigs": [[1.0], [], None],
     }
-    output_path, h5_path = tmp_path / "model.csv", tmp_path / "model.h5"
+    h5_path = tmp_path / "model.h5"
 
-    worker.save_results(metrics, output_path, "org/model", False, h5_output_path=h5_path, save_eigs=True)
+    worker.save_results(metrics, h5_path, "org/model", False, save_eigs=True)
 
-    assert len(worker.pd.read_csv(output_path)) == 2
     with worker.h5py.File(h5_path, "r") as h5:
+        assert h5["layers"].attrs["num_records"] == 2
         assert h5["layers/longname"].asstr()[:].tolist() == ["classifier", "features.0"]
         assert h5["layers/alpha"][0] == 2.0
         assert worker.np.isnan(h5["layers/alpha"][1])
@@ -511,8 +502,8 @@ def test_save_results_records_measurement_configuration_and_coverage(tmp_path: P
     }
     h5_path = tmp_path / "model.h5"
 
-    worker.save_results(metrics, tmp_path / "model.csv", "org/model", False,
-                        h5_output_path=h5_path, measurement_config=measurement_config, coverage=coverage)
+    worker.save_results(metrics, h5_path, "org/model", False,
+                        measurement_config=measurement_config, coverage=coverage)
 
     with worker.h5py.File(h5_path, "r") as h5:
         assert json.loads(h5.attrs["measurement_config_json"]) == measurement_config
@@ -520,6 +511,30 @@ def test_save_results_records_measurement_configuration_and_coverage(tmp_path: P
         assert h5.attrs["coverage_analyzed"] == 1
         assert h5.attrs["coverage_skipped"] == 1
         assert "eigs" not in h5
+
+
+def test_hdf5_attributes_keep_the_former_csv_identity_columns(tmp_path: Path):
+    worker = load_worker_module()
+    base = "org/base@" + "b" * 40
+    h5_path = tmp_path / "metrics" / "org--adapter.h5"
+    worker.save_results({"longname": ["classifier"], "alpha": [2.0]}, h5_path, "org/adapter", True, base,
+                        base_model_relation="finetune")
+    with worker.h5py.File(h5_path, "r") as h5:
+        assert h5.attrs["full_name"] == "org/adapter"
+        assert h5.attrs["is_adapter"] == "true"  # Not implied by base_model_relation here.
+        assert h5.attrs["source_model"] == base
+        assert h5.attrs["base_model_relation"] == "finetune"
+
+
+def test_former_save_results_call_shape_writes_only_the_hdf5(tmp_path: Path):
+    worker = load_worker_module()
+    csv_path, h5_path = tmp_path / "stats" / "org--model.csv", tmp_path / "metrics" / "org--model.h5"
+    worker.save_results({"longname": ["classifier"], "alpha": [2.0]}, csv_path, "org/model", False,
+                        h5_output_path=h5_path)
+    assert not (tmp_path / "stats").exists()
+    with worker.h5py.File(h5_path, "r") as h5:
+        assert h5["layers/longname"].asstr()[:].tolist() == ["classifier"]
+        assert h5.attrs["is_adapter"] == "false"
 
 
 def test_classify_retryable_failure_marks_only_transient_cases_retryable():
@@ -586,13 +601,11 @@ def test_main_regenerates_incomplete_outputs_when_overwrite_is_requested(tmp_pat
     usage = {"scope": "loaded_registered_tensors", "counts": {}, "tensors": []}
     worker.weight_usage_report = Mock(return_value=usage)
 
-    def fake_save_results(metrics, output_path, *args, **kwargs):
+    def fake_save_results(metrics, h5_path, *args, **kwargs):
         assert kwargs["coverage"]["weight_usage"] == usage
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("alpha\n1.0\n")
-        h5_output_path = kwargs["h5_output_path"]
-        h5_output_path.parent.mkdir(parents=True, exist_ok=True)
-        h5_output_path.write_text("h5-temp")
+        assert h5_path.name.startswith(".") and h5_path.suffix == ".tmp"
+        h5_path.parent.mkdir(parents=True, exist_ok=True)
+        h5_path.write_text("h5-temp")
 
     worker.save_results = fake_save_results
 
@@ -609,7 +622,7 @@ def test_main_regenerates_incomplete_outputs_when_overwrite_is_requested(tmp_pat
     )
     report = json.loads((tmp_path / "logs" / "coverage" / "org--model.json").read_text())
     assert report["weight_usage"] == usage
-    assert output_file.read_text() == "alpha\n1.0\n"
+    assert not output_file.exists()  # The stale legacy CSV is cleared, not rewritten.
     assert metrics_file.exists()
     assert metrics_file.read_text() == "h5-temp"
     assert json.loads(terminal_status_file.read_text())["status"] == "success"
@@ -1061,7 +1074,7 @@ def test_main_classifies_unwrapped_pre_save_exception_as_save_failure(tmp_path: 
     assert "temp cleanup failed" in failure_record["message"]
 
 
-def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_path: Path):
+def test_main_cleans_up_final_h5_if_its_finalize_fails(tmp_path: Path):
     worker = load_worker_module()
 
     class _FakeParam:
@@ -1102,12 +1115,9 @@ def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_pa
         }
     )
 
-    def fake_save_results(metrics, output_path, *args, **kwargs):
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("alpha\n1.0\n")
-        h5_output_path = kwargs["h5_output_path"]
-        h5_output_path.parent.mkdir(parents=True, exist_ok=True)
-        h5_output_path.write_text("h5-temp")
+    def fake_save_results(metrics, h5_path, *args, **kwargs):
+        h5_path.parent.mkdir(parents=True, exist_ok=True)
+        h5_path.write_text("h5-temp")
 
     original_finalize_output_path = worker.finalize_output_path
     finalize_calls = []
@@ -1131,9 +1141,10 @@ def test_main_cleans_up_final_csv_if_h5_finalize_fails_after_csv_finalize(tmp_pa
     failure_record = json.loads((tmp_path / "logs" / "failure_records.jsonl").read_text().strip())
 
     assert exit_code == 1
-    assert finalize_calls == ["org--model.csv", "org--model.h5"]
+    assert finalize_calls == ["org--model.h5"]
     assert not output_file.exists()
     assert not metrics_file.exists()
+    assert not list(tmp_path.glob("metrics/.*.tmp"))
     assert failure_record["stage"] == "save"
     assert failure_record["reason"] == "save_error"
     assert "rename failed" in failure_record["message"]
@@ -1256,7 +1267,7 @@ def test_evidence_failure_keeps_esd_outputs_and_retries_evidence_only(evidence_w
     monkeypatch.setattr(worker, "net_esd_estimator", esd)
     monkeypatch.setattr(EvidenceSidecar, "finish", lambda *args: (_ for _ in ()).throw(RuntimeError("sidecar failed")))
     assert worker.main() == 1
-    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    paths = [out / "metrics/org--tiny.h5"]
     saved = [p.read_bytes() for p in paths]
     assert not list((out / "evidence").rglob("*.full_weights.fingerprint.safetensors"))
     monkeypatch.setattr(EvidenceSidecar, "finish", real_finish)
@@ -1281,9 +1292,9 @@ def test_no_evidence_outputs_unchanged(evidence_worker, monkeypatch):
     worker, out, argv, _ = evidence_worker
     monkeypatch.setattr(sys, "argv", argv + ["--no-evidence"])
     assert worker.main() == 0
-    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    paths = [out / "metrics/org--tiny.h5"]
     saved = [p.read_bytes() for p in paths]
-    assert not (out / "evidence").exists()
+    assert not (out / "evidence").exists() and not (out / "stats").exists()
     assert worker.main() == 0
     assert [p.read_bytes() for p in paths] == saved
 
@@ -1335,7 +1346,7 @@ def test_sigterm_in_fingerprint_preserves_durable_esd_and_cleans_stage(evidence_
     handlers, durable = {}, []
     monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.setdefault(sig, handler))
     def terminate(*args):
-        durable.append((out / "stats/org--tiny.csv").is_file() and (out / "metrics/org--tiny.h5").is_file())
+        durable.append((out / "metrics/org--tiny.h5").is_file())
         if callable(handlers.get(signal.SIGTERM)):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
         raise KeyboardInterrupt()
@@ -1455,13 +1466,79 @@ def test_fingerprint_stage_preserves_already_saved_esd_pair(evidence_worker, mon
     worker, out, _, _ = evidence_worker
     saved = []
     real = EvidenceSidecar.finish
-    paths = [out / "stats/org--tiny.csv", out / "metrics/org--tiny.h5"]
+    paths = [out / "metrics/org--tiny.h5"]
     def finish(*args):
         saved.extend(path.read_bytes() for path in paths)
         return real(*args)
     monkeypatch.setattr(EvidenceSidecar, "finish", finish)
     assert worker.main() == 0
     assert [path.read_bytes() for path in paths] == saved
+
+
+def test_hdf5_only_run_is_complete_resumable_and_publishable(evidence_worker, monkeypatch):
+    from measurement_config import artifact_compatibility
+    from test_run_experiment import run_experiment as runner
+    from zoo.publish import package_complete
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setenv("ZOO_DATA", str(out))  # Packages stay inside this test's run.
+    assert worker.main() == 0
+    h5_path = out / "metrics/org--tiny.h5"
+    assert not (out / "stats").exists()
+    # Values the former CSV carried as columns are HDF5 attributes.
+    with worker.h5py.File(h5_path) as h5:
+        assert (h5.attrs["full_name"], h5.attrs["is_adapter"], h5.attrs["source_model"]) == ("org/tiny", "false", "")
+    assert artifact_compatibility(None, h5_path) == (True, "compatible")
+    assert artifact_compatibility(out / "stats/org--tiny.csv", h5_path) == (True, "compatible")
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "unused", "--output_dir", str(out)])
+    args = runner.parse_args()
+    assert runner._completed_models_from_artifacts(out, runner.measurement_config(args), evidence=True,
+                                                   evidence_options=args) == {"org/tiny"}
+    rows = runner.pd.DataFrame([dict(model_id="org/tiny", revision_norm="a" * 40, source_model="", base_model_relation="")])
+    assert len(runner.filter_models_to_run(rows, out, args=args, skip_failed=False)) == 0
+    (package,) = [path.parent for path in (out / "packages").rglob("package.json")]
+    files = json.loads((package / "package.json").read_text())["files"]
+    assert "esd/metrics.h5" in files and "esd/stats.csv" not in files
+    assert package_complete(out, "org/tiny@" + "a" * 40, out / "packages", out)
+    saved = h5_path.read_bytes()
+    esd = Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    monkeypatch.setattr(sys, "argv", argv)
+    assert worker.main() == 0  # Resume from the HDF5 alone; nothing is recomputed.
+    assert esd.call_count == 0 and h5_path.read_bytes() == saved and not (out / "stats").exists()
+
+
+def test_legacy_csv_beside_hdf5_is_still_validated_as_a_pair(evidence_worker, monkeypatch):
+    from measurement_config import artifact_compatibility
+    from test_run_experiment import run_experiment as runner
+    from zoo.testing import write_legacy_stats_csv
+    worker, out, argv, _ = evidence_worker
+    monkeypatch.setattr(sys, "argv", argv + ["--no-publish"])
+    assert worker.main() == 0
+    h5_path = out / "metrics/org--tiny.h5"
+    csv_path = write_legacy_stats_csv(h5_path, out / "stats/org--tiny.csv")
+    assert artifact_compatibility(csv_path, h5_path) == (True, "compatible")
+    esd = Mock(wraps=worker.net_esd_estimator)
+    monkeypatch.setattr(worker, "net_esd_estimator", esd)
+    saved = csv_path.read_bytes(), h5_path.read_bytes()
+    assert worker.main() == 0  # A matching legacy pair resumes unchanged.
+    assert esd.call_count == 0 and (csv_path.read_bytes(), h5_path.read_bytes()) == saved
+
+    frame = worker.pd.read_csv(csv_path)
+    frame.loc[0, "alpha"] = frame.loc[0, "alpha"] + 1 if worker.np.isfinite(frame.loc[0, "alpha"]) else 2.5
+    frame.to_csv(csv_path, index=False)
+    saved = csv_path.read_bytes(), h5_path.read_bytes()
+    assert artifact_compatibility(csv_path, h5_path) == (False, "CSV/HDF5 alpha values differ")
+    assert worker.main() == 1
+    assert esd.call_count == 0 and (csv_path.read_bytes(), h5_path.read_bytes()) == saved
+    status = json.loads((out / "logs/terminal_status/org--tiny.json").read_text())
+    assert status["reason"] == "incompatible_results"
+    monkeypatch.setattr(sys, "argv", ["runner", "--model_list", "unused", "--output_dir", str(out), "--no-publish"])
+    args = runner.parse_args()
+    assert runner._completed_models_from_artifacts(out, runner.measurement_config(args)) == set()
+    rows = runner.pd.DataFrame([dict(model_id="org/tiny", revision_norm="a" * 40, source_model="", base_model_relation="")])
+    with pytest.raises(ValueError, match="fresh output directory"):
+        runner.filter_models_to_run(rows, out, args=args, skip_failed=False)
+    assert (csv_path.read_bytes(), h5_path.read_bytes()) == saved
 
 
 def test_worker_publishes_package_by_default(evidence_worker):

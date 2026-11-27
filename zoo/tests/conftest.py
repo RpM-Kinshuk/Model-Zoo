@@ -83,8 +83,9 @@ def package_run(tmp_path, monkeypatch):
     cfg = measurement_config(SimpleNamespace(), model_id=manifest["repo_id"], revision=manifest["revision"])
     cfg["runtime"] = dict(analysis_source="model", device_map_requested="cpu", filter_type=False)
     metrics = net_esd_estimator(model, parallel=False, save_eigs=True, fix_fingers="xmin_mid", filter_zeros=True)
-    save_results(metrics, run / "stats/lab--tiny.csv", "lab/tiny", False,
-                 h5_output_path=run / "metrics/lab--tiny.h5", measurement_config=cfg, coverage={"counts": {}}, save_eigs=True)
+    # A current run: the HDF5 is the only per-layer record (no stats/ CSV).
+    save_results(metrics, run / "metrics/lab--tiny.h5", "lab/tiny", False,
+                 measurement_config=cfg, coverage={"counts": {}}, save_eigs=True)
     sidecar = EvidenceSidecar(manifest, folder)
     sidecar.start()
     counts = sidecar.finish(metrics_results(metrics), loaded_block(model), lambda items: measure_tensors(items, cfg), cfg)

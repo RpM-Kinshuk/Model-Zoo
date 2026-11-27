@@ -150,3 +150,44 @@ def test_resume_does_not_scan_saved_eigenvalues(monkeypatch, tmp_path):
     monkeypatch.setattr(h5py.Dataset, "__getitem__", guard)
 
     assert artifact_compatibility(csv_path, h5_path, config) == (True, "compatible")
+
+
+def test_hdf5_record_alone_is_complete_without_a_csv(tmp_path):
+    csv_path, h5_path, config = write_pair(tmp_path)
+    csv_path.unlink()
+
+    assert artifact_compatibility(csv_path, h5_path, config) == (True, "compatible")
+    assert artifact_compatibility(None, h5_path, config) == (True, "compatible")
+
+
+def test_hdf5_record_alone_keeps_every_hdf5_check(tmp_path):
+    csv_path, h5_path, config = write_pair(tmp_path, names=("same", "same"))
+    csv_path.unlink()
+    assert artifact_compatibility(None, h5_path, config) == (False, "duplicate canonical layer identities")
+
+    with h5py.File(h5_path, "a") as h5:
+        del h5["layers/longname"]
+        h5.create_dataset("layers/longname", data=["a", "b"], dtype=h5py.string_dtype("utf-8"))
+        h5.create_dataset("layers/n_tail", data=[1])
+    assert artifact_compatibility(None, h5_path, config) == (False, "unaligned canonical layer records")
+    assert artifact_compatibility(None, h5_path, dict(config, fix_fingers="DKS")) == (
+        False, "measurement setting differs: fix_fingers")
+    h5_path.write_text("not HDF5")
+    assert artifact_compatibility(None, h5_path, config) == (False, "unreadable or invalid HDF5: OSError")
+
+
+def test_missing_hdf5_is_never_complete_with_or_without_legacy_csv(tmp_path):
+    csv_path, h5_path, config = write_pair(tmp_path)
+    h5_path.unlink()
+    assert artifact_compatibility(csv_path, h5_path, config) == (False, "missing CSV/HDF5 pair")
+    csv_path.unlink()
+    assert artifact_compatibility(csv_path, h5_path, config) == (False, "missing HDF5 layer records")
+
+
+def test_present_but_empty_or_non_file_legacy_csv_is_not_treated_as_absent(tmp_path):
+    csv_path, h5_path, config = write_pair(tmp_path)
+    csv_path.write_bytes(b"")
+    assert artifact_compatibility(csv_path, h5_path, config) == (False, "empty CSV")
+    csv_path.unlink()
+    csv_path.mkdir()
+    assert artifact_compatibility(csv_path, h5_path, config) == (False, "missing CSV/HDF5 pair")

@@ -107,7 +107,8 @@ def test_coverage_frame_and_scores_keep_measurements_separate(universe, tmp_path
     result = build_tables(universe.manifests, [universe.fingerprints], universe.root, frame, [scores])
     row = result["models"].set_index("model_key").loc[key]
     assert row.coverage_status == "partial" and row.inclusion_prob == .2 and row.stratum == "text:<1B"
-    assert row.skipped_tensors and any(item["reason"] == "unsupported_representation" for item in row.skipped_tensors)
+    skipped = result["coverage"].query("model_key == @key and status == 'skipped'")
+    assert "unsupported_representation" in set(skipped.reason)
     assert result["models"].set_index("model_key").loc["org/child@" + SHA10, "stratum"] == "lab"
     assert len(result["scores"]) == 1 and not result["scores"].revision_verified.any()
     assert result["predictions"].empty
@@ -144,3 +145,39 @@ def test_unknown_hub_gating_strings_are_explicit_errors(tmp_path, gated):
     (tmp_path / "model.manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="gated"):
         build_tables(tmp_path, [], tmp_path)
+
+
+def test_views_carry_row_block_delta_measurements(universe):
+    """Delta values are copied from the fingerprint; unreported ranks are null."""
+    from safetensors import safe_open
+    from safetensors.numpy import save_file
+    import numpy as np
+    key = "org/child@" + SHA2
+    path = next(p for p in universe.fingerprints.glob("*.row_blocks.fingerprint.safetensors")
+                if f"__{SHA2}." in p.name)
+    with safe_open(path, framework="numpy") as handle:
+        metadata, tensors = handle.metadata(), {name: handle.get_tensor(name) for name in handle.keys()}
+    count = len(json.loads(metadata["names"]))
+    statuses = ["ok", "below_floor"] + ["no_parent"] * (count - 2)
+    confidences = ["high", "low"] + ["none"] * (count - 2)
+    scalars = np.full((count, 3), np.nan, np.float32)
+    scalars[:, 2] = -1
+    scalars[0], scalars[1] = (0.25, 0.01, 3), (0.75, 0.002, -1)
+    tensors["delta_scalars"] = scalars
+    metadata.update(delta_status=json.dumps(statuses), delta_confidence=json.dumps(confidences))
+    save_file(tensors, str(path), metadata=metadata)
+    views = build_tables(universe.manifests, [universe.fingerprints], universe.root)["views"]
+    own = views[views.model_key == key].sort_values("view_index").reset_index(drop=True)
+    assert own.delta_status.tolist() == statuses and own.delta_rank_confidence.tolist() == confidences
+    assert own.delta_rank[0] == 3 and pd.isna(own.delta_rank[1]) and own.delta_rank[2:].isna().all()
+    assert own.delta_frac_identical[:2].tolist() == pytest.approx([0.25, 0.75])
+    assert own.delta_rel_update_norm[:2].tolist() == pytest.approx([0.01, 0.002])
+    assert own.delta_frac_identical[2:].isna().all() and own.delta_rel_update_norm[2:].isna().all()
+
+
+def test_skipped_tensors_have_one_home_in_coverage(tables):
+    assert "skipped_tensors" not in tables["models"]
+    skipped = tables["coverage"][tables["coverage"].status == "skipped"]
+    assert len(skipped) and skipped.reason.notna().all()
+    measured = tables["coverage"][tables["coverage"].status == "measured"]
+    assert measured.reason.isna().all()  # Missing text is null, not "".

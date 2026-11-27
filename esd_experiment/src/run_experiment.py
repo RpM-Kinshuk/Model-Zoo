@@ -7,7 +7,7 @@ This script:
 2. Dispatches analysis jobs to available GPUs using gputracker
 3. Handles both standard models and PEFT adapters robustly
 4. Supports resume by skipping already-analyzed models
-5. Saves per-model ESD metrics as CSV files
+5. Saves per-model ESD layer records and spectra as metrics/<model>.h5
 
 Usage:
     python run_experiment.py --model_list models.csv --output_dir results/ --gpus 0 1 2 3
@@ -117,15 +117,19 @@ class RunOutcomes:
 def _completed_models_from_artifacts(output_dir: Path, expected_config=None, evidence=False, evidence_options=None) -> set[str]:
     completed = set()
 
-    stats_dir = output_dir / "stats"
     metrics_dir = output_dir / "metrics"
+    # Only runs before HDF5-only output have stats/<safe>.csv. Such a legacy CSV
+    # must still agree with its HDF5; a CSV without an HDF5 is never complete.
+    legacy_stats_dir = output_dir / "stats"
 
-    if stats_dir.exists():
-        for csv_file in stats_dir.glob("*.csv"):
-            metrics_file = metrics_dir / f"{csv_file.stem}.h5"
-            if not artifact_compatibility(csv_file, metrics_file, expected_config)[0]:
+    if metrics_dir.exists():
+        for metrics_file in sorted(metrics_dir.glob("*.h5")):
+            if metrics_file.name.startswith("."):
                 continue
-            model_id = csv_file.stem.replace("--", "/").replace("__", "@")
+            legacy_csv = legacy_stats_dir / f"{metrics_file.stem}.csv"
+            if not artifact_compatibility(legacy_csv, metrics_file, expected_config)[0]:
+                continue
+            model_id = metrics_file.stem.replace("--", "/").replace("__", "@")
             pinned_id = model_id
             revision = ""
             if evidence or evidence_options is not None:
@@ -810,6 +814,7 @@ def generate_commands(model_df: pd.DataFrame, output_dir: Path, args) -> list:
             cmd_parts.append("--cache_self")
         if enabled and not args.overwrite:
             stem = safe_filename(model_id)
+            # The HDF5 decides; an older run's stats CSV, if present, must agree with it.
             if artifact_compatibility(output_dir / "stats" / f"{stem}.csv", output_dir / "metrics" / f"{stem}.h5")[0]:
                 if not evidence_complete(output_dir, model_id, revision_norm, measurement=measurement_config(args), options=args,
                                          stratum=_normalize_text(row.get("stratum", "")) or getattr(args, "stratum", "")):
@@ -900,9 +905,9 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
     for _, row in model_df.iterrows():
         model_id = _normalize_text(row["model_id"])
         stem = safe_filename(model_id)
-        csv_path = output_dir / "stats" / f"{stem}.csv"
+        legacy_csv_path = output_dir / "stats" / f"{stem}.csv"  # Present only in older runs.
         h5_path = output_dir / "metrics" / f"{stem}.h5"
-        if not (csv_path.exists() or h5_path.exists()):
+        if not (legacy_csv_path.exists() or h5_path.exists()):
             continue
         expected = None if args is None else measurement_config(
             args, model_id=model_id,
@@ -912,7 +917,7 @@ def filter_models_to_run(model_df: pd.DataFrame, output_dir: Path, overwrite: bo
             loader_scenario=_normalize_text(row.get("preflight_effective_loader", ""))
                 or _normalize_text(row.get("loader_scenario", "")),
         )
-        compatible, reason = artifact_compatibility(csv_path, h5_path, expected)
+        compatible, reason = artifact_compatibility(legacy_csv_path, h5_path, expected)
         if not compatible:
             raise ValueError(
                 f"Existing results for {model_id} are incompatible ({reason}). "

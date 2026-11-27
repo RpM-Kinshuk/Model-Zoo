@@ -101,6 +101,29 @@ def test_summarize_discovers_runs_with_only_worker_records(tmp_path, monkeypatch
     assert commands[0][-1] == str(tmp_path / "runs" / "review")
 
 
+def test_summarize_discovers_hdf5_only_runs_and_counts_legacy_pairs_once(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    (runs / "current" / "metrics").mkdir(parents=True)
+    (runs / "current" / "metrics" / "org--model.h5").touch()
+    # A legacy run's CSV sits beside its HDF5; it is the same run, not another.
+    for directory, name in (("metrics", "org--model.h5"), ("stats", "org--model.csv")):
+        (runs / "legacy" / directory).mkdir(parents=True)
+        (runs / "legacy" / directory / name).touch()
+    (runs / "csv-only" / "stats").mkdir(parents=True)
+    (runs / "csv-only" / "stats" / "org--model.csv").touch()
+    assert [run.name for run in sorted(runs.iterdir()) if tui._has_run_records(run)] == ["current", "legacy"]
+    commands = []
+
+    def capture(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(tui.subprocess, "run", capture)
+    monkeypatch.setattr(tui, "_ask", lambda *args, **kwargs: "1")
+    assert tui.main(["--workspace", str(tmp_path), "summarize"]) == 0
+    assert commands[0][-1] == str(runs / "current")
+
+
 def test_publish_skips_metadata_only_runs(tmp_path, monkeypatch):
     runs = tmp_path / "runs"
     for name in ("default", "complete"):

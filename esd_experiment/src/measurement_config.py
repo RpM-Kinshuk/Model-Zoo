@@ -96,19 +96,45 @@ def measurement_config(args, *, model_id=None, revision="", source_model="",
     return config
 
 
-def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
+def _legacy_csv_present(csv_path) -> bool:
+    """Whether a legacy per-layer CSV sits beside the HDF5 record.
+
+    Only a path that does not exist counts as absent. Permission or other read
+    errors propagate so the caller reports the artifact as unreadable.
+    """
+    if csv_path is None:
+        return False
+    try:
+        Path(csv_path).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def artifact_compatibility(csv_path, h5_path: Path, expected=None):
     """Return (compatible, reason); never modify or accept unreadable artifacts.
+
+    ``metrics/<safe>.h5`` is the per-layer record and decides completion alone.
+    Current runs write no CSV, so pass the legacy ``stats/<safe>.csv`` path (or
+    None). When an older run's CSV is present, it must still match the HDF5 row
+    for row: identities, order, model identity and alpha values.
 
     Extra recorded runtime provenance is permitted. All requested settings must
     match. This checks schema/alignment, not a checksum of every spectral value.
     """
     import h5py
 
+    legacy_csv = False
     try:
-        if not csv_path.is_file() or not h5_path.is_file():
-            return False, "missing CSV/HDF5 pair"
-        if csv_path.stat().st_size == 0:
-            return False, "empty CSV"
+        legacy_csv = _legacy_csv_present(csv_path)
+        if legacy_csv:
+            csv_path = Path(csv_path)
+            if not csv_path.is_file() or not h5_path.is_file():
+                return False, "missing CSV/HDF5 pair"
+            if csv_path.stat().st_size == 0:
+                return False, "empty CSV"
+        elif not h5_path.is_file():
+            return False, "missing HDF5 layer records"
         with h5py.File(h5_path, "r") as h5:
             if str(h5.attrs.get("numerics_version", "")) != NUMERICS_VERSION:
                 return False, "different or missing numerics_version"
@@ -155,38 +181,50 @@ def artifact_compatibility(csv_path: Path, h5_path: Path, expected=None):
             if len(set(names)) != n_layers:
                 return False, "duplicate canonical layer identities"
             alphas = layers["alpha"][:]
-            full_name = h5.attrs.get("full_name")
-            if isinstance(full_name, bytes):
-                full_name = full_name.decode("utf-8")
-
-            # CSV is streamed: only canonical HDF5 names and alphas are read,
-            # never the (potentially very large) eigenvalue datasets.
-            with csv_path.open("r", encoding="utf-8", newline="") as handle:
-                reader = csv.DictReader(handle, strict=True)
-                columns = reader.fieldnames or []
-                required = {"longname", "alpha"}
-                if full_name is not None:
-                    required.add("model_id")
-                if not required.issubset(columns) or len(columns) != len(set(columns)):
-                    return False, "missing or duplicate CSV identity/alpha columns"
-                row_count = 0
-                for index, row in enumerate(reader):
-                    if index >= n_layers:
-                        return False, "CSV/HDF5 row count differs"
-                    if None in row or any(row.get(key) is None for key in required):
-                        return False, "malformed CSV layer row"
-                    if row["longname"] != names[index]:
-                        return False, "CSV/HDF5 layer identities or order differ"
-                    if full_name is not None and row["model_id"] != full_name:
-                        return False, "CSV/HDF5 model identity differs"
-                    csv_alpha = float(row["alpha"]) if row["alpha"].strip() else math.nan
-                    h5_alpha = float(alphas[index])
-                    if not ((math.isnan(csv_alpha) and math.isnan(h5_alpha)) or
-                            math.isclose(csv_alpha, h5_alpha, rel_tol=1e-12, abs_tol=0.0)):
-                        return False, "CSV/HDF5 alpha values differ"
-                    row_count += 1
-                if row_count != n_layers:
-                    return False, "CSV/HDF5 row count differs"
+            if legacy_csv:
+                full_name = h5.attrs.get("full_name")
+                if isinstance(full_name, bytes):
+                    full_name = full_name.decode("utf-8")
+                mismatch = _legacy_csv_mismatch(csv_path, names, alphas, full_name)
+                if mismatch is not None:
+                    return False, mismatch
     except (OSError, ValueError, TypeError, KeyError, AttributeError, csv.Error) as exc:
-        return False, f"unreadable or invalid CSV/HDF5: {type(exc).__name__}"
+        artifacts = "CSV/HDF5" if legacy_csv else "HDF5"
+        return False, f"unreadable or invalid {artifacts}: {type(exc).__name__}"
     return True, "compatible"
+
+
+def _legacy_csv_mismatch(csv_path, names, alphas, full_name):
+    """Return why a legacy CSV disagrees with its HDF5 record, or None.
+
+    The CSV is streamed against the canonical HDF5 names and alphas only, never
+    the (potentially very large) eigenvalue datasets.
+    """
+    n_layers = len(names)
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, strict=True)
+        columns = reader.fieldnames or []
+        required = {"longname", "alpha"}
+        if full_name is not None:
+            required.add("model_id")
+        if not required.issubset(columns) or len(columns) != len(set(columns)):
+            return "missing or duplicate CSV identity/alpha columns"
+        row_count = 0
+        for index, row in enumerate(reader):
+            if index >= n_layers:
+                return "CSV/HDF5 row count differs"
+            if None in row or any(row.get(key) is None for key in required):
+                return "malformed CSV layer row"
+            if row["longname"] != names[index]:
+                return "CSV/HDF5 layer identities or order differ"
+            if full_name is not None and row["model_id"] != full_name:
+                return "CSV/HDF5 model identity differs"
+            csv_alpha = float(row["alpha"]) if row["alpha"].strip() else math.nan
+            h5_alpha = float(alphas[index])
+            if not ((math.isnan(csv_alpha) and math.isnan(h5_alpha)) or
+                    math.isclose(csv_alpha, h5_alpha, rel_tol=1e-12, abs_tol=0.0)):
+                return "CSV/HDF5 alpha values differ"
+            row_count += 1
+        if row_count != n_layers:
+            return "CSV/HDF5 row count differs"
+    return None

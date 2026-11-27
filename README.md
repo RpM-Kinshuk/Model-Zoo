@@ -146,8 +146,8 @@ for launcher options.
 ```text
 analysis_runs/phase2/my_run/
 ├── models.csv              pinned list: ready/held status, sizes, config labels
-├── stats/<model>.csv       per-layer scalars: alpha, fit quality, rank
-├── metrics/<model>.h5      full spectra (/eigs), fits (/layers), coverage
+├── metrics/<model>.h5      per-layer record: scalars and fits (/layers),
+│                           full spectra (/eigs), coverage, model identity
 ├── evidence/<safe>/        manifest, fingerprints, full spectra, parent deltas
 ├── summary.csv             per-model index, written by analyze_results.py
 ├── oversized_models.csv    models routed to row-block-only evidence, if any
@@ -160,8 +160,10 @@ $ZOO_DATA/
 └── builds/current/         the zoo snapshot that queries read
 ```
 
-The CSV/HDF5 pairs are authoritative; `summary.csv` and the zoo are rebuildable
-views of them. See [reading a run](docs/operations/analysis.md#reading-a-run)
+The HDF5 files are authoritative; `summary.csv` and the zoo are rebuildable
+views of them. Runs made before HDF5-only output also hold `stats/<model>.csv`,
+a copy of `/layers`; it is kept, must still match its HDF5, and is never written
+for new runs. See [reading a run](docs/operations/analysis.md#reading-a-run)
 for every `outcome` and coverage field.
 
 <a name="architecture"></a>
@@ -360,10 +362,11 @@ RAM and other supervision remain active.
 <details>
 <summary><strong>Recover and resume</strong> · Failure boundaries and retry behavior</summary>
 
-Compatible completed pairs are skipped. Interrupted models restart from the
-model boundary, not an individual layer. Resume requires the same manifest,
-pins and measurement settings. Incompatible/incomplete outputs require
-inspection; use a fresh directory for changed conventions.
+Compatible completed HDF5 records (and any matching legacy CSV) are skipped.
+Interrupted models restart from the model boundary, not an individual layer.
+Resume requires the same manifest, pins and measurement settings.
+Incompatible/incomplete outputs require inspection; use a fresh directory for
+changed conventions.
 `--overwrite` deliberately replaces selected results.
 
 Batch workers make one whole-job attempt. The standalone worker exposes
@@ -597,11 +600,13 @@ success. `--no-oversized_models_evidence` (or `--no-evidence`) disables them.
 <summary><strong>Packages and the snapshot</strong> · Layout, immutability, tables and versions</summary>
 
 A package lives at `<packages_root>/<shard>/<safe>/<conventions_id>/`. It holds
-only derived evidence and, for full mode, `esd/stats.csv` and `esd/metrics.h5`;
+only derived evidence and, for full mode, `esd/metrics.h5` (packages from runs
+before HDF5-only output also hold their `esd/stats.csv`);
 raw checkpoints and cached parent blocks are never included. `package.json`
 records pinned identity, kind, conventions, artifact SHA256 hashes, reuse counts
 and source-run provenance. An identical existing package is reused; different
-contents never overwrite it.
+contents, including a different file set, never overwrite it: publication fails
+and names the differing files.
 
 | Table         | Contents                                                            |
 | ------------- | ------------------------------------------------------------------- |
@@ -620,9 +625,9 @@ explicit inputs; legacy builds remain available through `--manifests` and
 `--fingerprints`. Open readers keep their original snapshot while a new one is
 published.
 
-New artifacts use evidence version 3 and zoo version 2; numerical conventions
+New artifacts use evidence version 3 and zoo version 3; numerical conventions
 remain numerics 7, HDF5 format 2.0. Readers accept evidence versions 1–3 and zoo
-versions 0–2.
+versions 0–3.
 
 </details>
 

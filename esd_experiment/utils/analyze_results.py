@@ -2,6 +2,8 @@
 """Summarize selected models, recorded outcomes and canonical layer scalars.
 
 summary.csv is a rebuildable index, not completion evidence or a live monitor.
+Per-model rows come from metrics/<model>.h5 (/layers and attributes); older
+runs may also hold stats/<model>.csv, which must agree with its HDF5.
 Eigenvalues stay in their HDF5 files.
 """
 import argparse
@@ -32,7 +34,8 @@ CHECKPOINT_COUNTS = ("stored_tensors", "analyzed_tensors", "skipped_tensors")
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results_dir", type=Path, nargs="+", required=True,
-                        help="One or more run roots containing models.csv, logs/ and/or stats/ and metrics/")
+                        help="One or more run roots containing models.csv, logs/ and/or metrics/ "
+                             "(older runs also have stats/)")
     parser.add_argument("--output", type=Path,
                         help="Summary CSV path (default: summary.csv for one run; required for multiple runs)")
     parser.add_argument("--model_list", type=Path,
@@ -82,10 +85,15 @@ def compute_model_summary(layers):
 
 
 def read_model_summary(csv_path, h5_path, expected=None):
-    """Validate one pair and read its canonical scalars; never read /eigs or /alpha."""
+    """Validate one HDF5 record and read its canonical scalars; never read /eigs or /alpha.
+
+    csv_path is the legacy stats CSV (or None). Runs without one report an
+    empty csv_path; a present legacy CSV must still match the HDF5.
+    """
     compatible, reason = artifact_compatibility(csv_path, h5_path, expected)
     if not compatible:
         raise ValueError(reason)
+    legacy_csv_path = str(csv_path.resolve()) if csv_path is not None and csv_path.is_file() else ""
     with h5py.File(h5_path, "r") as h5:
         config = json.loads(h5.attrs["measurement_config_json"])
         settings = {name: config[name] for name in MEASUREMENT_FIELDS if name != "layer_selection_version"}
@@ -123,7 +131,7 @@ def read_model_summary(csv_path, h5_path, expected=None):
             base_resolved_commit_hash=loading_info.get("base_resolved_commit_hash"),
             base_transfer_policy=(f"bert_pretraining_to_task_v{transfer['policy_version']}" if transfer else None),
             excluded_base_key_count=len(transfer["excluded_base_keys"]) if transfer else None,
-            csv_path=str(csv_path.resolve()), h5_path=str(h5_path.resolve()),
+            csv_path=legacy_csv_path, h5_path=str(h5_path.resolve()),
             coverage_status="unknown", weight_usage_status="unknown", matrix_coverage="unknown", **settings,
         )
         summary.update({name: None for name in (*MODULE_COUNTS, *WEIGHT_COUNTS, *CHECKPOINT_COUNTS)})
@@ -228,14 +236,15 @@ def read_selected_models(path):
 
 def summarize_outcome(results_dir, name, selected=None):
     """Prefer verified artifacts; keep last-recorded failures and unknowns explicit."""
-    csv_path, h5_path = results_dir / "stats" / f"{name}.csv", results_dir / "metrics" / f"{name}.h5"
+    h5_path = results_dir / "metrics" / f"{name}.h5"
+    csv_path = results_dir / "stats" / f"{name}.csv"  # Legacy runs only.
     status_path = results_dir / "logs" / "terminal_status" / f"{name}.json"
     row = {
         "model_id": selected["model_id"] if selected else "", "selected": selected is not None,
         "outcome": "unrecorded", "outcome_reason": "no_artifacts_or_terminal_record",
         "outcome_stage": "", "outcome_message": "", "outcome_pin_status": "unknown",
         "artifact_status": "missing", "artifact_error": "",
-        "csv_path": str(csv_path), "h5_path": str(h5_path),
+        "csv_path": str(csv_path) if csv_path.exists() else "", "h5_path": str(h5_path),
         "terminal_status_path": "", "terminal_error": "",
     }
     expected = None
@@ -273,6 +282,8 @@ def summarize_outcome(results_dir, name, selected=None):
             row["terminal_error"] = str(error)
             terminal = None
 
+    # The *_artifact_pair labels are kept for existing summary readers; they
+    # describe the HDF5 record plus a legacy CSV only where one exists.
     if row["artifact_status"] == "valid":
         row.update(outcome="success", outcome_reason="valid_artifact_pair",
                    outcome_pin_status="matched" if selected else "not_checked")
@@ -308,7 +319,7 @@ def print_model_stats(summary, verbose=False, mixed_settings=False):
                                           summary["outcome"].value_counts().items()))
     valid = summary.loc[summary["artifact_status"] == "valid"]
     invalid = summary["artifact_status"].eq("invalid").sum()
-    print(f"Valid artifact pairs: {len(valid)}; invalid/incomplete pairs: {invalid}; "
+    print(f"Valid artifacts: {len(valid)}; invalid/incomplete artifacts: {invalid}; "
           f"without artifacts: {summary['artifact_status'].eq('missing').sum()}")
     if valid.empty:
         return
@@ -359,7 +370,11 @@ def write_summary(summary, output_path):
 
 
 def read_run_summaries(results_dir, model_list=None):
-    """Rebuild one run's rows from authoritative artifacts and recorded outcomes."""
+    """Rebuild one run's rows from authoritative artifacts and recorded outcomes.
+
+    Models are discovered from metrics/*.h5, legacy stats/*.csv and terminal
+    records; one name per model, so a legacy CSV/HDF5 pair is one row.
+    """
     stats_dir, metrics_dir = results_dir / "stats", results_dir / "metrics"
     terminal_dir = results_dir / "logs" / "terminal_status"
     explicit_model_list = model_list is not None

@@ -218,16 +218,17 @@ def test_checkpoint_worker_writer_summary_and_resume(tmp_path, monkeypatch):
             reference = torch.linalg.svdvals(tensors[name].double()).square().sort().values.numpy()
             np.testing.assert_allclose(h5["eigs"][i], reference, rtol=1e-12, atol=1e-12)
     summary = read_model_summary(csv_path, h5_path)
+    assert not csv_path.exists() and summary["csv_path"] == ""  # HDF5-only record.
     assert summary["analysis_source"] == "checkpoint"
     assert summary["stored_tensors"] == len(tensors)
     assert summary["coverage_status"] == "checkpoint_tensors"
     assert summary["candidate_modules"] is None and summary["measured_modules"] is None
     assert summary["registered_tensors"] is None and summary["weight_usage_status"] == "not_applicable"
     assert worker.main() == 0 and len(calls) == 1
-    before = [path.read_bytes() for path in (csv_path, h5_path)]
+    before = h5_path.read_bytes()
     monkeypatch.setattr(sys, "argv", arguments + ["--analysis_source", "model"])
     assert worker.main() == 1
-    assert [path.read_bytes() for path in (csv_path, h5_path)] == before
+    assert h5_path.read_bytes() == before and not csv_path.exists()
 
 
 def test_runner_routes_checkpoint_mode_without_backend_probes(tmp_path, monkeypatch):
@@ -468,10 +469,10 @@ def test_auto_fallback_records_source_and_resumes_without_reinterpreting(auto_wo
     # A later environment capable of model loading must not promote old tensor results.
     case.load.side_effect = lambda **kwargs: pytest.fail("Resume must not try a different source")
     assert case.worker.main() == 0
-    before = [path.read_bytes() for path in (csv_path, h5_path)]
+    before = h5_path.read_bytes()
     monkeypatch.setattr(sys, "argv", case.arguments + ["--analysis_source", "model"])
     assert case.worker.main() == 1
-    assert [path.read_bytes() for path in (csv_path, h5_path)] == before
+    assert h5_path.read_bytes() == before and not csv_path.exists()
     assert case.load.call_count == case.inspection.call_count == 1
 
 

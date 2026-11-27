@@ -31,8 +31,9 @@ python -m zoo.cli publish --runs /path/to/run-a /path/to/run-b
 ```
 
 A package lives at `<packages_root>/<shard>/<safe>/<conventions_id>/`. It contains
-only derived evidence files and, for full mode, `esd/stats.csv` and
-`esd/metrics.h5`; raw checkpoint and cached parent blocks are never included.
+only derived evidence files and, for full mode, `esd/metrics.h5` (older
+packages may also hold `esd/stats.csv`); raw checkpoint and cached parent blocks
+are never included.
 `package.json` records pinned identity, kind, conventions, artifact SHA256 hashes,
 reuse counts and source-run provenance. Sources outside `data_root` have an
 absolute provenance-only `source_run`; stored database artifact links remain
@@ -178,7 +179,8 @@ extend_scores(parent, [new_scores], out, data_root,
 the inherited table with matching multiplicity. To retain an unpinned source
 without attaching it by repository name, import it against an empty model
 identity table; all source records then remain explicitly unmatched. Every
-inherited file except `scores.parquet` and `zoo.json` is copied byte-for-byte,
+inherited file except `scores.parquet`, `zoo.json` and `collection.json` is shared
+byte-for-byte (hardlinked, or copied across filesystems), keeping its zoo version,
 including existing source snapshots. New source indices follow inherited ones.
 The new metadata records parent-generation hashes; the parent is preserved and
 the new generation uses the normal atomic publication and path guards. This
@@ -194,18 +196,28 @@ Older generations remain available until explicitly cleaned up.
 
 | Table | Contents |
 | --- | --- |
-| `models` | Pinned identity, metadata, coverage and artifact links |
-| `views` | Measured matrices and their block hashes |
+| `models` | Pinned identity, metadata, coverage status and artifact links |
+| `views` | Measured matrices, their block hashes and row-block delta measurements |
 | `layers` | Per-layer alpha, fit quality, spectral metrics and HDF5 row indices |
-| `coverage` | Measured/skipped tensors and reasons |
+| `coverage` | Every stored tensor: measured or skipped, with its reason |
 | `lineage` | Candidate relationships with evidence tiers and statistics |
 | `scores` | Measured scores and revision verification |
 | `predictions` | Separate prediction records; empty in v0 |
 
+Each fact has one home, joined on `model_key`: skipped tensors are the
+`coverage` rows with `status = 'skipped'`. Every missing value is null, including
+absent artifact links, `view_name`, `slice` and coverage `reason`/`geometry`; no
+table stores an empty string. Tables are zstd-compressed Parquet. The `views`
+delta columns copy the row-block evidence against the recorded parent:
+`delta_status` and `delta_rank_confidence` keep the evidence vocabulary
+(`no_parent`/`none` without a parent), `delta_frac_identical` and
+`delta_rel_update_norm` are measured values, and `delta_rank` is null whenever no
+rank is reported (identical, below the rounding floor or no parent).
+
 Eigenvalues remain in HDF5. For full packages, `models.full_weight_spectra` links to
 `esd/metrics.h5`; each `layers.h5_index` indexes that file's aligned `/layers`
 and `/eigs` records. `view_name` maps exact stored identities when possible and
-is empty otherwise. Stored-view spectra remain beside their full tensor
+is null otherwise. Stored-view spectra remain beside their full tensor
 fingerprint under the descriptive filename, including second-round views absent from the
 original runner metrics. Legacy direct-input builds keep their original
 stored-view spectrum links; their `layers` table is empty. Older six-table zoo
@@ -370,10 +382,19 @@ height. Rebuilds tag existing lineage evidence with `+row_block_delta`, retainin
 its estimand, direction, tier, score and calibration status. A measured update
 does not verify ancestry or predict skill changes.
 
-New artifacts use `EVIDENCE_VERSION=3` and builds `ZOO_VERSION=2`; numerical
+New artifacts use `EVIDENCE_VERSION=3` and builds `ZOO_VERSION=3`; numerical
 conventions remain NUMERICS7/FORMAT2.0. Evidence readers accept versions 1, 2 and 3;
-zoo readers accept versions 0, 1 and 2, translating legacy numbered columns to
+zoo readers accept versions 0 to 3, translating legacy numbered columns to
 `row_block_fingerprint`, `full_weight_fingerprint` and `full_weight_spectra`.
+
+**Zoo version 3 migration (owner-approved, 2026-11-27).** Removed
+`models.skipped_tensors`, an exact copy of the skipped `coverage` rows (321,799
+of 321,799 in the 703-model catalog); added the five `views` delta columns;
+wrote every missing value as null instead of `""`; switched Parquet compression
+from snappy to zstd. Version 0–2 generations are untouched and still readable:
+`open_tables` presents them in the current columns, and a score extension keeps
+its parent's version and schema. Score retention treats `""` and null as one
+missing value, so rebuilding an older output does not duplicate retained scores.
 Old six-table builds have an empty `layers` table. Current default packages use
 evidence version 3; select older conventions explicitly or regenerate evidence.
 Rebuild older generations for query clients that require the current `ZOO_VERSION`.

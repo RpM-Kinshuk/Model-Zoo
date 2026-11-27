@@ -36,8 +36,10 @@ tables, not as attention operators. Selection 4 records generic parameter discov
 results remain readable but require a fresh directory under the new selection.
 Unknown higher-dimensional parameters are not reshaped. Quantization/adapter
 helpers and parametrization internals are excluded with recorded reasons.
-Results are per-layer CSV and canonical HDF5 records with spectra, missing-fit
-status and coverage. Use a fresh output directory when settings change.
+Each model's result is one HDF5 file, `metrics/<model>.h5`: canonical per-layer
+records with spectra, missing-fit status and coverage. No per-layer CSV is
+written; an older run's `stats/<model>.csv` is still checked against its HDF5
+on resume. Use a fresh output directory when settings change.
 Model and adapter-base revisions must be full commit SHAs. Remote code is off;
 use `--trust_remote_code` only for reviewed repositories.
 
@@ -79,7 +81,8 @@ python esd_experiment/analyze_results.py \
 
 Each row keeps `run_dir`, pins, settings and artifact paths. Repeated model IDs
 and failed attempts remain separate; mixed settings are not pooled. This reads
-the original pairs and outcomes, not potentially stale per-run summaries.
+the original HDF5 records (and any legacy CSVs) and outcomes, not potentially
+stale per-run summaries. `csv_path` is empty for runs without a legacy CSV.
 
 Check `matrix_coverage` as well as `outcome`: a valid result can still be partial
 (for example, embeddings measured but packed quantized projections skipped).

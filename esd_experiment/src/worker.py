@@ -373,31 +373,42 @@ def save_h5(
 
 def save_results(
     metrics: dict,
-    output_path: Path,
+    h5_path: Path,
     model_id: str,
     is_adapter: bool,
     source_model: Optional[str] = None,
     base_model_relation: str = "",
     fix_fingers: str = "",
-    h5_output_path: Optional[Path] = None,
     save_eigs: bool = False,
     measurement_config: Optional[dict] = None,
     coverage: Optional[dict] = None,
+    *,
+    h5_output_path: Optional[Path] = None,
 ):
     """
-    Save scalar metrics to CSV and canonical aligned layer records to HDF5.
-    Eigenvalues, when requested, are stored only in HDF5. The root alpha matrix
+    Save canonical aligned layer records, and spectra when requested, to HDF5.
+
+    The HDF5 file is the single per-layer record: /layers holds every scalar
+    column, and the file attributes hold the model identity (full_name,
+    is_adapter, source_model, base_model_relation) that earlier runs also
+    repeated in a stats/<safe>.csv. No CSV is written. The root alpha matrix
     is a derived compatibility view; /layers/longname is the identity authority.
-    
+
     Args:
         metrics: Dictionary of metrics from net_esd_estimator
-        output_path: Path to save CSV
+        h5_path: Path of the HDF5 file to write (the worker passes a temporary
+            path and renames it into metrics/ afterwards)
         model_id: Model identifier
         is_adapter: Whether this is an adapter model
         source_model: Base model for adapters
         base_model_relation: Relation tag (e.g., adapter/base/finetune)
         fix_fingers: xmin strategy used (DKS/xmin_mid/xmin_peak)
+        h5_output_path: Former call shape, kept for existing reproduction
+            scripts that passed a CSV path second and the HDF5 path here. The
+            HDF5 is then written here and nothing is written at the CSV path.
     """
+    if h5_output_path is not None:
+        h5_path = h5_output_path
     records = _prepare_layer_records(metrics)
     longnames, alphas = records["longname"], records["alpha"]
     eigs = records.get("eigs") if save_eigs else None
@@ -407,39 +418,13 @@ def save_results(
         mat, module_names, num_layers = np.empty((0, 0)), [], 0  # No inferred depth from checkpoint keys.
     else:
         mat, module_names, num_layers = build_tensor_from_pairs(longnames, alphas)
-    df = pd.DataFrame({key: values for key, values in records.items() if key != "eigs"})
-    df["alpha"] = pd.to_numeric(df["alpha"], errors="raise")
-    
-    # Add metadata columns
-    df.insert(0, "model_id", model_id)
-    df.insert(1, "is_adapter", is_adapter)
-    if source_model:
-        df.insert(2, "source_model", source_model)
-    
-    # Save to CSV
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_path, index=False)
-    print(f"Saved results to: {output_path}")
-    
-    # Print summary statistics
-    if "alpha" in df.columns:
-        alpha_values = df.loc[np.isfinite(df["alpha"]) & (df["alpha"] > 1), "alpha"]
-        print(f"Finite power-law fits: {len(alpha_values)}/{len(df)} layers")
-        if len(alpha_values) > 0:
-            print(f"Alpha statistics:")
-            print(f"  Mean: {alpha_values.mean():.4f}")
-            print(f"  Median: {alpha_values.median():.4f}")
-            print(f"  Std: {alpha_values.std():.4f}")
-            print(f"  Range: [{alpha_values.min():.4f}, {alpha_values.max():.4f}]")
-            print(f"  Layers: {len(alpha_values)}")
+    # Reject non-numeric alpha values before anything is written.
+    alpha_series = pd.to_numeric(pd.Series(alphas, dtype=object), errors="raise")
 
-    if h5_output_path is None:
-        h5_path = output_path.parent.parent / "metrics" / f"{safe_filename(model_id)}.h5"
-    else:
-        h5_path = h5_output_path
     relation_attr = base_model_relation.strip() or ("adapter" if is_adapter else "base")
     file_attrs = {
         "full_name": model_id,
+        "is_adapter": str(bool(is_adapter)).lower(),
         "source_model": source_model or "",
         "base_model_relation": relation_attr,
         "fix_fingers": fix_fingers,
@@ -450,6 +435,17 @@ def save_results(
     save_h5(h5_path, mat, module_names, num_layers, file_attrs, eigs=eigs,
             layer_records=records, measurement_config=measurement_config, coverage=coverage)
     print(f"Saved H5 layer records to: {h5_path}")
+
+    # Print summary statistics
+    alpha_values = alpha_series[np.isfinite(alpha_series) & (alpha_series > 1)]
+    print(f"Finite power-law fits: {len(alpha_values)}/{len(alpha_series)} layers")
+    if len(alpha_values) > 0:
+        print(f"Alpha statistics:")
+        print(f"  Mean: {alpha_values.mean():.4f}")
+        print(f"  Median: {alpha_values.median():.4f}")
+        print(f"  Std: {alpha_values.std():.4f}")
+        print(f"  Range: [{alpha_values.min():.4f}, {alpha_values.max():.4f}]")
+        print(f"  Layers: {len(alpha_values)}")
 
 
 def temp_output_path(final_path: Path) -> Path:
@@ -737,32 +733,30 @@ def _main():
     display_name = args.model_id
     evidence_enabled = bool(getattr(args, "evidence", False))
     
-    # Setup output path
+    # Setup output path. metrics/<safe>.h5 is the only per-layer output. Runs
+    # before HDF5-only output also wrote stats/<safe>.csv: when present it is
+    # validated against the HDF5 on resume and removed only by --overwrite.
     output_dir = Path(args.output_dir)
-    output_file = output_dir / "stats" / f"{safe_filename(args.model_id)}.csv"
-    temp_output_file = temp_output_path(output_file)
     metrics_file = output_dir / "metrics" / f"{safe_filename(args.model_id)}.h5"
     temp_metrics_file = temp_output_path(metrics_file)
+    legacy_csv_file = output_dir / "stats" / f"{safe_filename(args.model_id)}.csv"
+    legacy_temp_csv_file = temp_output_path(legacy_csv_file)
     heartbeat = HeartbeatReporter(os.environ.get("WORKER_HEARTBEAT_FILE"), display_name)
     heartbeat.start(stage="prepare")
-    
+
     # Check if already done
     try:
         if args.overwrite:
             if evidence_enabled:
                 shutil.rmtree(evidence_dir(output_dir, repo_id, revision), ignore_errors=True)
                 (output_dir / "logs/coverage" / f"{safe_filename(display_name)}.json").unlink(missing_ok=True)
-            if output_file.exists() or metrics_file.exists() or temp_output_file.exists() or temp_metrics_file.exists():
+            previous_outputs = (legacy_temp_csv_file, temp_metrics_file, legacy_csv_file, metrics_file)
+            if any(path.exists() for path in previous_outputs):
                 print("Overwrite requested; clearing existing artifacts before regeneration")
-                cleanup_output_artifacts(
-                    temp_output_file,
-                    temp_metrics_file,
-                    output_file,
-                    metrics_file,
-                )
+                cleanup_output_artifacts(*previous_outputs)
         else:
-            if output_file.exists() or metrics_file.exists():
-                compatible, reason = artifact_compatibility(output_file, metrics_file, measurement)
+            if legacy_csv_file.exists() or metrics_file.exists():
+                compatible, reason = artifact_compatibility(legacy_csv_file, metrics_file, measurement)
                 if not compatible:
                     message = (
                         f"Existing results are incompatible ({reason}). Use a fresh output directory "
@@ -778,7 +772,7 @@ def _main():
                     args.evidence_only = True
                 else:
                     _publish_model(args, output_dir, repo_id, revision)
-                    print(f"Results already exist: {output_file}")
+                    print(f"Results already exist: {metrics_file}")
                     record_terminal_status(
                         output_dir,
                         display_name,
@@ -941,32 +935,25 @@ def _main():
             print(f"Analyzed {len(metrics.get('longname', []))} layers")
             
             def persist_results():
-                cleanup_temp_path(temp_output_file)
+                # Write a hidden temporary HDF5, then rename it into place so
+                # metrics/ never holds a partially written record.
                 cleanup_temp_path(temp_metrics_file)
                 try:
                     save_results(
                         metrics,
-                        temp_output_file,
+                        temp_metrics_file,
                         display_name,
                         is_adapter,
                         source_model if is_adapter else None,
                         base_model_relation=args.base_model_relation or "",
                         fix_fingers=args.fix_fingers or "",
-                        h5_output_path=temp_metrics_file,
                         save_eigs=getattr(args, "save_eigs", True),
                         measurement_config=measurement,
                         coverage=coverage,
                     )
-                    finalize_output_path(temp_output_file, output_file)
-                    if temp_metrics_file.exists():
-                        finalize_output_path(temp_metrics_file, metrics_file)
+                    finalize_output_path(temp_metrics_file, metrics_file)
                 except Exception as exc:
-                    cleanup_output_artifacts(
-                        temp_output_file,
-                        temp_metrics_file,
-                        output_file,
-                        metrics_file,
-                    )
+                    cleanup_output_artifacts(temp_metrics_file, metrics_file)
                     stage, reason, message = classify_runtime_error("save", exc)
                     raise LoaderFailure(stage, reason, message) from exc
 
@@ -1004,7 +991,6 @@ def _main():
         except KeyboardInterrupt:
             print("\nInterrupted by user")
             cleanup_model(model)
-            cleanup_temp_path(temp_output_file)
             cleanup_temp_path(temp_metrics_file)
             record_terminal_status(
                 output_dir,
@@ -1086,7 +1072,6 @@ def _main():
             model = None  # Release the caller's reference before clearing CUDA cache/retrying.
             cleanup_model(model)
     
-    cleanup_temp_path(temp_output_file)
     cleanup_temp_path(temp_metrics_file)
 
     if not success:

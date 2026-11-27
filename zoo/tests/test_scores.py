@@ -63,7 +63,7 @@ def test_missing_pins_scores_and_unmatched_repositories(zoo_models, tmp_path):
     ]).to_csv(path, index=False)
     result = load_leaderboard_v2(path, zoo_models)
     assert len(result) == 2 and not result.revision_verified.any()
-    assert result.source_revision.eq("").all()
+    assert result.source_revision.isna().all()
     assert set(result.model_key) == {"org/child@" + SHA2, "org/child@" + SHA10}
     assert result.value.eq(.7).all()
 
@@ -218,7 +218,7 @@ def test_model_card_annotations_are_declared_zero_is_available_and_context_retai
     result = load_model_card_scores(path, zoo_models)
     assert len(result) == 1 and result.value.tolist() == [0]
     assert result.metric.tolist() == ["accuracy"] and result.benchmark.tolist() == ["benchmark"]
-    assert result.skill.isna().all() and not result.revision_verified.any() and result.source_revision.eq("").all()
+    assert result.skill.isna().all() and not result.revision_verified.any() and result.source_revision.isna().all()
     context = result.attrs["score_source"]
     assert context["snapshot_suffix"] == ".json.gz"
     assert context["rows"][0]["json_pointer"].endswith("/metrics/0")

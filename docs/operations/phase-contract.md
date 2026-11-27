@@ -32,8 +32,9 @@ Phase 1 stops at curation, enrichment, and probe status tracking. It does not pr
 
 ## Canonical Phase 2 Outputs
 
-- `analysis_runs/phase2/<run_name>/stats/*.csv`
-- `analysis_runs/phase2/<run_name>/metrics/*.h5`
+- `analysis_runs/phase2/<run_name>/metrics/*.h5` (the per-layer record; runs before
+  2026-11-27 also wrote the same layer scalars to `stats/*.csv`, which readers of
+  those older runs keep using)
 - `analysis_runs/phase2/<run_name>/logs/failed_models.txt`
 - `analysis_runs/phase2/<run_name>/logs/failure_records.jsonl`
 

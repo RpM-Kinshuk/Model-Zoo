@@ -393,14 +393,24 @@ class _Records:
         return path
 
 
+_EIGS_DTYPE = h5py.vlen_dtype(np.dtype("float32"))
+
+
 class _Spectra:
+    """Full-weight spectra file: aligned `/layers` columns plus `/eigs`.
+
+    Streaming writers (`add`/`add_result`) need resizable, hence chunked,
+    datasets. A complete batch (`add_results`) knows its record count and uses
+    fixed-size contiguous datasets: identical names, dtypes and values, without
+    a mostly empty 1,024-record chunk per scalar column in small models.
+    """
+
     def __init__(self, path, compute_device, measurement=None):
         self.path, self.temporary = path, _atomic_path(path)
         self.compute_device = compute_device
         self.handle = h5py.File(self.temporary, "w")
         self.layers = self.handle.create_group("layers")
-        self.layers.create_dataset("longname", (0,), maxshape=(None,), dtype=h5py.string_dtype())
-        self.eigs = self.handle.create_dataset("eigs", (0,), maxshape=(None,), dtype=h5py.vlen_dtype(np.dtype("float32")))
+        self.eigs = None  # Created by the first streaming record or the batch write.
         self.config = dict(measurement) if measurement is not None else measurement_config(SimpleNamespace(analysis_source="checkpoint"))
         self.handle.attrs.update(format_version=FORMAT_VERSION, numerics_version=NUMERICS_VERSION,
                                  measurement_config_json=json.dumps(self.config, sort_keys=True),
@@ -418,7 +428,13 @@ class _Spectra:
             raise ValueError("Collector spectrum used an unexpected compute device")
         self.add_result(name, result)
 
+    def _streaming_datasets(self):
+        if self.eigs is None:
+            self.layers.create_dataset("longname", (0,), maxshape=(None,), dtype=h5py.string_dtype())
+            self.eigs = self.handle.create_dataset("eigs", (0,), maxshape=(None,), dtype=_EIGS_DTYPE)
+
     def add_result(self, name, result):
+        self._streaming_datasets()
         index = len(self.eigs)
         values = {key: value for key, value in result.items()
                   if key not in ("eigs", "longname") and isinstance(value, (str, int, float, bool, np.number))}
@@ -443,8 +459,8 @@ class _Spectra:
         self.eigs[index] = np.asarray(result["eigs"], dtype=np.float32)
 
     def add_results(self, results):
-        """Write a complete bundle with one write per scalar/string column."""
-        if len(self.eigs):
+        """Write a complete bundle once, with one write per scalar/string column."""
+        if self.eigs is not None:
             raise ValueError("Batch spectrum writing requires an empty file")
         results = list(results)
         if not results:
@@ -452,28 +468,30 @@ class _Spectra:
         rows = [{key: value for key, value in result.items()
                  if key not in ("eigs", "longname") and isinstance(value, (str, int, float, bool, np.number))}
                 for _, result in results]
+        kinds = {}  # A column's dtype follows its first value, as in streaming writes.
         for values in rows:
             for key, value in values.items():
                 if "/" in key or not key:
                     raise ValueError("Invalid spectrum metric name")
-                if key not in self.layers:
-                    self.layers.create_dataset(key, (0,), maxshape=(None,),
-                                               dtype=h5py.string_dtype() if isinstance(value, str) else "f8")
+                kinds.setdefault(key, h5py.string_dtype() if isinstance(value, str) else "f8")
         count = len(results)
-        for key, dataset in self.layers.items():
-            dataset.resize(count, axis=0)
-            if key == "longname":
-                dataset[:] = [name for name, _ in results]
-            else:
-                missing = "" if h5py.check_string_dtype(dataset.dtype) else np.nan
-                dataset[:] = [values.get(key, missing) for values in rows]
-        self.eigs.resize(count, axis=0)
+        self.layers.create_dataset("longname", (count,), dtype=h5py.string_dtype())[:] = [
+            name for name, _ in results]
+        for key, kind in kinds.items():
+            dataset = self.layers.create_dataset(key, (count,), dtype=kind)
+            missing = "" if h5py.check_string_dtype(dataset.dtype) else np.nan
+            dataset[:] = [values.get(key, missing) for values in rows]
+        self.eigs = self.handle.create_dataset("eigs", (count,), dtype=_EIGS_DTYPE)
         # h5py treats equal-length object arrays as a 2D broadcast, even for
         # a variable-length dataset. Keep its per-spectrum assignment path.
         for index, (_, result) in enumerate(results):
             self.eigs[index] = np.asarray(result["eigs"], dtype=np.float32)
 
     def close(self, publish=False):
+        if publish and self.eigs is None:
+            # A published file always has the two record datasets readers open.
+            self.layers.create_dataset("longname", (0,), dtype=h5py.string_dtype())
+            self.eigs = self.handle.create_dataset("eigs", (0,), dtype=_EIGS_DTYPE)
         self.handle.close()
         if publish:
             os.replace(self.temporary, self.path)
@@ -793,3 +811,81 @@ def load_fingerprint(path: Path) -> Fingerprint:
                  confidence=np.asarray(meta["delta_confidence"]))
     return Fingerprint(names, meta["geometry"], meta["component"], tensors["rows"], tensors["shape"],
                        tensors["sketch"], meta["sha256"], spectra, delta, meta["coverage"], meta, path)
+
+
+_VIEW_RECORD_FIELDS = ("names", "geometry", "component", "sha256", "delta_status", "delta_confidence")
+
+
+@dataclass
+class FingerprintViews:
+    """A fingerprint's per-view records without its sketches or spectra.
+
+    Database builds need view identities, shapes, block hashes, measured delta
+    scalars and coverage. Reading only these keeps build memory and I/O
+    proportional to the number of views instead of the evidence bytes.
+    """
+    names: list[str]
+    geometry: list[str]
+    component: list[str]
+    rows: np.ndarray
+    shape: np.ndarray
+    sha256: list[str]
+    delta: dict[str, np.ndarray]
+    meta: dict
+    path: Path
+    coverage_json: str
+
+    @property
+    def coverage(self) -> list[dict]:
+        """Parsed on request: only the fingerprint chosen for a model needs it."""
+        return json.loads(self.coverage_json)
+
+
+def load_fingerprint_views(path: Path) -> FingerprintViews:
+    """Read and validate a fingerprint's view records without its sketches or spectra.
+
+    `meta` holds identity and settings fields; per-view lists and coverage are
+    exposed through the dataclass fields instead. Structure is still checked
+    without reading values: required tensors are present, sketches and delta
+    vectors have one row per view, row-block spectrum offsets are consistent, and
+    a full-weight companion has one aligned eigenvalue record per listed name and
+    covers every view.
+    """
+    path = Path(path)
+    with safe_open(path, framework="numpy") as handle:
+        keys = set(handle.keys())
+        missing_tensors = {"rows", "shape", "sketch", "delta_scalars", "delta_top_sv"} - keys
+        if missing_tensors:
+            raise ValueError(f"Fingerprint lacks tensors {sorted(missing_tensors)}: {path}")
+        sketch_rows = handle.get_slice("sketch").get_shape()[0]
+        top_rows = handle.get_slice("delta_top_sv").get_shape()[0]
+        raw = handle.metadata()
+        rows, shape, scalars = (handle.get_tensor(key) for key in ("rows", "shape", "delta_scalars"))
+        has_offsets = {"spectrum_offsets", "spectrum_values"} <= keys
+        offsets = handle.get_tensor("spectrum_offsets") if has_offsets else None
+        value_count = handle.get_slice("spectrum_values").get_shape()[0] if has_offsets else None
+    records = {key: json.loads(raw[key]) for key in _VIEW_RECORD_FIELDS}
+    meta = normalize_fingerprint_metadata({
+        key: value if key in {"repo_id", "revision", "tier", "evidence_version"} else json.loads(value)
+        for key, value in raw.items() if key not in _VIEW_RECORD_FIELDS and key != "coverage"})
+    names = records["names"]
+    count = len(names)
+    if (any(len(records[key]) != count for key in _VIEW_RECORD_FIELDS)
+            or rows.shape != (count, 2) or shape.shape != (count, 2) or scalars.shape != (count, 3)
+            or sketch_rows != count or top_rows != count):
+        raise ValueError(f"Unaligned fingerprint view records: {path}")
+    if meta["tier"] == "full_weights":
+        with h5py.File(companion_spectra_path(path), "r") as handle:
+            longnames = handle["layers/longname"].asstr()[:]
+            if handle["eigs"].shape != (len(longnames),):
+                raise ValueError(f"Companion spectra records are not aligned: {path}")
+            missing = set(names) - set(longnames)
+        if missing:
+            raise ValueError(f"Companion spectra lack {len(missing)} fingerprint views: {path}")
+    elif (offsets is None or offsets.shape != (count + 1,) or offsets[0] != 0
+          or offsets[-1] != value_count or (np.diff(offsets) < 0).any()):
+        raise ValueError("Invalid spectrum offsets")
+    delta = {key: scalars[:, index] for index, key in enumerate(("frac_identical", "rel_update_norm", "rank"))}
+    delta.update(status=np.asarray(records["delta_status"]), confidence=np.asarray(records["delta_confidence"]))
+    return FingerprintViews(names, records["geometry"], records["component"], rows, shape,
+                            records["sha256"], delta, meta, path, raw["coverage"])

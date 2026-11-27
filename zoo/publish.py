@@ -77,6 +77,9 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
         source_capture = dict(status=snapshot["status"], schema_version=snapshot["schema_version"],
                               artifact=source_metadata.name)
     cfg, kind = None, "row_blocks_only"
+    # metrics/<safe>.h5 is the ESD record. Runs before HDF5-only output also
+    # have stats/<safe>.csv: it must agree with the HDF5 and is then packaged
+    # unchanged as esd/stats.csv; current runs and packages have no CSV.
     pairs = [(Path(run) / "stats" / f"{safe_filename(label)}.csv",
               Path(run) / "metrics" / f"{safe_filename(label)}.h5") for label in (key, repo)]
     if in_package:
@@ -87,7 +90,7 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
         pair = next(((csv, h5) for csv, h5 in pairs if artifact_compatibility(csv, h5)[0]), None)
         if pair is None or not spectra.is_file():
             return None
-        csv, h5 = pair
+        legacy_csv, h5 = pair
         with h5py.File(h5) as handle:
             cfg = json.loads(handle.attrs["measurement_config_json"])
         if cfg.get("repo_id") != repo or cfg.get("requested_revision") != revision:
@@ -96,7 +99,9 @@ def _candidate(run, manifest_path, *, in_package=False, summary_path=None):
             spectrum_cfg = json.loads(handle.attrs["measurement_config_json"])
         if conventions(cfg) != conventions(spectrum_cfg):
             return None
-        sources.update({marker.name: marker, spectra.name: spectra, "esd/stats.csv": csv, "esd/metrics.h5": h5})
+        sources.update({marker.name: marker, spectra.name: spectra, "esd/metrics.h5": h5})
+        if legacy_csv.is_file():
+            sources["esd/stats.csv"] = legacy_csv
     elif has_esd or spectra.exists() or list(folder.glob("*.staged")):
         return None
     tiers = ("row_blocks", "row_blocks_128", "row_blocks_512") if kind == "full" else ("row_blocks",)
@@ -207,6 +212,21 @@ def _matches(destination, metadata, hashes):
             and all(_hash_file(destination / name) == digest for name, digest in hashes.items()))
 
 
+def _inventory_difference(destination, hashes):
+    """Describe how a refused publication differs from the existing package's files."""
+    try:
+        existing = dict(json.loads((destination / "package.json").read_text()).get("files") or {})
+    except (OSError, ValueError, AttributeError, TypeError):
+        return "existing package.json is missing or unreadable"
+    only_existing = sorted(set(existing) - set(hashes))
+    only_new = sorted(set(hashes) - set(existing))
+    changed = sorted(name for name in set(existing) & set(hashes) if existing[name] != hashes[name])
+    parts = [f"{label}: {', '.join(names)}" for label, names in (
+        ("only in existing package", only_existing), ("only in this run", only_new),
+        ("different bytes", changed)) if names]
+    return "; ".join(parts) or "same files; recorded identity, kind or conventions differ"
+
+
 def package_complete(run_dir, model_id, packages_root, data_root):
     try:
         selected = _select_candidate(Path(run_dir), model_id)
@@ -233,7 +253,10 @@ def publish_package(run_dir: Path, model_id: str, packages_root: Path, data_root
         if destination.exists():
             if _matches(destination, metadata, hashes):
                 return destination
-            raise FileExistsError(f"Package already exists with different contents: {destination}")
+            # Never replace or edit a published package. This also covers an older
+            # package with esd/stats.csv meeting a current HDF5-only run.
+            raise FileExistsError(f"Package already exists with different contents: {destination} "
+                                  f"({_inventory_difference(destination, hashes)})")
         stage = Path(tempfile.mkdtemp(prefix=".publishing-", dir=parent))
         try:
             for name, path in sources.items():
@@ -303,7 +326,9 @@ def package_inputs(packages, selected=None):
         safe = safe_filename(meta["model_key"])
         required = {safe + ".manifest.json", safe + ".row_blocks.fingerprint.safetensors"}
         if meta.get("kind") == "full":
-            required.update({safe + ".full_weights.fingerprint.safetensors", safe + ".full_weights.spectra.h5", safe + ".row_blocks_128.fingerprint.safetensors", safe + ".row_blocks_512.fingerprint.safetensors", "esd/stats.csv", "esd/metrics.h5"})
+            # esd/metrics.h5 is the per-layer record. Older full packages also
+            # list esd/stats.csv; it stays in their verified inventory below.
+            required.update({safe + ".full_weights.fingerprint.safetensors", safe + ".full_weights.spectra.h5", safe + ".row_blocks_128.fingerprint.safetensors", safe + ".row_blocks_512.fingerprint.safetensors", "esd/metrics.h5"})
         elif meta.get("kind") != "row_blocks_only":
             raise ValueError("Unknown model package kind")
         historical = meta["conventions"].get("evidence_version") != EVIDENCE_VERSION

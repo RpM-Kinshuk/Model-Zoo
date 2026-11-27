@@ -54,11 +54,12 @@ def _value(value):
 
 def _record(target, benchmark, value, source, source_revision, skill=None,
             metric="score", harness=None, n_items=None):
+    text = lambda item: None if item == "" else item  # Missing text is null.
     return dict(model_key=target["model_key"], repo_id=target["repo_id"],
-                benchmark=benchmark, skill=skill, value=value, metric=metric,
-                source=source, source_revision=source_revision,
+                benchmark=text(benchmark), skill=text(skill), value=value, metric=text(metric),
+                source=text(source), source_revision=text(source_revision),
                 revision_verified=bool(source_revision and source_revision == target["revision"]),
-                harness=harness, n_items=n_items)
+                harness=text(harness), n_items=n_items)
 
 
 def _table(records):
@@ -114,9 +115,20 @@ def _item_count(value):
         raise ValueError("n_items must be a finite nonnegative int64 integer or empty") from error
 
 
-def _canonical_scores(records):
+def _canonical_scores(records, *, empty_text_as_null=True):
+    """Score identities for retention; an empty string and null both mean missing.
+
+    Zoo version 3 writes missing text as null. Older generations and retained
+    source bindings may hold "" for the same score, which must stay one identity.
+    """
+    if empty_text_as_null:
+        records = ({key: None if value == "" else value for key, value in row.items()} for row in records)
     return Counter(json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
                    for row in records)
+
+
+def _table_identity(records, **options):
+    return hashlib.sha256(json.dumps(sorted(_canonical_scores(records, **options).items())).encode()).hexdigest()
 
 
 def score_source_paths(tables):
@@ -167,15 +179,23 @@ def write_score_sources(directory, tables, start_index=0, roles=None):
                     raise ValueError("Immutable score snapshot hash mismatch")
                 try:
                     os.link(immutable, destination)
+                except FileExistsError:
+                    raise
                 except OSError:
-                    destination.write_bytes(raw)
+                    _write_new(destination, raw)
             else:
-                destination.write_bytes(raw)
+                _write_new(destination, raw)
         elif "score_source_unavailable" in table.attrs:
             descriptor.update(table.attrs["score_source_unavailable"])
         descriptor["role"] = roles[offset] if roles is not None else descriptor.get("role", "imported_scores")
-        (directory / f"score-sources/{index}.json").write_text(
-            json.dumps(descriptor, sort_keys=True, indent=2, allow_nan=False) + "\n")
+        _write_new(directory / f"score-sources/{index}.json",
+                   (json.dumps(descriptor, sort_keys=True, indent=2, allow_nan=False) + "\n").encode())
+
+
+def _write_new(path, data):
+    """Create a new generation file; an existing name may be a link to an older generation."""
+    with open(path, "xb") as handle:
+        handle.write(data)
 
 
 def prepare_score_inputs(models, explicit_tables, prior=None, config=None, card_paths=()):
@@ -190,7 +210,7 @@ def prepare_score_inputs(models, explicit_tables, prior=None, config=None, card_
     if prior is not None:
         previous = pq.read_table(prior / "scores.parquet").to_pylist()
         previous = [r for r in previous if r["model_key"] in selected]
-        old_keys = {r["model_key"] for r in pq.read_table(prior / "models.parquet").to_pylist()}
+        old_keys = set(pq.read_table(prior / "models.parquet", columns=["model_key"]).column("model_key").to_pylist())
         for path in sorted((prior / "score-sources").glob("*.json"), key=lambda p:int(p.stem)):
             descriptor = json.loads(path.read_text())
             if descriptor.get("snapshot") is None:
@@ -234,7 +254,7 @@ def prepare_score_inputs(models, explicit_tables, prior=None, config=None, card_
     if unknown:
         records = [json.loads(row) for row in unknown.elements()]
         table = _table(records)
-        identity = hashlib.sha256(json.dumps(sorted(_canonical_scores(records).items())).encode()).hexdigest()
+        identity = _table_identity(records)
         table.attrs["score_source_unavailable"] = dict(table_id=identity, scores=records)
         contexts.append(table)
 
@@ -243,8 +263,13 @@ def prepare_score_inputs(models, explicit_tables, prior=None, config=None, card_
         context = table.attrs.get("score_source")
         records = _arrow("scores", table).to_pylist()
         if context is None:
-            identity = hashlib.sha256(json.dumps(sorted(_canonical_scores(records).items())).encode()).hexdigest()
-            if any(t.attrs.get("score_source_unavailable", {}).get("table_id") == identity for t in contexts):
+            identity = _table_identity(records)
+            # Match retained tables by content, not only their stored id: a zoo
+            # version <=2 build hashed the same scores with "" where v3 has null.
+            retained = [t.attrs["score_source_unavailable"] for t in contexts
+                        if "score_source_unavailable" in t.attrs]
+            if any(identity == item.get("table_id") or identity == _table_identity(item.get("scores") or [])
+                   for item in retained):
                 return
             table.attrs["score_source_unavailable"] = dict(table_id=identity, scores=records)
             previous.extend(records)

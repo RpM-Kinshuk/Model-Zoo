@@ -640,3 +640,49 @@ def test_full_weights_prefetch_budget_includes_parent_blocks(local_manifest, tmp
     # q_proj's stored child (65536 bytes) alone fits; child + parent does not.
     assert len(calls) == 2
     assert all(not name.startswith("fingerprint-loader") for name in calls)
+
+
+@pytest.mark.parametrize("tier", ["row_blocks", "full_weights"])
+def test_view_records_match_full_loader_without_sketches(local_manifest, tmp_path, tier):
+    from evidence.fingerprint import load_fingerprint_views
+    path = fingerprint_model(local_manifest, HubReader(), tier, tmp_path, parent=local_manifest)
+    full, views = load_fingerprint(path), load_fingerprint_views(path)
+    assert (views.names, views.geometry, views.component, views.sha256) == (
+        full.names, full.geometry, full.component, full.sha256)
+    np.testing.assert_array_equal(views.rows, full.rows)
+    np.testing.assert_array_equal(views.shape, full.shape)
+    for key in ("frac_identical", "rel_update_norm", "rank", "status", "confidence"):
+        np.testing.assert_array_equal(views.delta[key], full.delta[key])
+    assert set(views.delta["status"]) == ({"identical"} if tier == "row_blocks" else {"not_computed"})
+    assert views.coverage == full.coverage
+    assert views.meta["tier"] == tier and views.meta["repo_id"] == full.meta["repo_id"]
+    assert not {"names", "coverage", "sha256"} & set(views.meta)
+
+
+def test_view_records_reject_full_weight_views_missing_from_spectra(local_manifest, tmp_path):
+    from evidence.compatibility import companion_spectra_path
+    from evidence.fingerprint import load_fingerprint_views
+    path = fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path)
+    with h5py.File(companion_spectra_path(path), "r+") as handle:
+        handle["layers/longname"][0] = "renamed.weight"
+    with pytest.raises(ValueError, match="Companion spectra lack"):
+        load_fingerprint_views(path)
+
+
+def test_published_empty_spectra_file_keeps_record_datasets(tmp_path):
+    from evidence.fingerprint import _Spectra
+    writer = _Spectra(tmp_path / "empty.h5", torch.device("cpu"))
+    writer.add_results([])
+    writer.close(publish=True)
+    with h5py.File(tmp_path / "empty.h5") as handle:
+        assert handle["layers/longname"].shape == (0,) and handle["eigs"].shape == (0,)
+
+
+def test_view_records_reject_misaligned_companion_eigenvalues(local_manifest, tmp_path):
+    from evidence.compatibility import companion_spectra_path
+    from evidence.fingerprint import load_fingerprint_views
+    path = fingerprint_model(local_manifest, HubReader(), "full_weights", tmp_path)
+    with h5py.File(companion_spectra_path(path), "r+") as handle:
+        handle["eigs"].resize(len(handle["eigs"]) - 1, axis=0)  # Streaming writes are resizable.
+    with pytest.raises(ValueError, match="not aligned"):
+        load_fingerprint_views(path)

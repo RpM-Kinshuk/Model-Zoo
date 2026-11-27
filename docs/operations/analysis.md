@@ -137,15 +137,18 @@ default. Gram jitter/fallback is not recorded per layer.
 
 ## Outputs and resume
 
-Each successful model writes `stats/*.csv` and matching `metrics/*.h5`:
+Each successful model writes one `metrics/<model>.h5`, its only per-layer record.
+Runs made before HDF5-only output also wrote `stats/<model>.csv`, a copy of the
+`/layers` scalars; those CSVs remain readable and must still match their HDF5.
 
 - `/layers/longname` is the canonical identity; every scalar metric is aligned
   with it. `/layers/module_name` identifies the original module and
   `/layers/weight_attribute` its stored weight. `/layers/slice` is empty for
   whole-weight measurements. Arbitrary names and missing fits remain present.
 - `/eigs[i]` is the full spectrum for `/layers/longname[i]`, unless saving was
-  disabled. Float32/float64 spectra retain their computed dtype. CSV contains
-  scalars, not duplicated eigenvalue strings.
+  disabled. Float32/float64 spectra retain their computed dtype.
+- File attributes record the model identity: `full_name`, `is_adapter`,
+  `source_model` and `base_model_relation`.
 - `/coverage` records analyzed/skipped status and reasons. Its `modules` table
   has one entry per candidate weight (or an unsupported attribute group), so
   `module_name` can repeat. Counts group these entries by physical module; a
@@ -178,23 +181,25 @@ controls follow the [evidence guide](evidence.md). Without a token, manifests
 come from local downloads and parent deltas use cached blocks when available;
 otherwise those deltas report `parent_unavailable`.
 
-The ESD CSV/H5 pair is saved before waiting for evidence, including during
-supervisor termination. A retry with a compatible pair skips the estimator and
-finishes evidence using saved HDF5 spectra. Scalar-only pairs can recover by
-measuring the missing spectra in the second round. Completion checks the full tensor
-fingerprint marker and measurement/evidence settings; stale evidence is rebuilt without
-rewriting the compatible ESD pair. Superseded evidence is restored if rebuilding
-fails. The worker handles SIGTERM through its normal interruption cleanup.
+The ESD HDF5 record is saved (written to a hidden temporary file, then renamed)
+before waiting for evidence, including during supervisor termination. A retry with
+a compatible record skips the estimator and finishes evidence using saved HDF5
+spectra. Scalar-only records can recover by measuring the missing spectra in the
+second round. Completion checks the full tensor fingerprint marker and
+measurement/evidence settings; stale evidence is rebuilt without rewriting the
+compatible ESD record. Superseded evidence is restored if rebuilding fails. The
+worker handles SIGTERM through its normal interruption cleanup.
 
-`--no-evidence` retains the previous CSV/H5-only behavior. Explicit checkpoint
+`--no-evidence` writes only the ESD HDF5 record. Explicit checkpoint
 mode disables evidence with a notice; automatic checkpoint fallback records
 `evidence: skipped_checkpoint_fallback`. Model-package publishing is a later step.
 
 ### Query models and read a named spectrum
 
 Refresh a run's index with `python esd_experiment/analyze_results.py --results_dir
-<run_directory>` after collection or a retry. It checks the saved pairs without
-reading spectra. Then use pandas for model selection and h5py for a chosen layer.
+<run_directory>` after collection or a retry. It checks the saved HDF5 records
+(and any legacy CSV) without reading spectra. Then use pandas for model
+selection and h5py for a chosen layer.
 This example uses the collected encoder/vision slice:
 
 ```python
@@ -217,7 +222,7 @@ with h5py.File(row.h5_path, "r") as h5:
 
 The index also exposes `input_config_model_type`, `model_class`, pins and
 measurement settings. Rebuild a collection-wide index directly from the original
-pairs, selected manifests and terminal records, without copying spectra:
+HDF5 records, selected manifests and terminal records, without copying spectra:
 
 ```bash
 python esd_experiment/analyze_results.py \
@@ -226,7 +231,7 @@ python esd_experiment/analyze_results.py \
 
 The multi-run output must be outside the supplied run directories. Every row
 keeps `run_dir`; repeated model IDs, revisions and failed attempts remain separate.
-Invalid inputs leave the previous index unchanged; invalid artifact pairs remain
+Invalid inputs leave the previous index unchanged; invalid artifacts remain
 visible and give a nonzero exit status. The index does not read eigenvalues or
 depend on older `summary.csv` files. Query it with ordinary pandas:
 
@@ -239,17 +244,19 @@ Do not deduplicate by model ID: retries, different revisions and measurement
 settings are not interchangeable. Filter valid results for measurement queries;
 retain failed rows for collection coverage. `input_candidate_source` distinguishes
 curated rows from explicit coverage extensions. Indexes are rebuildable, not
-completion evidence; the CSV/HDF5 pairs remain authoritative. Complete coverage
+completion evidence; the HDF5 records remain authoritative. Complete coverage
 and finite fits alone do not establish scientific validity.
 
 Current output versions are numerics **7**, loader **10**, HDF5 format **2.0**.
 Layer selection **4** adds otherwise unhandled registered parameter matrices,
 after Swin tables in **3** and ViT tables in **2**, without changing spectral formulas.
-Earlier numerics-7/loader-10 pairs without this field remain readable as selection
+Earlier numerics-7/loader-10 outputs without this field remain readable as selection
 **1**, but do not resume under current selection settings. Keep this convention
 when comparing summaries; use a fresh run directory rather than rewriting history.
-Resume requires a compatible CSV/HDF5 pair: versions, canonical identities,
-aligned alpha values and requested measurement settings must match. Changing
+Resume requires a compatible HDF5 record: versions, aligned canonical identities
+and requested measurement settings must match. A legacy CSV beside it must also
+match its layer identities, order, model identity and alpha values; a CSV without
+its HDF5 is never complete. Changing
 spectrum storage, precision, filtering or model revisions requires new outputs.
 Runtime hardware differences are provenance, not a CPU/GPU equivalence claim.
 
@@ -274,29 +281,31 @@ python esd_experiment/analyze_results.py \
   --results_dir analysis_runs/phase2/my_run
 ```
 
-This rebuilds `summary.csv` from `models.csv`, artifact pairs and
-`logs/terminal_status/*.json`. Use `--model_list path/to/pinned.csv` if your
-selected list lives elsewhere. Every selected model gets a row, even without
+This rebuilds `summary.csv` from `models.csv`, `metrics/*.h5` (with any legacy
+`stats/*.csv`) and `logs/terminal_status/*.json`. Use
+`--model_list path/to/pinned.csv` if your selected list lives elsewhere. Every selected model gets a row, even without
 outputs; extra stored models remain visible with `selected=False`. Original
 metadata is preserved as `input_*` columns for family/coverage queries.
 
 | `outcome` | Evidence |
 |---|---|
-| `success` | Valid CSV/HDF5 pair, matching the selected model/base pins when a list is supplied. Overrides stale failure records. |
+| `success` | Valid HDF5 record (and matching legacy CSV, if present), matching the selected model/base pins when a list is supplied. Overrides stale failure records. |
 | `failed` | Last terminal record reports a worker failure. |
 | `blocked` | Recorded preflight block, or a preparation `pin_status=error` row. |
-| `incomplete` | Invalid/incompatible pair, or a success record without artifacts. |
+| `incomplete` | Invalid/incompatible HDF5 record or legacy CSV, or a success record without artifacts. |
 | `unrecorded` | No usable outcome for this selection; may be queued, running or never launched. |
 
 `outcome_reason`, `outcome_stage`, `outcome_message` and artifact/terminal paths
-explain the row. `outcome_pin_status=unknown` means the terminal record does not
+explain the row; `csv_path` is empty unless a legacy CSV exists. The reasons
+`valid_artifact_pair`/`invalid_artifact_pair` keep their established names for
+HDF5-only records. `outcome_pin_status=unknown` means the terminal record does not
 establish the selected checkpoint/base revisions; existing worker failure records
 have this limitation. A known terminal-pin mismatch stays `unrecorded`, not a
 failure of the selected checkpoint. New preflight blocks record both pins in the
 existing terminal directory; the reader never reruns environment-dependent checks.
 This is a snapshot of persisted evidence, not a live monitor or attempt history.
 
-Valid pairs retain measurement settings, fitted/missing measurement counts,
+Valid records retain measurement settings, fitted/missing measurement counts,
 module coverage, loaded-tensor usage counts and scalar summaries. The reader
 validates artifacts and reads canonical `/layers` one model at a time; it does
 not load eigenvalues or use the derived `/alpha` view. Measurement counts are
@@ -311,9 +320,9 @@ vectors do not count as gaps. Missing inventories stay unknown. This is coverage
 within the recorded model/checkpoint scope, not proof of architecture support or
 scientific validity. Partial/unknown rows keep their scalar values but are
 excluded from the console's pooled alpha statistic. `outcome=success` still
-means a valid artifact pair, so filter on both fields when selecting results.
+means a valid artifact, so filter on both fields when selecting results.
 
-Incomplete or incompatible pairs remain as `artifact_status=invalid` rows with
+Incomplete or incompatible artifacts remain as `artifact_status=invalid` rows with
 an `artifact_error`. Incomplete outputs or malformed terminal records make the
 command exit nonzero; ordinary recorded failures/blocks do not mean indexing
 failed. Missing coverage is
@@ -464,7 +473,7 @@ become eligible regardless of their attribute names, and the legacy Linear
 aspect-ratio skip is disabled. Declared module layouts and identities are handled
 first. A second pass inventories otherwise unhandled registered parameters,
 preserving exact names such as `custom.kernel` and recording
-`weight_layout=parameter_matrix` in CSV/HDF5. These are stored-parameter matrix
+`weight_layout=parameter_matrix` in HDF5. These are stored-parameter matrix
 descriptors, not inferred operators or invented QKV splits. It does not select
 arbitrary buffers, reshape higher-dimensional tensors, unpack quantized weights,
 measure adapter factors or treat parametrization internals as extra model weights.
@@ -548,7 +557,7 @@ reshaped or assumed to be convolution kernels. Unknown packing cannot be ruled
 out from dtype alone: these are **stored-matrix descriptors**, not a claim about
 effective model weights or universal model support.
 
-The same numerical core, CSV/HDF5 writer and dispatcher are used. Input tensors
+The same numerical core, HDF5 writer and dispatcher are used. Input tensors
 are read one at a time on one device per worker (`auto` selects the first assigned
 GPU, otherwise CPU). Direct checkpoint mode requires one GPU per job. Automatic
 fallback uses the first assigned device even if the model requested several;
@@ -757,7 +766,7 @@ Use the ordinary workflow: **prepare → review → run → index → query**.
 - The existing supervisor handles idle-GPU checks, one worker by default, sampled
   RAM/cache caps, stage/heartbeat timeouts, signals, cleanup and compatible resume.
   Cleanup must be confirmed before reusing resources; shared caches stay untouched.
-- The CSV index is rebuildable across runs. Original CSV/HDF5 pairs remain
+- The CSV index is rebuildable across runs. Original HDF5 records remain
   authoritative; spectra are read by exact name, one layer at a time.
   No database service, extra observer or separate cache manager is required.
 
@@ -771,7 +780,8 @@ availability checks even when optimizing overhead.
 Implementation controls and historical checks live in
 `analysis_runs/validation/`; collected measurements live in
 `analysis_runs/phase2/`. Keep manifests, outcome/cleanup reports, coverage and saved
-pairs; obsolete one-off observers and raw polling samples need not accumulate.
+HDF5 records (with any legacy CSVs); obsolete one-off observers and raw polling
+samples need not accumulate.
 Use the collection catalog to inspect current outcomes
 instead of maintaining a second narrative tally here.
 
